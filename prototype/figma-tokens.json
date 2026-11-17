@@ -1,0 +1,100 @@
+{
+  "$description": "Noon ERP Design Tokens v1.0 — W3C Design Tokens format. Import with Figma Tokens plugin. Mirrors docs/noon-erp-prototype-design-v1.0.md section 3.",
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "color": {
+    "bg": {
+      "app": { "$type": "color", "$value": "#F5F7FA" },
+      "surface": { "$type": "color", "$value": "#FFFFFF" },
+      "subtle": { "$type": "color", "$value": "#F8FAFC" },
+      "sidebar": { "$type": "color", "$value": "#111A2E" }
+    },
+    "border": {
+      "default": { "$type": "color", "$value": "#E4E8EF" },
+      "strong": { "$type": "color", "$value": "#CBD3E0" }
+    },
+    "text": {
+      "primary": { "$type": "color", "$value": "#1D2433" },
+      "secondary": { "$type": "color", "$value": "#5A6478" },
+      "muted": { "$type": "color", "$value": "#8B95A7" },
+      "inverse": { "$type": "color", "$value": "#FFFFFF" }
+    },
+    "brand": {
+      "primary": { "$type": "color", "$value": "#2B5CE6" },
+      "primary-weak": { "$type": "color", "$value": "#EEF3FF" },
+      "accent": { "$type": "color", "$value": "#FFC72C" }
+    },
+    "semantic": {
+      "danger": { "$type": "color", "$value": "#E5484D" },
+      "warning": { "$type": "color", "$value": "#F5A524" },
+      "success": { "$type": "color", "$value": "#16A34A" },
+      "info": { "$type": "color", "$value": "#2B5CE6" }
+    },
+    "data": {
+      "up": { "$type": "color", "$value": "#D93025", "$description": "涨/正向 = 红（中国区习惯）" },
+      "down": { "$type": "color", "$value": "#0F9D58", "$description": "跌/负向 = 绿（中国区习惯）" }
+    },
+    "tag": {
+      "api-bg": { "$type": "color", "$value": "#EEF3FF" },
+      "api-fg": { "$type": "color", "$value": "#2B5CE6" },
+      "csv-bg": { "$type": "color", "$value": "#F1F5F9" },
+      "csv-fg": { "$type": "color", "$value": "#5A6478" },
+      "webhook-bg": { "$type": "color", "$value": "#F3EDFF" },
+      "webhook-fg": { "$type": "color", "$value": "#7C4DFF" },
+      "manual-bg": { "$type": "color", "$value": "#FFF6E5" },
+      "manual-fg": { "$type": "color", "$value": "#B26B00" }
+    }
+  },
+  "typography": {
+    "fontFamily": {
+      "sans": { "$type": "fontFamily", "$value": "Inter" },
+      "fallbackCJK": { "$type": "fontFamily", "$value": "PingFang SC" },
+      "arabic": { "$type": "fontFamily", "$value": "Noto Sans Arabic" },
+      "mono": { "$type": "fontFamily", "$value": "JetBrains Mono" }
+    },
+    "display-24": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "24px", "fontWeight": 600, "lineHeight": "32px" } },
+    "title-18": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "18px", "fontWeight": 600, "lineHeight": "26px" } },
+    "body-14": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "14px", "fontWeight": 400, "lineHeight": "22px" } },
+    "body-14-semibold": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "14px", "fontWeight": 600, "lineHeight": "22px" } },
+    "caption-12": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "12px", "fontWeight": 400, "lineHeight": "18px" } },
+    "numeric-20": { "$type": "typography", "$value": { "fontFamily": "Inter", "fontSize": "20px", "fontWeight": 600, "lineHeight": "28px" } },
+    "code-12": { "$type": "typography", "$value": { "fontFamily": "JetBrains Mono", "fontSize": "12px", "fontWeight": 400, "lineHeight": "18px" } }
+  },
+  "space": {
+    "1": { "$type": "dimension", "$value": "4px" },
+    "2": { "$type": "dimension", "$value": "8px" },
+    "3": { "$type": "dimension", "$value": "12px" },
+    "4": { "$type": "dimension", "$value": "16px" },
+    "5": { "$type": "dimension", "$value": "24px" },
+    "6": { "$type": "dimension", "$value": "32px" },
+    "7": { "$type": "dimension", "$value": "48px" },
+    "8": { "$type": "dimension", "$value": "64px" }
+  },
+  "radius": {
+    "sm": { "$type": "dimension", "$value": "4px" },
+    "md": { "$type": "dimension", "$value": "8px" },
+    "lg": { "$type": "dimension", "$value": "12px" }
+  },
+  "shadow": {
+    "elevation-1": { "$type": "shadow", "$value": "0 1px 2px rgba(17,26,46,0.06)" },
+    "elevation-2": { "$type": "shadow", "$value": "0 8px 24px rgba(17,26,46,0.12)" }
+  },
+  "size": {
+    "frame-width": { "$type": "dimension", "$value": "1440px" },
+    "frame-height": { "$type": "dimension", "$value": "900px" },
+    "sidebar": { "$type": "dimension", "$value": "224px" },
+    "sidebar-collapsed": { "$type": "dimension", "$value": "56px" },
+    "topbar-height": { "$type": "dimension", "$value": "56px" },
+    "drawer-width": { "$type": "dimension", "$value": "480px" },
+    "table-row-height": { "$type": "dimension", "$value": "48px" },
+    "table-header-height": { "$type": "dimension", "$value": "40px" },
+    "button-height": { "$type": "dimension", "$value": "32px" },
+    "content-padding": { "$type": "dimension", "$value": "24px" }
+  },
+  "zIndex": {
+    "sticky": 10,
+    "sidebar": 20,
+    "drawer": 40,
+    "toast": 60,
+    "modal": 80
+  }
+}

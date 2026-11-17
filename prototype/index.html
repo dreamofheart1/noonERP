@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Noon ERP · 系统原型 v1.0（PRD v1.0.2 基线）</title>
+<style>
+:root{
+  --bg:#F5F7FA; --surface:#FFFFFF; --subtle:#F8FAFC; --sidebar:#111A2E;
+  --border:#E4E8EF; --border-strong:#CBD3E0;
+  --t1:#1D2433; --t2:#5A6478; --t3:#8B95A7; --inv:#FFFFFF;
+  --primary:#2B5CE6; --primary-weak:#EEF3FF; --accent:#FFC72C;
+  --danger:#E5484D; --warning:#F5A524; --success:#16A34A; --info:#2B5CE6;
+  --up:#D93025; --down:#0F9D58;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
+  --r-sm:4px; --r-md:8px; --r-lg:12px;
+  --sh1:0 1px 2px rgba(17,26,46,.06); --sh2:0 8px 24px rgba(17,26,46,.12);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:14px;line-height:22px;color:var(--t1);background:var(--bg);
+  -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums;
+}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+a{color:var(--primary);text-decoration:none}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#D6DCE6;border-radius:8px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ============ AppShell ============ */
+#app{display:flex;height:100vh;overflow:hidden}
+#sidebar{width:224px;flex:0 0 224px;background:var(--sidebar);color:var(--inv);display:flex;flex-direction:column;transition:width .18s ease,flex-basis .18s ease;z-index:20}
+#sidebar.collapsed{width:56px;flex-basis:56px}
+.brand{height:56px;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid rgba(255,255,255,.09);flex:0 0 56px}
+.brand-mark{width:28px;height:28px;flex:0 0 28px;border-radius:7px;background:var(--accent);color:#111A2E;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;letter-spacing:-1px}
+.brand-txt{font-size:15px;font-weight:700;letter-spacing:.2px;white-space:nowrap}
+.brand-sub{font-size:11px;color:#8FA0BE;font-weight:400;display:block;line-height:12px}
+#sidebar.collapsed .brand-txt,#sidebar.collapsed .group-label,#sidebar.collapsed .nav-text,#sidebar.collapsed .nav-caret,#sidebar.collapsed .nav-badge{display:none}
+#sidebar.collapsed .nav-item{justify-content:center;padding:9px 0}
+#nav{flex:1;overflow-y:auto;padding:10px 8px 24px}
+#nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16)}
+.group{margin-bottom:2px}
+.group-label{font-size:11px;color:#7285A6;padding:12px 10px 5px;letter-spacing:.6px;font-weight:600}
+.nav-item{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border-radius:6px;color:#B8C4D8;font-size:13px;text-align:left;position:relative;white-space:nowrap}
+.nav-item:hover{background:rgba(255,255,255,.07);color:#fff}
+.nav-item.active{background:var(--primary);color:#fff;font-weight:600}
+.nav-item.active::before{content:"";position:absolute;left:-8px;top:6px;bottom:6px;width:3px;background:var(--accent);border-radius:0 3px 3px 0}
+.nav-ico{width:20px;height:20px;flex:0 0 20px;border-radius:5px;background:rgba(255,255,255,.10);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;letter-spacing:-.3px}
+.nav-item.active .nav-ico{background:rgba(255,255,255,.22)}
+.nav-text{flex:1;overflow:hidden;text-overflow:ellipsis}
+.nav-caret{font-size:10px;opacity:.6}
+.nav-badge{font-size:10px;background:var(--danger);color:#fff;border-radius:9px;padding:0 5px;line-height:16px}
+.side-foot{padding:10px 14px;border-top:1px solid rgba(255,255,255,.09);font-size:11px;color:#7285A6;white-space:nowrap}
+#sidebar.collapsed .side-foot{display:none}
+
+#main{flex:1;min-width:0;display:flex;flex-direction:column}
+#topbar{height:56px;flex:0 0 56px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;padding:0 24px;position:sticky;top:0;z-index:10}
+.crumb{font-size:12px;color:var(--t3);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crumb b{color:var(--t2);font-weight:600}
+.top-search{display:flex;align-items:center;gap:7px;background:var(--subtle);border:1px solid var(--border);border-radius:var(--r-md);padding:5px 10px;width:224px;color:var(--t3);font-size:12px}
+.top-search input{border:0;background:transparent;outline:none;width:100%;font-size:12px}
+.seg{display:flex;background:var(--subtle);border:1px solid var(--border);border-radius:var(--r-md);padding:2px;gap:2px}
+.seg button{padding:4px 10px;font-size:12px;border-radius:5px;color:var(--t2);white-space:nowrap}
+.seg button.on{background:var(--primary);color:#fff;font-weight:600}
+.seg.plain button.on{background:var(--surface);color:var(--primary);box-shadow:var(--sh1)}
+.top-select{border:1px solid var(--border);background:var(--surface);border-radius:var(--r-md);padding:5px 8px;font-size:12px;outline:none}
+.proto-tag{font-size:10px;letter-spacing:.5px;color:#7A5B00;background:#FFF4CC;border:1px solid #F5DFA0;padding:3px 7px;border-radius:5px;white-space:nowrap;font-weight:600}
+.avatar{width:28px;height:28px;border-radius:50%;background:var(--primary-weak);color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+
+#content{flex:1;overflow-y:auto;padding:24px;scroll-behavior:smooth}
+.wrap{max-width:1400px;margin:0 auto}
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}
+.page-head>div:first-child{min-width:0;flex:1}
+.page-head h1{font-size:24px;line-height:32px;font-weight:600;letter-spacing:-.3px}
+.page-desc{font-size:12px;color:var(--t3);margin-top:3px;max-width:820px;line-height:18px}
+.page-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end;flex:none;padding-top:4px}
+.page-actions .btn{white-space:nowrap}
+.no-act{font-size:11px;line-height:1.6;color:var(--t3);max-width:340px;text-align:right;padding-top:6px}
+.page-actions .no-act{flex:0 0 100%;max-width:none;padding-top:0}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.fr-chip{display:inline-block;font-size:11px;color:var(--primary);background:var(--primary-weak);border-radius:4px;padding:1px 6px;margin-right:6px;font-weight:600;vertical-align:2px}
+
+/* ============ Components ============ */
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 13px;border-radius:var(--r-md);font-size:13px;font-weight:500;border:1px solid var(--border);background:var(--surface);color:var(--t1);white-space:nowrap;transition:.14s}
+.btn:hover{border-color:var(--border-strong);background:var(--subtle)}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn.primary:hover{background:#1E4BD0}
+.btn.danger{color:var(--danger);border-color:#F5C7C9}
+.btn.danger:hover{background:#FEF1F1}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--primary)}
+.btn.ghost:hover{background:var(--primary-weak)}
+.btn.sm{height:26px;padding:0 9px;font-size:12px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--sh1)}
+.card-h{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-bottom:1px solid var(--border)}
+.card-h h3{font-size:14px;font-weight:600}
+.card-h .sub{font-size:11px;color:var(--t3);font-weight:400;margin-left:8px}
+.card-b{padding:16px}
+.block{margin-bottom:16px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px;box-shadow:var(--sh1);cursor:pointer;transition:.15s;position:relative;overflow:hidden}
+.kpi:hover{border-color:var(--primary);transform:translateY(-1px);box-shadow:var(--sh2)}
+.kpi .lab{font-size:12px;color:var(--t2);display:flex;align-items:center;gap:6px}
+.kpi .num{font-size:26px;line-height:34px;font-weight:650;letter-spacing:-.6px;margin:8px 0 4px}
+.kpi .foot{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .delta.up{color:var(--up)} .kpi .delta.down{color:var(--down)}
+.kpi.warn{border-left:3px solid var(--warning)} .kpi.danger{border-left:3px solid var(--danger)}
+.kpi .corner{position:absolute;right:12px;top:12px;font-size:11px;color:var(--t3)}
+
+.alert{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:var(--r-md);font-size:12px;line-height:19px;margin-bottom:16px;border:1px solid}
+.alert .ico{font-weight:800;font-size:13px;line-height:18px;flex:0 0 16px;text-align:center}
+.alert.info{background:#F0F5FF;border-color:#CFE0FF;color:#1D4BA8}
+.alert.warning{background:#FFF8E8;border-color:#F7DFAC;color:#8A5A00}
+.alert.danger{background:#FEF1F1;border-color:#F6CCCE;color:#A82A2E}
+.alert.success{background:#EFFAF3;border-color:#C6EBD5;color:#137A3C}
+.alert b{font-weight:700}
+.alert .spacer{flex:1}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{height:40px;background:var(--subtle);color:var(--t2);font-size:12px;font-weight:600;text-align:left;padding:0 12px;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:0;z-index:1}
+td{height:48px;padding:0 12px;border-bottom:1px solid #EFF2F6;color:var(--t1);vertical-align:middle}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:#F7FAFF}
+tbody tr.danger-row{background:#FFF7F7}
+tbody tr.danger-row:hover{background:#FEF0F0}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--t2)}
+td.date{font-size:12px;color:var(--t2);white-space:nowrap}
+td.muted{color:var(--t3);font-size:12px}
+.rtl{direction:rtl;text-align:right;font-family:"Noto Sans Arabic",Tahoma,sans-serif;unicode-bidi:isolate;display:inline-block;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.tbl-scroll{overflow-x:auto}
+.tag{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;white-space:nowrap;line-height:18px}
+.tag.gray{background:#F1F5F9;color:#5A6478}
+.tag.blue{background:#EEF3FF;color:#2B5CE6}
+.tag.green{background:#EAF7EF;color:#148141}
+.tag.red{background:#FDECEC;color:#C43539}
+.tag.orange{background:#FFF4E2;color:#B26B00}
+.tag.purple{background:#F3EDFF;color:#6C3BD1}
+.tag.yellow{background:#FFF6D6;color:#8A6500}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px}
+.countdown{font-weight:700;font-variant-numeric:tabular-nums}
+.countdown.hot{color:var(--danger)} .countdown.ok{color:var(--t2)}
+.tbl-foot{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;font-size:12px;color:var(--t3);border-top:1px solid var(--border)}
+.tbl-foot .pages{display:flex;gap:4px}
+.tbl-foot .pages button{border:1px solid var(--border);border-radius:5px;padding:2px 8px;font-size:12px;color:var(--t2)}
+.tbl-foot .pages button.on{background:var(--primary);color:#fff;border-color:var(--primary)}
+.filterbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface)}
+.filterbar select,.filterbar input{border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:12px;background:var(--surface);outline:none;height:30px}
+.filterbar input{width:180px}
+.filterbar .spacer{flex:1}
+.filter-hint{font-size:11px;color:var(--primary);background:var(--primary-weak);padding:3px 8px;border-radius:4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.mini-kv{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:12px}
+.mini-kv dt{color:var(--t3);white-space:nowrap}
+.mini-kv dd{color:var(--t1);font-weight:500;word-break:break-all}
+.note{font-size:12px;color:var(--t2);line-height:19px;background:var(--subtle);border-left:3px solid var(--border-strong);padding:10px 12px;border-radius:0 6px 6px 0;margin-top:12px}
+.note b{color:var(--t1)}
+.code-block{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:17px;background:#0F1729;color:#C6D4EA;padding:12px;border-radius:8px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all}
+
+/* flow / stepper / charts */
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+.flow-node{flex:1;min-width:118px;background:var(--subtle);border:1px solid var(--border);padding:11px 12px;position:relative}
+.flow-node:first-child{border-radius:8px 0 0 8px} .flow-node:last-child{border-radius:0 8px 8px 0}
+.flow-node+.flow-node{border-left:0}
+.flow-node .n{font-size:10px;color:var(--primary);font-weight:700}
+.flow-node .t{font-size:12px;font-weight:600;margin-top:2px}
+.flow-node .d{font-size:10px;color:var(--t3);margin-top:2px;line-height:15px}
+.flow-node.hi{background:var(--primary-weak);border-color:#C7D8FF}
+.stepper{display:flex;align-items:center;gap:0;flex-wrap:wrap;margin:4px 0 14px}
+.step{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t3)}
+.step .bul{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--t3);background:var(--surface)}
+.step.done .bul{background:var(--success);border-color:var(--success);color:#fff}
+.step.cur .bul{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 0 0 3px var(--primary-weak)}
+.step.cur{color:var(--primary);font-weight:600}
+.step.done{color:var(--t2)}
+.step-line{width:26px;height:1.5px;background:var(--border-strong);margin:0 7px}
+.step-line.done{background:var(--success)}
+.bars{display:flex;align-items:flex-end;gap:16px;height:150px;padding:8px 4px 0;border-bottom:1px solid var(--border)}
+.bar-group{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end}
+.bar-pair{display:flex;gap:5px;align-items:flex-end;height:100%;width:100%;justify-content:center}
+.bar{width:26px;border-radius:4px 4px 0 0;position:relative;min-height:4px}
+.bar.ae{background:var(--primary)} .bar.sa{background:var(--accent)}
+.bar-lbl{font-size:11px;color:var(--t3);white-space:nowrap}
+.legend{display:flex;gap:16px;font-size:11px;color:var(--t2);margin-top:10px}
+.legend i{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:5px}
+.formula{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:22px;background:#0F1729;color:#D8E4F5;padding:14px 16px;border-radius:8px;white-space:pre-wrap}
+.formula .k{color:#FFC72C} .formula .c{color:#7FA6FF} .formula .m{color:#6FD39B}
+.ai-card{border:1px solid var(--border);border-radius:var(--r-md);padding:13px 14px;margin-bottom:10px;background:var(--surface)}
+.ai-card.approved{border-color:#BFE6CD;background:#F6FCF8}
+.ai-card.rejected{border-color:#F0D3D4;background:#FEF8F8;opacity:.75}
+.ai-top{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.ai-top .ttl{font-weight:600;font-size:13px;flex:1;min-width:180px}
+.ai-ev{font-size:11px;color:var(--t2);background:var(--subtle);border-radius:5px;padding:7px 9px;margin:6px 0;line-height:17px}
+.ai-acts{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.conf{font-size:11px;color:var(--t3)}
+.channel-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--border)}
+.channel-row:last-child{border-bottom:0}
+.ch-name{font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px}
+.ch-desc{font-size:11px;color:var(--t3);margin-top:2px}
+.switch{width:38px;height:21px;border-radius:12px;background:var(--border-strong);position:relative;transition:.16s;flex:0 0 38px}
+.switch.on{background:var(--primary)}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;transition:.16s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch.on::after{transform:translateX(17px)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow-x:auto}
+.tabs button{padding:9px 15px;font-size:13px;color:var(--t2);border-bottom:2px solid transparent;white-space:nowrap}
+.tabs button.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.rpt-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.rpt{border:1px solid var(--border);border-radius:var(--r-md);padding:13px 14px;cursor:pointer;background:var(--surface);transition:.14s}
+.rpt:hover{border-color:var(--primary);background:#FAFCFF}
+.rpt .id{font-size:10px;color:var(--primary);font-weight:700;letter-spacing:.5px}
+.rpt .nm{font-size:13px;font-weight:600;margin:4px 0 3px}
+.rpt .ds{font-size:11px;color:var(--t3);line-height:17px}
+.later{font-size:10px;color:var(--t3);border:1px dashed var(--border-strong);border-radius:4px;padding:1px 5px;margin-left:6px;font-weight:500}
+
+/* drawer / toast / modal */
+#mask{position:fixed;inset:0;background:rgba(17,26,46,.35);z-index:39;display:none}
+#mask.show{display:block}
+#drawer{position:fixed;right:0;top:0;bottom:0;width:480px;max-width:92vw;background:var(--surface);z-index:40;box-shadow:var(--sh2);transform:translateX(100%);transition:transform .24s ease-out;display:flex;flex-direction:column}
+#drawer.show{transform:translateX(0)}
+.dr-head{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:12px}
+.dr-head h3{font-size:17px;font-weight:600;flex:1}
+.dr-body{flex:1;overflow-y:auto;padding:18px 20px}
+.dr-sec{margin-bottom:20px}
+.dr-sec h4{font-size:12px;color:var(--t3);font-weight:600;letter-spacing:.4px;margin-bottom:9px;text-transform:uppercase}
+.dr-close{font-size:20px;color:var(--t3);line-height:20px;padding:2px 6px;border-radius:5px}
+.dr-close:hover{background:var(--subtle);color:var(--t1)}
+details.raw{border:1px solid var(--border);border-radius:8px;overflow:hidden}
+details.raw summary{padding:9px 12px;background:var(--subtle);font-size:12px;color:var(--t2);cursor:pointer;font-weight:600}
+details.raw .code-block{border-radius:0;max-height:190px}
+#toast{position:fixed;right:24px;bottom:24px;z-index:60;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.toast{background:#111A2E;color:#fff;padding:11px 15px;border-radius:8px;font-size:13px;box-shadow:var(--sh2);animation:tin .2s ease-out;max-width:420px;line-height:19px}
+.toast.ok{border-left:3px solid var(--success)} .toast.err{border-left:3px solid var(--danger)} .toast.info{border-left:3px solid var(--primary)}
+@keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+#modal{position:fixed;inset:0;z-index:80;display:none;align-items:center;justify-content:center;background:rgba(17,26,46,.4)}
+#modal.show{display:flex}
+.modal-box{background:var(--surface);border-radius:12px;width:440px;max-width:92vw;padding:22px;box-shadow:var(--sh2)}
+.modal-box h3{font-size:17px;margin-bottom:10px}
+.modal-box p{font-size:13px;color:var(--t2);line-height:21px;margin-bottom:18px}
+.modal-acts{display:flex;justify-content:flex-end;gap:8px}
+#searchpop{position:absolute;top:50px;right:24px;width:330px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--sh2);z-index:30;display:none;max-height:380px;overflow-y:auto;padding:8px}
+#searchpop.show{display:block}
+.sp-item{display:block;width:100%;text-align:left;padding:8px 10px;border-radius:6px;font-size:13px}
+.sp-item:hover{background:var(--primary-weak)}
+.sp-item small{color:var(--t3);display:block;font-size:11px}
+.sp-empty{padding:14px;color:var(--t3);font-size:12px;text-align:center}
+
+@media(max-width:1280px){
+  #sidebar{width:56px;flex-basis:56px}
+  #sidebar .brand-txt,#sidebar .group-label,#sidebar .nav-text,#sidebar .nav-caret,#sidebar .nav-badge,#sidebar .side-foot{display:none}
+  #sidebar .nav-item{justify-content:center;padding:9px 0}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .rpt-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">n.</div>
+      <div class="brand-txt">Noon ERP<span class="brand-sub">FBN · UAE + KSA</span></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-foot">PRD v1.0.2 · 原型 v1.0<br>GMT+8 · 只读 Service Account</div>
+  </aside>
+  <div id="main">
+    <header id="topbar">
+      <button class="btn sm" id="collapseBtn" title="收起/展开侧栏">&#9776;</button>
+      <div class="crumb" id="crumb"></div>
+      <div class="top-search" id="searchBox">
+        <span>&#9906;</span><input id="searchInput" placeholder="搜索页面 / 单号  (Ctrl+K)" autocomplete="off">
+      </div>
+      <div class="seg" id="siteSeg">
+        <button data-site="ALL" class="on">全部</button><button data-site="AE">AE</button><button data-site="SA">SA</button>
+      </div>
+      <select class="top-select" id="roleSel" title="切换角色，演示 RBAC">
+        <option value="ADMIN" selected>管理员 ADMIN</option>
+        <option value="OPERATOR">运营 OPERATOR</option>
+        <option value="PURCHASE">采购 PURCHASE</option>
+        <option value="WAREHOUSE">仓管 WAREHOUSE</option>
+        <option value="FINANCE">财务 FINANCE</option>
+        <option value="SERVICE">客服 SERVICE</option>
+        <option value="AGENT">AI 外挂 AGENT</option>
+      </select>
+      <span class="proto-tag" id="protoTag" style="cursor:pointer">PROTOTYPE v1.0</span>
+      <div class="avatar" id="avatar">财</div>
+    </header>
+    <main id="content"><div class="wrap" id="view"></div></main>
+  </div>
+</div>
+
+<div id="mask"></div>
+<aside id="drawer">
+  <div class="dr-head"><h3 id="drTitle">详情</h3><button class="dr-close" data-act="closeDrawer">&times;</button></div>
+  <div class="dr-body" id="drBody"></div>
+</aside>
+<div id="toast"></div>
+<div id="modal"><div class="modal-box" id="modalBox"></div></div>
+<div id="searchpop"></div>
+
+<script>
+/* ==========================================================================
+   Noon ERP Prototype v1.0 — data-driven, no external dependencies
+   Source of truth: docs/noon-erp-prd-v1.0.md (v1.0.2) / FR-14 IA
+   ========================================================================== */
+const S = { page:'P-01', site:'ALL', role:'ADMIN', policy:'NONE', tab:'ai',
+            channels:{API:true,CSV:true,WEBHOOK:true,MANUAL:true},
+            asnSealed:false, asnSlot:false, poConfirmed:false, sugConfirmed:false,
+            ai:{}, expensePartial:{}, recalcVer:'FV-2026.11-03', convertedPO:null };
+
+const MENU = [
+ ['工作台','DA',[['P-01','概览']]],
+ ['主数据','MD',[['P-02','SKU 档案'],['P-03','Partner SKU 映射'],['P-04','供应商与报价'],['P-05','仓与站点'],['P-06','系统参数']]],
+ ['采购','PU',[['P-07','采购单'],['P-08','到货入库'],['P-09','FIFO 批次流水']]],
+ ['库存','IV',[['P-10','四态台账'],['P-11','调拨'],['P-12','盘点'],['P-13','库存变动流水']]],
+ ['物流','LG',[['P-14','ASN 登记'],['P-15','收货差异'],['P-16','头程费用']]],
+ ['销售','SL',[['P-17','订单'],['P-18','退货与申诉时效'],['P-19','Offer 健康']]],
+ ['财务','FI',[['P-20','周账单 WEEKLY'],['P-21','仓储账单 STORAGE'],['P-22','差异清单'],['P-23','回款登记'],['P-24','费用字典'],['P-25','L2 费用池'],['P-26','利润报表与重算']]],
+ ['补货','RP',[['P-27','补货建议'],['P-28','大促系数'],['P-29','预警']]],
+ ['报表','RT',[['P-30','报表中心']]],
+ ['集成','IT',[['P-31','同步任务'],['P-32','API 日志'],['P-33','Webhook 事件'],['P-34','导出任务'],['P-35','环境配置']]],
+ ['系统','SY',[['P-36','系统管理']]]
+];
+
+/* ---------- page action capability (design spec §5.1) ----------
+   页头只放「本页真实存在的操作」，不再给 36 页套同一个三按钮模板。
+   a = 主操作 [文案, 类型, RBAC, 提示]；null = 该页无新建/导入入口
+       create 建 DRAFT 单据 / import 平台数据导入 / run 系统生成 DRAFT 建议 / blocked 权限未开通
+   e = 是否允许导出本页结果集
+   f = 表格筛选预设 doc / master / flow / lookup / none
+   w = 无页级操作时显示的只读原因（评审时可见，避免看起来像漏做）
+   依据：PRD FR-01~FR-15、A-01/A-04、N-22/N-24、O-07；与需求逐页对应。
+*/
+const PAGE_CAP={
+ 'P-01':{a:null,e:false,f:'flow',w:'概览看板：数据由下游单据汇总，只读'},
+ 'P-02':{a:['新建 SKU','create','ADMIN OPERATOR','新建后为 DRAFT，EN/AR 双语与 category_code 必填'],e:true,f:'master'},
+ 'P-03':{a:['新增映射','create','ADMIN OPERATOR','partner_sku 与 sku_id 一一对应，按站点隔离'],e:true,f:'master'},
+ 'P-04':{a:['新增供应商','create','PURCHASE ADMIN','报价按 effective_from 版本化，不覆盖历史'],e:true,f:'master'},
+ 'P-05':{a:null,e:false,f:'lookup',w:'仓清单来自 ListWarehouses 只读回读（N-22），不可手工新建'},
+ 'P-06':{a:null,e:false,f:'lookup',w:'系统参数在行内编辑并留版本，不提供新建页头入口'},
+ 'P-07':{a:['新建采购单','create','PURCHASE ADMIN','DRAFT → CONFIRMED 需校验明细与有效报价'],e:true,f:'doc'},
+ 'P-08':{a:['登记到货','create','WAREHOUSE ADMIN','收货生成 inv_batch 批次，FIFO 按 received_at 排序'],e:true,f:'doc'},
+ 'P-09':{a:null,e:true,f:'flow',w:'FIFO 批次与消耗流水由入库 / 出库驱动，禁止手工新增'},
+ 'P-10':{a:null,e:true,f:'master',w:'四态台账由单据过账生成，不允许直接改数量'},
+ 'P-11':{a:['新建调拨单','create','WAREHOUSE ADMIN','调拨双写 inv_stock_move，跨站点不合并'],e:true,f:'doc'},
+ 'P-12':{a:['新建盘点单','create','WAREHOUSE ADMIN','盈亏生成调整流水并留审计链'],e:true,f:'doc'},
+ 'P-13':{a:null,e:true,f:'flow',w:'库存变动流水为只读审计视图，不可新增'},
+ 'P-14':{a:['新建 ASN','create','WAREHOUSE ADMIN','DRAFT 不可约 Slot，必须先 SEALED（N-09）'],e:true,f:'doc'},
+ 'P-15':{a:null,e:true,f:'doc',w:'收货差异由 ASN 收货比对自动生成，不手工建单'},
+ 'P-16':{a:['登记头程费用','create','FINANCE ADMIN','费用进 L2 池，不摊入 SKU（Q8）'],e:true,f:'doc'},
+ 'P-17':{a:['导入订单 CSV','import','ADMIN OPERATOR','列头可配置；主表与行级数量一致性校验（FR-13.2）'],e:true,f:'doc'},
+ 'P-18':{a:['登记申诉','create','SERVICE FINANCE ADMIN','申诉窗口按场景覆盖，逾期平台不受理'],e:true,f:'doc'},
+ 'P-19':{a:null,e:true,f:'master',w:'Offer 健康由 GetProductOffers 只读回读，本版不刊登不调价'},
+ 'P-20':{a:['导入周账单 CSV','import','FINANCE ADMIN','导入后启动 15 天争议倒计时（FR-07.3）'],e:true,f:'doc'},
+ 'P-21':{a:['导入仓储账单 CSV','import','FINANCE ADMIN','月度仓储账单与周账单分开核对'],e:true,f:'doc'},
+ 'P-22':{a:null,e:false,f:'doc',w:'差异清单为对账结果集，专属「导出差异清单」在下方，页头不重复'},
+ 'P-23':{a:['登记回款','create','FINANCE ADMIN','回款与 statement 勾稽，写 Bank Transaction ID'],e:true,f:'doc'},
+ 'P-24':{a:['新增费率版本','create','FINANCE ADMIN','按类目 × 站点 × 履约 × 生效日版本化，支持重算'],e:true,f:'lookup'},
+ 'P-25':{a:['登记 L2 费用','create','FINANCE ADMIN','勾选 included_in_partial 决定 PARTIAL 口径'],e:true,f:'flow'},
+ 'P-26':{a:null,e:true,f:'flow',w:'利润由引擎计算，页面内「全量重算」按 RBAC 授权，页头不重复'},
+ 'P-27':{a:['运行补货计算','run','OPERATOR PURCHASE ADMIN','只生成 DRAFT 建议单，转单需人工复核'],e:true,f:'doc'},
+ 'P-28':{a:['新增大促系数','create','OPERATOR ADMIN','按站点生效，直接影响 suggested_qty'],e:false,f:'lookup'},
+ 'P-29':{a:null,e:true,f:'master',w:'预警由规则引擎生成，只读'},
+ 'P-30':{a:null,e:false,f:'lookup',w:'报表中心为目录页，导出在各报表内执行'},
+ 'P-31':{a:['立即同步','run','ADMIN OPERATOR','按四通道降级，失败进 int_sync_task 重试'],e:true,f:'flow'},
+ 'P-32':{a:null,e:true,f:'flow',w:'API 日志为只读审计视图，不可新增'},
+ 'P-33':{a:null,e:true,f:'flow',w:'Webhook 事件为平台推送，只读；无 FBN 订单事件（N-24）'},
+ 'P-34':{a:['新建导出任务','blocked','','O-07：只读 Service Account 下 CreateExport 权限未验证，暂不可用'],e:true,f:'flow'},
+ 'P-35':{a:null,e:false,f:'none',w:'通道开关与凭据配置在下方卡片内，按 A-04 只读策略执行'},
+ 'P-36':{a:null,e:false,f:'none',w:'用户 / 权限 / 审计 / 模板均在下方 Tab 内操作，AI 建议只能复核'}
+};
+const FILTER_PRESETS={
+ doc:   {fields:['period','status','kw'],kw:'搜索单号 / SKU / 名称'},
+ master:{fields:['status','kw'],kw:'搜索编码 / 名称'},
+ flow:  {fields:['period','kw'],kw:'搜索 SKU / 单号'},
+ lookup:{fields:['kw'],kw:'搜索编码 / 名称'},
+ none:  {fields:[]}
+};
+
+/* ---------- helpers ---------- */
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const C=(k,t,l,w)=>({k,t,l,w:w||''});
+const R=(cols,arr)=>arr.map(a=>{const o={};cols.forEach((c,i)=>o[c.k]=a[i]);return o;});
+const T=(title,cols,data,opt)=>({type:'table',title,cols,rows:R(cols,data),opt:opt||{}});
+const K=(lab,num,foot,opt)=>({lab,num,foot,opt:opt||{}});
+const A=(tone,text)=>({type:'alert',tone,text});
+const H=(html)=>({type:'html',html});
+const kpis=(...items)=>({type:'kpis',items});
+
+const STATUS_MAP=[
+ [/DRAFT|IMPORTED|PENDING|待补|未匹配/, 'gray'],
+ [/CONFIRMED|MATCHED|RECEIVED|CLOSED|APPROVED|DELIVERED|SUCCESS|已闭合|正常|ACTIVE|LIVE/, 'green'],
+ [/PARTIAL|IN_TRANSIT|SEALED|SLOT_BOOKED|RUNNING|DISPUTED|处理中|在途|预警|待复核/, 'orange'],
+ [/FAILED|DEAD|CANCELLED|REJECTED|RETURNED|逾期|不足|断货|ISSUE|异常/, 'red'],
+ [/API|EXPORT|WEBHOOK|MANUAL/, 'blue']
+];
+function tagClass(v){const s=String(v||'');for(const [re,c] of STATUS_MAP){if(re.test(s))return c;}return 'blue';}
+function tag(v,cls){return '<span class="tag '+(cls||tagClass(v))+'">'+esc(v)+'</span>';}
+function channelTag(v){
+  const m={API:['api','blue'],'EXPORT':['csv','gray'],CSV:['csv','gray'],WEBHOOK:['webhook','purple'],MANUAL:['manual','orange']};
+  const x=m[v]||['csv','gray'];return '<span class="tag '+x[1]+'">'+esc(v)+'</span>';
+}
+function siteTag(v){
+  if(v==='AE')return '<span class="tag blue">AE · AED</span>';
+  if(v==='SA')return '<span class="tag yellow">SA · SAR</span>';
+  return '<span class="tag gray">ALL</span>';
+}
+function countdown(v){
+  const s=String(v); const n=parseInt(s,10);
+  if(isNaN(n))return '<span class="countdown hot">'+esc(s)+'</span>';
+  const hot=n<=3;
+  return '<span class="countdown '+(hot?'hot':'ok')+'">'+esc(s)+(hot?' 天 · 紧急':' 天')+'</span>';
+}
+function pct(v){const s=String(v);const c=s.trim().startsWith('-')?'down':'up';return '<span style="color:var(--'+c+');font-weight:600">'+esc(s)+'</span>';}
+function cell(c,r){
+  const v=r[c.k];
+  switch(c.t){
+    case 'num': return '<td class="num">'+esc(v)+'</td>';
+    case 'money': return '<td class="num">'+esc(v)+'</td>';
+    case 'pct': return '<td class="num">'+pct(v)+'</td>';
+    case 'code': return '<td class="code">'+esc(v)+'</td>';
+    case 'date': return '<td class="date">'+esc(v)+'</td>';
+    case 'muted': return '<td class="muted">'+esc(v)+'</td>';
+    case 'status': return '<td>'+tag(v)+'</td>';
+    case 'channel': return '<td>'+channelTag(v)+'</td>';
+    case 'site': return '<td>'+siteTag(v)+'</td>';
+    case 'countdown': return '<td>'+countdown(v)+'</td>';
+    case 'rtl': return '<td><span class="rtl" dir="rtl">'+esc(v)+'</span></td>';
+    case 'bool': return '<td>'+(v==='Y'||v===true||v==='是'?'<span class="tag green">是</span>':'<span class="tag gray">否</span>')+'</td>';
+    case 'act': return '<td><button class="btn sm ghost" data-act="drawer" data-title="'+esc(r._t||'单据详情')+'">详情</button></td>';
+    default: return '<td>'+esc(v)+'</td>';
+  }
+}
+// 页头操作区：按 PAGE_CAP 逐页渲染，无操作页显示只读原因而不是空着或硬塞按钮
+function pageActionsHTML(cap){
+  let h='';
+  if(cap.e)h+='<button class="btn" data-act="export">导出</button>';
+  if(cap.a){
+    const a=cap.a,label=a[0],kind=a[1],only=a[2],hint=a[3]||'';
+    if(kind==='blocked'){
+      h+='<button class="btn primary" disabled title="'+esc(hint)+'">'+esc(label)+'（未授权）</button>'
+        +'<span class="no-act">'+esc(hint)+'</span>';
+    }else{
+      h+='<button class="btn primary" data-act="pageAct" data-kind="'+kind+'" data-label="'+esc(label)+'" data-hint="'+esc(hint)+'"'
+        +(only?' data-only="'+only+'"':'')+'>'+esc(label)+'</button>';
+    }
+  }
+  if(!h)return '<div class="no-act">'+esc(cap.w||'本页为只读视图，不提供页级操作')+'</div>';
+  return '<div class="page-actions">'+h+'</div>';
+}
+function tableHTML(b){
+  const opt=b.opt||{};
+  let rows=b.rows.filter(r=>S.site==='ALL'||!r.site||r.site===S.site||String(r.site).includes(S.site));
+  if(opt.dangerKey) rows=rows.map(r=>({...r,_danger:!!r[opt.dangerKey]}));
+  else if(opt.dangerRow) rows=rows.map(r=>({...r,_danger:/逾期|DEAD|批次不足|断货/.test(Object.values(r).join('|'))}));
+  const head='<tr>'+b.cols.map(c=>'<th class="'+(c.t==='num'||c.t==='money'||c.t==='pct'?'num':'')+'" '+(c.w?'style="min-width:'+c.w+'px"':'')+'>'+esc(c.l)+'</th>').join('')+'</tr>';
+  const body=rows.length?rows.map((r,i)=>'<tr class="'+(r._danger?'danger-row':'')+'" data-act="drawer" data-title="'+esc(opt.rowTitle||b.title)+'" data-idx="'+i+'">'+b.cols.map(c=>cell(c,r)).join('')+'</tr>').join('')
+    :'<tr><td colspan="'+b.cols.length+'" style="text-align:center;color:var(--t3);height:90px">当前筛选条件下无数据</td></tr>';
+  const cap=PAGE_CAP[S.page]||{};
+  // 表格内只保留本页类型的筛选字段；导出统一由页头按能力提供，避免一张表一个导出按钮
+  const preset=FILTER_PRESETS[opt.filters||cap.f||'doc']||FILTER_PRESETS.doc;
+  let filter='';
+  if(!opt.noFilter&&preset.fields.length){
+    filter='<div class="filterbar">'
+      +'<span class="filter-hint">站点：'+(S.site==='ALL'?'全部':S.site)+' · 顶栏切换</span>'
+      +(preset.fields.includes('period')?'<select data-filter="period"><option>本月</option><option>近 7 天</option><option>近 30 天</option><option>自定义期间</option></select>':'')
+      +(preset.fields.includes('status')?'<select data-filter="status"><option>全部状态</option><option>DRAFT</option><option>CONFIRMED</option><option>CLOSED</option></select>':'')
+      +(preset.fields.includes('kw')?'<input placeholder="'+preset.kw+'" data-filter="kw">':'')
+      +'<button class="btn sm" data-act="filter">应用筛选</button><button class="btn sm ghost" data-act="resetFilter">重置</button>'
+      +'<span class="spacer"></span><span style="font-size:11px;color:var(--t3)">共 '+rows.length+' 条</span></div>';
+  }
+  return '<section class="card block"><div class="card-h"><h3>'+esc(b.title)+'</h3>'
+    +'<div style="display:flex;gap:8px;align-items:center"><span class="sub">'+(opt.sub||'点击任意行查看原始报文与审计链')+'</span></div></div>'
+    +filter
+    +'<div class="tbl-scroll"><table><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'
+    +'<div class="tbl-foot"><span>显示 1–'+rows.length+' / '+rows.length+' 条 · 时间口径 GMT+8</span>'
+    +'<div class="pages"><button class="on">1</button><button>2</button><button>下一页</button></div></div>'
+    +(opt.note?'<div style="padding:0 16px 14px"><div class="note">'+opt.note+'</div></div>':'')
+    +'</section>';
+}
+function kpisHTML(b){return '<div class="block kpis">'+b.items.map(k=>'<div class="kpi '+(k.opt.tone||'')+'" '+(k.opt.go?'data-act="go" data-go="'+k.opt.go+'"':'')+'>'
+  +'<div class="lab">'+esc(k.lab)+(k.opt.info?' <span title="口径说明" style="color:var(--t3)">&#9432;</span>':'')+'</div>'
+  +'<div class="num">'+esc(k.num)+'</div><div class="foot">'+(k.foot||'')+'</div></div>').join('')+'</div>';}
+function alertHTML(b){const ico={info:'i',warning:'!',danger:'!',success:'v'}[b.tone];return '<div class="alert '+b.tone+'"><span class="ico">'+ico+'</span><div>'+b.text+'</div></div>';}
+
+/* ---------- shared data ---------- */
+const SKUS=[
+ ['SKU-1001','Retro Bluetooth Radio','راديو بلوتوث رجعي','ELEC-AUDIO','851762','UDO','AE / SA','ACTIVE'],
+ ['SKU-1002','Car Fridge 15L','ثلاجة سيارة 15 لتر','AUTO-APPLIANCE','841829','UDO','AE / SA','ACTIVE'],
+ ['SKU-1003','Pet Carrier Backpack','حقيبة ظهر للحيوانات','PET-TRAVEL','420292','UDO','AE','ACTIVE'],
+ ['SKU-1004','Memory Foam Pillow','وسادة فوم ميموري','HOME-BEDDING','940490','UDO','AE / SA','ACTIVE'],
+ ['SKU-1005','Inflatable Mattress','مرتبة هوائية','HOME-INFLATABLE','950691','UDO','SA','ACTIVE'],
+ ['SKU-1006','AI Companion Robot','روبوت ذكي مرافق','TOYS-AI','847989','UDO','AE / SA','ACTIVE'],
+ ['SKU-1007','Car Floor Mats TPE','سجاد سيارة TPE','AUTO-INTERIOR','391810','UDO','AE','DRAFT'],
+ ['SKU-1008','Rain Shower Head','رأس دش مطر','BATH-SHOWER','848180','UDO','AE / SA','ACTIVE']
+];
+const cSKU=[C('sku','code','SKU 编码',110),C('en','','名称 EN',180),C('ar','rtl','名称 AR',150),C('cat','code','类目码',130),C('hs','code','HS Code',90),C('brand','','品牌',70),C('sites','muted','覆盖站点',90),C('st','status','状态',90)];
+
+const ORDERS=[
+ ['SO-AE-20261113-0841','AE','SKU-1001','PSKU-AE-RBR01','DELIVERED','2','AED 598.00','2026-11-13 14:22','API'],
+ ['SO-SA-20261113-0312','SA','SKU-1004','PSKU-SA-MFP04','DELIVERED','1','SAR 189.00','2026-11-13 11:05','EXPORT'],
+ ['SO-AE-20261113-0776','AE','SKU-1006','PSKU-AE-AIR06','DELIVERED','1','AED 429.00','2026-11-13 09:48','WEBHOOK'],
+ ['SO-SA-20261112-0255','SA','SKU-1002','PSKU-SA-CF15','IMPORTED','1','SAR 899.00','2026-11-12 20:11','EXPORT'],
+ ['SO-AE-20261112-0690','AE','SKU-1003','PSKU-AE-PCB03','CANCELLED','1','AED 149.00','2026-11-12 18:30','MANUAL'],
+ ['SO-AE-20261112-0612','AE','SKU-1008','PSKU-AE-RSH08','DELIVERED','3','AED 267.00','2026-11-12 15:02','EXPORT'],
+ ['SO-SA-20261111-0188','SA','SKU-1005','PSKU-SA-IM05','待补妥投','2','SAR 358.00','2026-11-11 22:40','MANUAL']
+];
+const cORDER=[C('no','code','订单号',180),C('site','site','站点',100),C('sku','code','SKU',100),C('psku','code','Partner SKU',150),C('st','status','状态',110),C('qty','num','数量',70),C('amt','money','金额',110),C('time','date','妥投/导入时间',150),C('ch','channel','来源通道',110)];
+
+const cBATCH=[C('batch','code','批次号',160),C('sku','code','SKU',100),C('wh','','仓',120),C('in','num','入库量',80),C('rem','num','剩余量',80),C('cost','money','unit_cost (CNY)',130),C('src','channel','来源',90),C('at','date','received_at',145),C('st','status','状态',90)];
+const BATCHES=[
+ ['BAT-20261102-001','SKU-1001','LOCAL / AE','200','0','¥ 86.00','PURCHASE','2026-11-02 10:12','CLOSED'],
+ ['BAT-20261108-002','SKU-1001','LOCAL / AE','300','148','¥ 92.50','PURCHASE','2026-11-08 09:40','OPEN'],
+ ['BAT-20261112-003','SKU-1001','TRANSIT / SA','150','150','¥ 89.00','PURCHASE','2026-11-12 16:05','OPEN'],
+ ['BAT-20261109-004','SKU-1004','LOCAL / AE','500','382','¥ 31.20','PURCHASE','2026-11-09 11:20','OPEN'],
+ ['BAT-20261113-005','SKU-1003','LOCAL / AE','40','40','¥ 74.00','RETURN_RESTOCK','2026-11-13 08:15','OPEN']
+];
+const cCONSUME=[C('no','code','流水号',170),C('order','code','订单号',175),C('batch','code','消耗批次',160),C('qty','num','数量',70),C('cost','money','批次单价',110),C('amt','money','COGS',110),C('at','date','时间',145)];
+const CONSUME=[
+ ['IC-000931','SO-AE-20261113-0841','BAT-20261102-001','2','¥ 86.00','¥ 172.00','2026-11-13 14:22'],
+ ['IC-000932','SO-AE-20261112-0612','BAT-20261108-002','3','¥ 92.50','¥ 277.50','2026-11-12 15:02'],
+ ['IC-000933','SO-SA-20261113-0312','BAT-20261109-004','1','¥ 31.20','¥ 31.20','2026-11-13 11:05'],
+ ['IC-000934','SO-AE-20261113-0776','BAT-20261106-006','1','¥ 218.00','¥ 218.00','2026-11-13 09:48']
+];
+
+const cSTMT=[C('no','code','账单号',200),C('site','site','站点',100),C('type','status','类型',120),C('period','date','账单周期',140),C('amt','money','净额',130),C('gen','date','generated_at',145),C('left','countdown','争议剩余',110),C('st','status','对账状态',110),C('ch','channel','通道',100)];
+const STMTS=[
+ ['STMT-W-2026W46-AE','AE','WEEKLY','11/04–11/10','AED 42,380.50','2026-11-11 09:00','2','DISPUTED','EXPORT'],
+ ['STMT-W-2026W46-SA','SA','WEEKLY','11/04–11/10','SAR 28,914.20','2026-11-11 09:00','2','PENDING','EXPORT'],
+ ['STMT-W-2026W45-AE','AE','WEEKLY','10/28–11/03','AED 38,102.80','2026-11-04 09:00','9','MATCHED','EXPORT'],
+ ['STMT-S-202610-AE','AE','STORAGE','2026-10','AED 3,214.00','2026-11-09 10:30','6','PENDING','MANUAL'],
+ ['STMT-W-2026W44-AE','AE','WEEKLY','10/21–10/27','AED 35,760.40','2026-10-28 09:00','已逾期','CLOSED','EXPORT']
+];
+
+const cDIFF=[C('no','code','账单号',190),C('line','num','行号',60),C('ltype','code','line_type',150),C('amt','money','金额',110),C('guess','muted','疑似原因',190),C('matched','status','matched',90),C('left','countdown','争议剩余',100)];
+const DIFF=[
+ ['STMT-W-2026W46-AE','17','REFERRAL_FEE','AED -84.60','费率版本 2026.10 未生效','未匹配','2'],
+ ['STMT-W-2026W46-AE','42','FBN_OUTBOUND','AED -31.00','订单 SO-AE-...-0776 重量档不符','未匹配','2'],
+ ['STMT-W-2026W46-SA','08','RETURN_FEE','SAR -22.00','退货 RMA-SA-0081 未登记','未匹配','2'],
+ ['STMT-W-2026W45-AE','31','COMPENSATION','AED 45.00','补偿单未关联 sku_id','未匹配','9']
+];
+
+const cPROFIT=[C('sku','code','SKU',105),C('name','muted','品名',150),C('site','site','站点',95),C('rev','money','收入',115),C('fee','money','平台费',105),C('cogs','money','FIFO COGS',115),C('l1','money','L1 贡献毛利',125),C('margin','pct','毛利率',85),C('ver','code','formula_version',135)];
+const PROFIT=[
+ ['SKU-1001','复古蓝牙收音机','AE','¥ 74,280','¥ 12,410','¥ 38,940','¥ 22,930','+30.9%','FV-2026.11-03'],
+ ['SKU-1001','复古蓝牙收音机','SA','¥ 41,650','¥ 7,180','¥ 22,180','¥ 12,290','+29.5%','FV-2026.11-03'],
+ ['SKU-1004','记忆棉枕头','AE','¥ 38,940','¥ 6,020','¥ 16,380','¥ 16,540','+42.5%','FV-2026.11-03'],
+ ['SKU-1002','车载冰箱 15L','SA','¥ 52,110','¥ 9,870','¥ 29,640','¥ 12,600','+24.2%','FV-2026.11-03'],
+ ['SKU-1006','AI 陪伴机器人','AE','¥ 61,300','¥ 10,420','¥ 39,900','¥ 10,980','+17.9%','FV-2026.11-03'],
+ ['SKU-1003','宠物背包','AE','¥ 12,880','¥ 2,010','¥ 6,240','¥ 4,630','+35.9%','FV-2026.11-03']
+];
+
+const cSUG=[C('no','code','建议单号',165),C('sku','code','SKU',105),C('site','site','站点',95),C('cover','num','可售天数',90),C('transit','num','在途',75),C('lead','num','交期(天)',85),C('factor','num','大促系数',90),C('qty','num','建议量',85),C('src','channel','来源',90),C('st','status','状态',100)];
+const SUG=[
+ ['SUG-20261115-001','SKU-1001','AE','12','150','28','1.0','284','MANUAL','DRAFT'],
+ ['SUG-20261115-002','SKU-1001','SA','9','150','32','1.0','410','MANUAL','DRAFT'],
+ ['SUG-20261115-003','SKU-1004','AE','26','0','21','1.3','152','AI','DRAFT'],
+ ['SUG-20261115-004','SKU-1006','AE','7','200','35','1.3','318','AI','DRAFT'],
+ ['SUG-20261114-007','SKU-1002','SA','18','80','30','1.0','96','MANUAL','CONVERTED']
+];
+
+const AI_ITEMS=[
+ {id:'AI-20261115-001',scene:'STATEMENT_RECON',title:'周账单 W46-AE 第 17 行 · 佣金费率疑似用错版本',conf:'0.91',ev:'账单行 REFERRAL_FEE = AED 84.60；按 fin_fee_dict 2026.11 版应为 AED 78.20；差额 AED 6.40。证据：fin_statement_line.line_type / fin_fee_dict.effective_from',amt:'AED 6.40',stmt:'STMT-W-2026W46-AE'},
+ {id:'AI-20261115-002',scene:'STATEMENT_RECON',title:'周账单 W46-AE 第 42 行 · FBN 出库费重量档不符',conf:'0.86',ev:'订单 SO-AE-20261113-0776 申报重量 0.8kg，账单按 1.5kg 计费；证据：sal_order.raw_payload.weight_g / fin_statement_line.raw_json',amt:'AED 31.00',stmt:'STMT-W-2026W46-AE'},
+ {id:'AI-20261115-003',scene:'STATEMENT_RECON',title:'周账单 W46-SA 第 08 行 · 退货费无对应退货单',conf:'0.78',ev:'账单 RETURN_FEE SAR 22.00，本地 sal_return 未找到匹配 RMA；可能漏登记，也可能是平台侧退货',amt:'SAR 22.00',stmt:'STMT-W-2026W46-SA'},
+ {id:'AI-20261115-004',scene:'STATEMENT_RECON',title:'周账单 W45-AE 第 31 行 · 补偿未关联 SKU',conf:'0.72',ev:'COMPENSATION AED 45.00 的 raw_json 中 sku_id 为空，利润归因会落到站点汇总而非 SKU',amt:'AED 45.00',stmt:'STMT-W-2026W45-AE'}
+];
+
+/* ---------- page definitions ---------- */
+const P={};
+P['P-01']={t:'工作台 · 概览',c:'工作台 / 概览',fr:'FR-12 / FR-07 / FR-10',d:'一个店铺 · UAE + KSA 双站点 · FBN 单履约模式。所有金额跨站点先归一 CNY，时间统一 GMT+8。',b:[
+ kpis(K('本周销售额（CNY 归一）','¥ 286,430','较上周 <span class="delta up">+12.4%</span> · AED+SAR 已按日汇率归一',{info:1,go:'P-26'}),
+     K('L1 贡献毛利','¥ 78,210','毛利率 27.3% · <b>不含 L2 期间费用</b>',{info:1,go:'P-26'}),
+     K('AI 待复核建议','4','首个场景 STATEMENT_RECON · 复核前账单行不变',{tone:'warn',go:'P-36'}),
+     K('账单争议 ≤3 天','2','STMT-W-2026W46-AE / -SA · 逾期即资金损失',{tone:'danger',go:'P-20'})),
+ A('danger','<b>15 天争议倒计时</b>：2 张周账单剩余 2 天。请在 <b>2026-11-17</b> 前导出差异清单并在 Seller Lab 人工提交；系统不做平台在线提交（FR-07.4）。'),
+ H('<section class="card block"><div class="card-h"><h3>七环节业务闭环</h3><span class="sub">FBN 单模式 · 采购成本进 FIFO、费用进 L2、销量驱动补货</span></div><div class="card-b"><div class="flow">'
+  +[['1','主数据 / 映射','md_*'],['2','采购','pur_order'],['3','FIFO 批次','inv_batch'],['4','ASN 入 FBN','log_asn'],['5','订单 / 退货 / 账单','sal_* fin_*'],['6','SKU 利润 L1+L2','fin_profit_snapshot'],['7','补货建议','rp_*']]
+   .map((x,i)=>'<div class="flow-node '+(i===5?'hi':'')+'"><div class="n">0'+x[0]+'</div><div class="t">'+x[1]+'</div><div class="d">'+x[2]+'</div></div>').join('')
+  +'</div><div class="note"><b>自动回流线</b>：⑦ 补货建议人工确认 → 转采购单 → 写回 <code>source_ref_no</code>，闭环回到 ②。AI 只写 DRAFT，不参与落单。</div></div></section>'),
+ H('<div class="grid2 block">'+[
+  ['账单争议倒计时','<div style="font-size:12px;line-height:26px">'
+   +'<div>STMT-W-2026W46-AE <span style="float:right">'+countdown('2')+'</span></div>'
+   +'<div>STMT-W-2026W46-SA <span style="float:right">'+countdown('2')+'</span></div>'
+   +'<div>STMT-S-202610-AE <span style="float:right">'+countdown('6')+'</span></div>'
+   +'<div>STMT-W-2026W45-AE <span style="float:right">'+countdown('9')+'</span></div>'
+   +'<div style="margin-top:8px"><button class="btn sm primary" data-act="go" data-go="P-22">查看差异清单</button></div></div>'],
+  ['待办与告警','<div style="font-size:12px;line-height:26px">'
+   +'<div>AI 建议待复核 <span style="float:right"><b style="color:var(--warning)">4 条</b></span></div>'
+   +'<div>DEAD 同步任务 <span style="float:right"><b style="color:var(--danger)">1 个</b></span></div>'
+   +'<div>待补妥投时间订单 <span style="float:right"><b>1 单</b></span></div>'
+   +'<div>FBN 库龄 &gt;365 天 <span style="float:right"><b style="color:var(--warning)">3 SKU</b></span></div>'
+   +'<div>批次不足预警 <span style="float:right"><b>0</b></span></div>'
+   +'<div style="margin-top:8px"><button class="btn sm" data-act="go" data-go="P-31">同步任务</button> <button class="btn sm" data-act="go" data-go="P-36">AI 复核</button></div></div>']
+ ].map(x=>'<section class="card"><div class="card-h"><h3>'+x[0]+'</h3></div><div class="card-b">'+x[1]+'</div></section>').join('')+'</div>'),
+ T('最近导入 / 同步',[C('no','code','批次号',170),C('type','','数据类型',150),C('site','site','站点',95),C('ch','channel','通道',100),C('cnt','num','行数',75),C('st','status','结果',100),C('at','date','时间',145)],
+  [['IMP-20261115-003','周账单 W46','AE','EXPORT','162','SUCCESS','2026-11-15 09:12'],['IMP-20261115-002','FBN 订单','SA','EXPORT','318','SUCCESS','2026-11-15 08:40'],['IMP-20261114-009','FBN 库存台账','AE','EXPORT','1,204','SUCCESS','2026-11-14 21:05'],['IMP-20261114-008','Offer 健康','AE','API','—','DEAD','2026-11-14 18:22']],{sub:'四通道留痕：原始行不删减'})
+]};
+
+P['P-02']={t:'SKU 档案',c:'主数据 / 商品',fr:'FR-02.1',d:'本地 SKU 唯一主数据。EN/AR 双语字段保留，阿语可空；类目码必须能关联费用字典，否则利润计算会被拦截。',b:[
+ A('info','本版<b>不做刊登</b>（Q4）。上架在 Seller Lab 人工完成，ERP 只维护 SKU 与 Partner SKU 映射。Listing / 内容表入口<span class="later">Later · FR-15</span>'),
+ T('SKU 列表',cSKU,SKUS,{note:'<b>双语规则</b>：阿语字段单独 RTL 行展示，不与英文挤在同一行。缺 <code>category_code</code> 的 SKU 在利润计算时被拦截。'}),
+ H('<div class="grid3">'+[['主数据规模','8 个 SKU / 6 个类目'],['双站点覆盖','6 个 SKU 同时映射 AE+SA'],['利润口径','unit_cost 只含采购价，不含头程']].map(x=>'<div class="card"><div class="card-b"><div style="font-size:11px;color:var(--t3)">'+x[0]+'</div><div style="font-size:15px;font-weight:600;margin-top:5px">'+x[1]+'</div></div></div>').join('')+'</div>')
+]};
+P['P-03']={t:'Partner SKU 映射',c:'主数据 / 映射',fr:'FR-02.2 / FR-02.3',d:'一个本地 SKU 可映射多站点多条 Partner SKU。唯一键 partner_sku + site_code + business_model；订单导入按此回查 sku_id。',b:[
+ A('warning','<b>O-08 待补</b>：真实 <code>partner_sku</code> 样本尚未从 Seller Lab 取回，下表为原型示意值，不臆造平台字段。'),
+ T('映射关系',[C('sku','code','本地 SKU',110),C('psku','code','Partner SKU',165),C('site','site','站点',95),C('bm','code','business_model',145),C('offer','code','offer_code',150),C('active','bool','is_active',90),C('live','status','live_status',110),C('issues','muted','offer_issues',190)],
+  [['SKU-1001','PSKU-AE-RBR01','AE','FBN','OFF-AE-88213','是','LIVE','—'],['SKU-1001','PSKU-SA-RBR01','SA','FBN','OFF-SA-44017','是','LIVE','—'],
+   ['SKU-1004','PSKU-AE-MFP04','AE','FBN','OFF-AE-88214','是','LIVE','—'],['SKU-1004','PSKU-SA-MFP04','SA','FBN','OFF-SA-44018','是','LIVE','—'],
+   ['SKU-1006','PSKU-AE-AIR06','AE','FBN','OFF-AE-88215','是','NOT_LIVE','PRICE_MISSING'],
+   ['SKU-1007','PSKU-AE-CFM07','AE','FBN','—','否','NOT_LIVE','CONTENT_INCOMPLETE'],
+   ['SKU-1002','PSKU-SA-CF15','SA','FBN','OFF-SA-44019','是','LIVE','—'],['SKU-1005','PSKU-SA-IM05','SA','FBN','OFF-SA-44020','是','LIVE','—']],
+  {note:'<b>口径区分</b>：<code>is_active</code>=定价激活（我方可控），<code>live_status</code>=前台可见（平台判定）。「我设了价却不展示」要在 <code>offer_issues</code> 定位，见 P-19。'})
+]};
+P['P-04']={t:'供应商与报价',c:'主数据 / 供应商',fr:'FR-03.1',d:'报价按 effective_from/to 留历史价；采购单只取当前有效报价，改价不影响旧单。',b:[
+ T('供应商',[C('code','code','编码',110),C('name','','供应商',190),C('contact','muted','联系人',110),C('moq','num','MOQ',70),C('lead','num','交期(天)',90),C('cur','','币种',80),C('st','status','状态',90)],
+  [['SUP-001','深圳声科电子有限公司','陈先生','200','18','CNY','ACTIVE'],['SUP-002','宁波车载电器厂','王女士','100','25','CNY','ACTIVE'],['SUP-003','东莞家居用品有限公司','李先生','300','15','CNY','ACTIVE'],['SUP-004','义乌宠物用品商行','赵先生','150','12','CNY','DRAFT']]),
+ T('SKU 有效报价',[C('sku','code','SKU',110),C('sup','','供应商',185),C('price','money','当前有效价',120),C('from','date','effective_from',135),C('to','date','effective_to',135),C('hist','muted','历史价',110)],
+  [['SKU-1001','深圳声科电子有限公司','¥ 92.50','2026-11-01','—','¥ 86.00 (10月)'],['SKU-1001','深圳声科电子有限公司','¥ 86.00','2026-10-01','2026-10-31','—'],
+   ['SKU-1004','东莞家居用品有限公司','¥ 31.20','2026-10-15','—','¥ 29.80'],['SKU-1002','宁波车载电器厂','¥ 468.00','2026-09-20','—','¥ 452.00']],
+  {note:'同一 SKU 可有多个供应商与历史价；采购单确认时按 <code>effective_from ≤ 单据日期 ≤ effective_to</code> 取价。'})
+]};
+P['P-05']={t:'仓与站点',c:'主数据 / 组织',fr:'FR-01.1',d:'1 partner / 1 store / 2 sites。仓创建时绑定 site_code + fulfillment_mode，创建后这两个字段不可修改。',b:[
+ A('warning','<b>O-10 事实纪律</b>：M0 生产 <code>ListWarehouses</code> 只返回 5 个 UAE 后缀仓且均为 <code>directship_v2 / fbpi</code>，<b>无 FBN 仓类型</b>（N-22）。下表是 ERP 内部逻辑仓，平台仓码保持「待补」，不用推测补齐。'),
+ H('<div class="card block"><div class="card-b"><dl class="mini-kv" style="grid-template-columns:auto 1fr auto 1fr">'
+  +'<dt>Partner</dt><dd>PRJ468049 · yixin（只读 Service Account）</dd><dt>店铺</dt><dd>1 个店铺</dd>'
+  +'<dt>站点 AE</dt><dd>AED · Noon UAE</dd><dt>站点 SA</dt><dd>SAR · Noon KSA</dd>'
+  +'<dt>履约模式</dt><dd>FBN（单模式）</dd><dt>库存推送</dt><dd>不推送（R3 已关闭）</dd></dl></div></div>'),
+ T('内部仓清单',[C('code','code','仓编码',145),C('name','','仓名称',165),C('site','site','站点',95),C('mode','status','履约模式',110),C('type','muted','仓类型',120),C('plat','muted','平台仓码',150),C('st','status','状态',90)],
+  [['WH-AE-LOCAL','国内本地仓','AE','FBN','LOCAL','待补 (O-10)','ACTIVE'],['WH-AE-TRANSIT','中转仓','AE','FBN','TRANSIT','待补 (O-10)','ACTIVE'],['WH-AE-FBN','Noon FBN 仓 AE','AE','FBN','FBN','待补 (O-10)','ACTIVE'],
+   ['WH-SA-TRANSIT','中转仓 SA','SA','FBN','TRANSIT','待补 (O-10)','ACTIVE'],['WH-SA-FBN','Noon FBN 仓 SA','SA','FBN','FBN','待补 (O-10)','ACTIVE']],
+  {note:'<b>不可变约束</b>：尝试修改仓的站点 / 履约模式应被拒并写 <code>sys_audit_log</code>。FBN 为平台官方仓，不在 Warehouse Platform 清单内，故四态库存以本地台账 + ASN + FBN 库存报表为准。'})
+]};
+P['P-06']={t:'系统参数',c:'主数据 / 配置',fr:'FR-01.2 / NFR-09',d:'平台规则一律落 sys_config，按 config_key + scope_key + effective_from 版本化，支持按站点覆盖；禁止写死在 Java 常量。',b:[
+ A('info','改参数后<b>新单据按新值计算、旧利润快照不变</b>。公开资料冲突项（VAT、打款门槛、退货窗口、争议天数）一律参数化，不写死。'),
+ T('sys_config 初始值',[C('key','code','config_key',210),C('val','code','config_value',155),C('scope','site','scope_key',100),C('from','date','effective_from',135),C('remark','muted','说明 / 来源',300)],
+  [['cost_method','FIFO','ALL','2026-11-12','Q5：FIFO 批次成本'],['vat_mode','IGNORE','ALL','2026-11-12','Q6：不做 VAT；R7 毛利虚高风险'],
+   ['allocation_policy','NONE','ALL','2026-11-12','Q8：默认不合并 L2，可切 PARTIAL / FULL'],['return_window_days','15','ALL','2026-11-12','C-03：14/15 天冲突取宽口径'],
+   ['appeal_window_days','14','ALL','2026-11-12','Directship 7 天需按场景覆盖'],['statement_dispute_days','15','ALL','2026-11-12','F-10：逾期争议不受理'],
+   ['payout_threshold','1000','ALL','2026-11-12','C-02：100/1000 冲突，按站点可覆盖'],['return_restock_cost','ORIGINAL','ALL','2026-11-12','退货二次上架批次成本'],
+   ['stock_update_mode','ABSOLUTE','ALL','2026-11-12','N-11：Stock API 绝对值 set'],['api_max_destinations','5','ALL','2026-11-12','N-13：每项目最多 5 个 webhook destination']],
+  {note:'<b>版本化</b>：新增版本不覆盖历史行；利润快照带 <code>formula_version</code>，可按期间全量重算并保留新旧两套结果。'})
+]};
+
+P['P-07']={t:'采购单',c:'采购 / 采购单',fr:'FR-03.2 / §3.3',d:'状态机 DRAFT → CONFIRMED → PARTIAL_RECEIVED → RECEIVED → CLOSED。无审批流（Q11）；source 可为 MANUAL / REPLENISH_SUGGESTION / AI_SUGGESTION。',b:[
+ H('<section class="card block"><div class="card-h"><h3>PO-20261115-0001 状态机</h3><div><button class="btn sm primary" data-act="confirmPO" data-only="PURCHASE FINANCE ADMIN" id="poConfirmBtn">确认采购单</button></div></div><div class="card-b">'
+  +'<div class="stepper" id="poStep"></div><div class="note">CONFIRMED 前置：至少 1 行明细 + 供应商有效 + 报价在有效期内。确认后按当前有效价生成批次成本基准，<b>unit_cost 不含头程/关税/包材</b>。</div></div></section>'),
+ T('采购单列表',[C('no','code','采购单号',175),C('sup','','供应商',180),C('sku','code','SKU',105),C('qty','num','数量',75),C('price','money','单价',100),C('cur','','币种',75),C('src','channel','source',120),C('ref','code','source_ref_no',165),C('st','status','状态',110)],
+  [['PO-20261115-0001','深圳声科电子有限公司','SKU-1001','300','¥ 92.50','CNY','MANUAL','—','DRAFT'],
+   ['PO-20261114-0008','东莞家居用品有限公司','SKU-1004','500','¥ 31.20','CNY','REPLENISH_SUGGESTION','SUG-20261114-002','CONFIRMED'],
+   ['PO-20261113-0006','宁波车载电器厂','SKU-1002','80','¥ 468.00','CNY','MANUAL','—','PARTIAL_RECEIVED'],
+   ['PO-20261110-0004','深圳声科电子有限公司','SKU-1001','200','¥ 86.00','CNY','MANUAL','—','RECEIVED'],
+   ['PO-20261105-0002','义乌宠物用品商行','SKU-1003','150','¥ 74.00','CNY','AI_SUGGESTION','AI-20261105-002','CLOSED']],
+  {note:'<b>闭环回写</b>：由补货建议转单时 <code>source_ref_no</code> 必须可反查建议单；AI 来源的单据创建人必须是人类账号（FR-11.4）。'})
+]};
+P['P-08']={t:'到货入库',c:'采购 / 入库',fr:'FR-04.1',d:'到货质检后按合格量生成 FIFO 批次；数量守恒校验，同一入库单两行生成两个批次。',b:[
+ kpis(K('本日到货单','3','2 已确认 / 1 草稿'),K('合格量','740','拒收 12'),K('生成批次','5','含 1 条退货二次上架'),K('数量守恒','通过','台账 = 批次 = 流水')),
+ T('入库单',[C('no','code','入库单号',170),C('po','code','采购单',175),C('wh','','仓',135),C('sku','code','SKU',105),C('recv','num','到货量',80),C('ok','num','合格量',80),C('rej','num','拒收',70),C('st','status','状态',105),C('at','date','时间',145)],
+  [['IN-20261115-002','PO-20261114-0008','WH-AE-LOCAL','SKU-1004','500','500','0','CONFIRMED','2026-11-15 10:22'],
+   ['IN-20261113-004','PO-20261113-0006','WH-SA-TRANSIT','SKU-1002','80','68','12','CONFIRMED','2026-11-13 16:40'],
+   ['IN-20261112-003','PO-20261110-0004','WH-AE-LOCAL','SKU-1001','200','200','0','CLOSED','2026-11-12 09:15'],
+   ['IN-20261115-003','PO-20261115-0001','WH-AE-LOCAL','SKU-1001','—','—','—','DRAFT','2026-11-15 11:02']],
+  {note:'CONFIRMED 时按合格量写 <code>inv_batch(qty_in, qty_remaining, unit_cost, received_at)</code>，同时写四态台账与 <code>inv_stock_move</code>。'})
+]};
+P['P-09']={t:'FIFO 批次流水',c:'采购 / 批次成本',fr:'FR-04.2 / FR-04.3 · 核心',d:'按 received_at ASC, batch_id ASC 依次扣减；COGS 唯一来源是 inv_batch_consumption，禁止手工填、禁止移动加权。',b:[
+ A('warning','<b>成本红线</b>：<code>inv_batch.unit_cost</code> 只含采购价。头程 / 关税 / 清关 / 包材 / 贴标进 <code>log_shipment_cost → fin_expense_pool</code>（P-16 / P-25），<b>不写入批次成本</b>（Q8）。'),
+ H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>FIFO 扣减示意 · SKU-1001</h3><span class="sub">卖出 2 件，跨两批</span></div><div class="card-b">'
+  +'<div class="formula"><span class="c">// 批次队列（received_at ASC）</span>\n'
+  +'<span class="k">BAT-20261102-001</span>  200 件 × ¥86.00  → 剩余 <span class="m">0</span>  \n'
+  +'<span class="k">BAT-20261108-002</span>  300 件 × ¥92.50  → 剩余 <span class="m">148</span>\n'
+  +'<span class="k">BAT-20261112-003</span>  150 件 × ¥89.00  → 剩余 <span class="m">150</span>\n\n'
+  +'<span class="c">// 订单 SO-AE-20261113-0841 卖出 2 件</span>\n'
+  +'<span class="k">COGS</span> = 2 × ¥86.00 = <span class="m">¥172.00</span>\n'
+  +'<span class="c">// 仅 DELIVERED 触发；CANCELLED 不扣</span></div>'
+  +'<div class="note">每扣一批写一条 <code>inv_batch_consumption</code>；删除消耗流水后订单 COGS 归零，利润重算随之变化（FR-04.3 验收）。</div></div></section>'
+  +'<section class="card"><div class="card-h"><h3>退货二次上架规则</h3></div><div class="card-b"><div class="formula"><span class="c">// A 级退货</span>\n生成 <span class="k">新批次</span>，插到队尾\nreceived_at = 上架时间（晚于所有在库批次）\nunit_cost = 原批次成本 (ORIGINAL)\n<span class="m">不回流原批次</span>\n\n<span class="c">// B / C 级</span>\n写 inv_batch_consumption\n(move_type = RETURN_LOSS)\n损耗进入 L1 且可追溯</div>'
+  +'<div class="note">FIFO 顺序由 <code>received_at</code> 决定，退货新批次不会插队，避免成本错配。</div></div></section></div>'),
+ T('批次台账',cBATCH,BATCHES,{note:'<b>守恒校验</b>：Σ 批次 qty_remaining = 四态台账可用量 = 流水累计（按仓）。退货新批次已排在最末。'}),
+ T('批次消耗流水（COGS 唯一来源）',cCONSUME,CONSUME,{sub:'点行可查看对应订单与原始报文'})
+]};
+P['P-10']={t:'四态台账',c:'库存 / 台账',fr:'FR-04.4',d:'可用 / 在途 / 锁定 / 不可售分离。qty_reserved 由平台扣减，ERP 不通过 Stock API 设置；库存推送为绝对值 set，禁止增量同步。',b:[
+ A('info','<b>R3 已关闭（N-22）</b>：<code>ListWarehouses</code> 全量 5 仓均为 directship_v2 / fbpi，无 FBN 仓类型 → <b>不推送库存</b>，四态以本地台账 + ASN + FBN 库存报表为准。'),
+ T('库存四态（按 SKU × 仓 × 站点）',[C('sku','code','SKU',105),C('wh','','仓',140),C('site','site','站点',95),C('avail','num','可用',85),C('transit','num','在途',85),C('reserved','num','锁定',85),C('unsell','num','不可售',90),C('sum','num','合计',90),C('chk','status','守恒',95)],
+  [['SKU-1001','WH-AE-LOCAL','AE','148','150','12','3','313','正常'],['SKU-1001','WH-SA-TRANSIT','SA','150','0','4','0','154','正常'],
+   ['SKU-1004','WH-AE-LOCAL','AE','382','0','8','2','392','正常'],['SKU-1002','WH-SA-TRANSIT','SA','68','80','0','0','148','正常'],
+   ['SKU-1003','WH-AE-LOCAL','AE','40','0','2','4','46','预警'],['SKU-1006','WH-AE-FBN','AE','96','200','10','0','306','不足']],
+  {dangerKey:'不足',note:'「锁定」列只读（平台扣减）；「守恒」= 台账与批次剩余量 + 流水累计比对，异常行标红并进入告警。'})
+]};
+P['P-11']={t:'调拨',c:'库存 / 调拨',fr:'FR-04.5',d:'多段在途；收货差异 diff_qty ≠ 0 必须生成异常记录才可 CLOSED，不允许静默覆盖。',b:[
+ T('调拨单',[C('no','code','调拨单号',170),C('from','','来源仓',140),C('to','','目标仓',145),C('sku','code','SKU',105),C('qty','num','发出',75),C('recv','num','收货',75),C('diff','num','差异',75),C('st','status','状态',115),C('at','date','时间',145)],
+  [['TR-20261114-003','WH-AE-LOCAL','WH-AE-FBN','SKU-1001','150','150','0','IN_TRANSIT','2026-11-14 08:30'],
+   ['TR-20261112-002','WH-AE-LOCAL','WH-SA-TRANSIT','SKU-1004','200','198','-2','RECEIVED','2026-11-12 14:10'],
+   ['TR-20261110-001','WH-SA-TRANSIT','WH-SA-FBN','SKU-1002','80','80','0','CLOSED','2026-11-10 10:05'],
+   ['TR-20261115-004','WH-AE-LOCAL','WH-AE-FBN','SKU-1006','100','—','—','DRAFT','2026-11-15 11:18']],
+  {note:'TR-20261112-002 差异 -2 已生成异常记录 EX-20261112-001 与库存调整单，<b>未静默关闭</b>。'})
+]};
+P['P-12']={t:'盘点',c:'库存 / 盘点',fr:'FR-04.5',d:'盘点盈亏写调整单，并按批次追补 / 冲销消耗流水；盘亏后批次剩余量同步减少且 COGS 可重算。',b:[
+ T('盘点单',[C('no','code','盘点单号',170),C('wh','','仓',140),C('sku','code','SKU',105),C('book','num','账面',80),C('real','num','实盘',80),C('diff','num','盈亏',80),C('batch','code','关联批次',160),C('st','status','状态',105),C('at','date','时间',145)],
+  [['ST-20261115-001','WH-AE-LOCAL','SKU-1004','382','380','-2','BAT-20261109-004','CONFIRMED','2026-11-15 09:40'],
+   ['ST-20261114-002','WH-AE-LOCAL','SKU-1003','40','41','+1','BAT-20261113-005','CLOSED','2026-11-14 15:22'],
+   ['ST-20261113-001','WH-SA-TRANSIT','SKU-1002','68','68','0','BAT-20261111-007','CLOSED','2026-11-13 10:08']],
+  {note:'盈亏调整必须生成 <code>inv_stock_move</code> 并写批次追补 / 冲销流水，<b>不允许直接改台账数字</b>。'})
+]};
+P['P-13']={t:'库存变动流水',c:'库存 / 流水',fr:'FR-04.7 / NFR-07',d:'每次变动带 move_no、来源单据、操作人、时间戳与原始报文 raw_payload；任一变动可回溯到来源单据。',b:[
+ T('inv_stock_move',[C('no','code','move_no',160),C('sku','code','SKU',105),C('type','code','move_type',145),C('qty','num','数量',75),C('ref','code','ref_doc_no',170),C('batch','code','批次',155),C('by','muted','操作人',95),C('at','date','时间戳',145)],
+  [['MV-000882','SKU-1001','PURCHASE_IN','+300','IN-20261115-002','BAT-20261108-002','仓管 张','2026-11-15 10:22'],
+   ['MV-000881','SKU-1001','DELIVERY_OUT','-2','SO-AE-20261113-0841','BAT-20261102-001','系统','2026-11-13 14:22'],
+   ['MV-000880','SKU-1003','RETURN_RESTOCK','+40','RMA-AE-0031','BAT-20261113-005','仓管 李','2026-11-13 08:15'],
+   ['MV-000879','SKU-1004','STOCKTAKE_LOSS','-2','ST-20261115-001','BAT-20261109-004','仓管 张','2026-11-15 09:40'],
+   ['MV-000878','SKU-1004','TRANSFER_OUT','-200','TR-20261112-002','BAT-20261109-004','仓管 李','2026-11-12 14:10']],
+  {note:'点任意行打开抽屉，可展开 <b>raw_payload 原始报文</b>（字段不删减）与完整审计链。'})
+]};
+
+P['P-14']={t:'ASN 登记',c:'物流 / FBN 入仓',fr:'FR-05.1 / N-09',d:'本版 source=MANUAL（Seller Lab 手工登记）。状态机 DRAFT → SEALED → SLOT_BOOKED → IN_TRANSIT → RECEIVED；SEALED 后才可填 slot_date。',b:[
+ A('warning','<b>R1</b>：FBN Inbound(ASN) 无公开 REST 端点（术语表提及但未发布），本页按手工登记设计；<code>log_asn.source</code> 已预留 <code>API</code>，拿到官方 spec 只换适配器、不改业务表。'),
+ H('<section class="card block"><div class="card-h"><h3>ASN-20261115-0007 · 状态机交互</h3><div style="display:flex;gap:8px">'
+  +'<button class="btn sm" data-act="sealAsn" data-only="WAREHOUSE ADMIN">封箱 SEALED</button>'
+  +'<button class="btn sm primary" data-act="bookSlot" data-only="WAREHOUSE ADMIN">预约 Slot</button></div></div><div class="card-b">'
+  +'<div class="stepper" id="asnStep"></div>'
+  +'<div id="asnMsg" class="alert info" style="margin:0"><span class="ico">i</span><div>当前 <b>DRAFT</b>：必须先 <b>SEALED</b> 才允许填写 <code>slot_date</code>。点「预约 Slot」可验证拦截规则。</div></div>'
+  +'<div class="note">RECEIVED 前必须回填 <code>qty_received</code>；<code>diff_qty ≠ 0</code> 时生成异常记录并回写库存与批次（P-15）。</div></div></section>'),
+ T('ASN 列表',[C('no','code','asn_no',175),C('site','site','站点',95),C('wh','','FBN 仓',130),C('sku','code','SKU',105),C('qty','num','发出量',85),C('recv','num','收货量',85),C('diff','num','差异',75),C('slot','date','slot_date',130),C('src','channel','source',90),C('st','status','状态',115)],
+  [['ASN-20261115-0007','AE','WH-AE-FBN','SKU-1001','150','—','—','—','MANUAL','DRAFT'],
+   ['ASN-20261113-0006','SA','WH-SA-FBN','SKU-1004','200','198','-2','2026-11-18','MANUAL','RECEIVED'],
+   ['ASN-20261112-0005','AE','WH-AE-FBN','SKU-1006','100','100','0','2026-11-16','MANUAL','IN_TRANSIT'],
+   ['ASN-20261110-0004','AE','WH-AE-FBN','SKU-1002','80','80','0','2026-11-14','MANUAL','CLOSED']],
+  {note:'「预约 Slot」按钮在 SEALED 之前会被拦截 —— 这是 FR-05.1 的可测验收标准。'})
+]};
+P['P-15']={t:'收货差异',c:'物流 / 差异',fr:'FR-05.2',d:'qty_shipped vs qty_received 计算 diff_qty；差异必须留原因，非 0 时不允许静默关闭 ASN。',b:[
+ T('异常记录',[C('no','code','异常编号',165),C('asn','code','ASN',175),C('sku','code','SKU',105),C('ship','num','发出',75),C('recv','num','收货',75),C('diff','num','差异',75),C('reason','muted','原因',190),C('st','status','处理',100)],
+  [['EX-20261113-001','ASN-20261113-0006','SKU-1004','200','198','-2','运输外箱破损，2 件不可售','已处理'],
+   ['EX-20261112-002','ASN-20261112-0005','SKU-1006','100','100','0','—','无异常'],
+   ['EX-20261110-001','ASN-20261110-0004','SKU-1002','80','80','0','—','无异常']],
+  {note:'差异回写 <code>log_asn_item</code> → 生成库存调整单 + <code>inv_stock_move</code>，原始原因与平台报文保留在 <code>raw_payload</code>。'})
+]};
+P['P-16']={t:'头程费用',c:'物流 / 费用登记',fr:'FR-05.3 / Q8',d:'头程 / 关税 / 清关 / 包材 / 贴标按期间或 ASN 归集，allocation_flag 默认 NONE，不摊进批次成本。',b:[
+ A('success','<b>验收口径</b>：登记任意一笔头程费用后，<code>inv_batch.unit_cost</code> <b>保持不变</b>。费用只进 <code>log_shipment_cost → fin_expense_pool</code>（P-25），用于 L2 与三档合并口径。'),
+ T('头程费用单',[C('no','code','费用单号',165),C('asn','code','关联 ASN',175),C('type','code','fee_type',130),C('amt','money','金额',115),C('cur','','币种',75),C('period','date','归集期间',120),C('alloc','status','allocation_flag',130),C('ch','channel','来源',90)],
+  [['SC-20261114-006','ASN-20261113-0006','FREIGHT','¥ 4,820.00','CNY','2026-11','NONE','MANUAL'],
+   ['SC-20261114-007','ASN-20261113-0006','CUSTOMS_DUTY','¥ 1,260.00','CNY','2026-11','NONE','MANUAL'],
+   ['SC-20261114-008','ASN-20261113-0006','PACKAGING','¥ 680.00','CNY','2026-11','NONE','MANUAL'],
+   ['SC-20261112-004','ASN-20261112-0005','LABELING','¥ 210.00','CNY','2026-11','NONE','MANUAL'],
+   ['SC-20261112-005','ASN-20261112-0005','FREIGHT','¥ 3,140.00','CNY','2026-11','NONE','MANUAL']],
+  {note:'<b>Q8「部分合并」</b>：在 P-25 勾选 <code>included_in_partial</code> 的科目才进入 PARTIAL 口径；不写死组合。'})
+]};
+
+P['P-17']={t:'订单',c:'销售 / 订单',fr:'FR-06.1 ~ FR-06.4',d:'四通道导入；order_no + site_code 唯一；仅 DELIVERED 触发 FIFO 扣减与 COGS 归集；未填 delivered_at 进「待补」清单不参与当期利润。',b:[
+ A('info','<b>N-24 事实</b>：webhook 仅 3 种事件且<b>无 FBN 订单事件</b>，订单主通道为 Seller Lab / impex 导出 CSV；列头按 A-01 做成可配置映射，不等待后台字段补核。'),
+ T('订单列表',cORDER,ORDERS,{note:'<b>导入事务校验（D-02 / FR-13.2）</b>：主表 <code>qty</code> = Σ 明细 <code>qty</code>、<code>gross_amount</code> = Σ 行金额；不一致<b>整单进异常清单</b>，坏行不丢弃、不导致整批回滚。'}),
+ H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>待补妥投时间</h3><span class="sub">不参与当期利润快照</span></div><div class="card-b"><div style="font-size:12px;line-height:26px">'
+  +'<div>SO-SA-20261111-0188 <span style="float:right;color:var(--warning)">待补 1 单</span></div>'
+  +'<div class="note">账单按妥投时间归期；补录后自动重新归期并重算相关期间利润。</div></div></div></section>'
+  +'<section class="card"><div class="card-h"><h3>COD 与回款口径</h3></div><div class="card-b"><div style="font-size:12px;line-height:26px">'
+  +'<div>PAID 订单 <span style="float:right"><b>6 单</b></span></div><div>COD 订单 <span style="float:right"><b>2 单</b></span></div>'
+  +'<div class="note">本版不建资金模块，COD 未回款不计入现金口径，仅在回款报表（P-23）单列。</div></div></div></section></div>')
+]};
+P['P-18']={t:'退货与申诉时效',c:'销售 / 退货',fr:'FR-06.5 / FR-06.6',d:'记录 A/B/C 分级与补偿金额；按 sys_config 计算 window_deadline / appeal_deadline，逾期单项高亮。',b:[
+ A('warning','<b>时限冲突已参数化</b>：退货窗口 14/15 天（C-03）、Directship 申诉 7 天等按 <code>sys_config</code> 场景覆盖，不写死；当前取宽口径 15 / 14 天。'),
+ T('退货单',[C('no','code','退货单号',165),C('order','code','原订单',180),C('site','site','站点',95),C('grade','status','分级',85),C('comp','money','补偿金额',115),C('win','date','窗口截止',135),C('appeal','date','申诉截止',135),C('left','countdown','剩余',95),C('st','status','处置',100)],
+  [['RMA-AE-0031','SO-AE-20261112-0612','AE','A','AED 0.00','2026-11-27','2026-11-26','11','已二次上架'],
+   ['RMA-SA-0081','SO-SA-20261111-0188','SA','B','SAR 45.00','2026-11-26','2026-11-25','2','待申诉'],
+   ['RMA-AE-0028','SO-AE-20261110-0451','AE','C','AED 89.00','2026-11-25','2026-11-24','1','损耗入 COGS'],
+   ['RMA-AE-0022','SO-AE-20261103-0210','AE','B','AED 32.00','2026-11-18','2026-11-17','已逾期','申诉超期']],
+  {note:'<b>处置规则</b>：A 级生成新 FIFO 批次插队尾（不回流原批次）；B/C 级损耗写 <code>inv_batch_consumption(RETURN_LOSS)</code> 进入 L1。'})
+]};
+P['P-19']={t:'Offer 健康',c:'销售 / Offer',fr:'FR-02.3 / RPT-08',d:'按站点取 live_status / price / stock / offer_issues；区分 is_active（定价激活）与 live_status（前台可见）。',b:[
+ A('warning','<b>N-25 能力边界</b>：<code>GetProductOffers</code> <b>Not on MCP</b>，AI 外挂拿不到本页数据；必须由 ERP 核心用只读 service account 直连并落库。O-08 真实 partner_sku 样本待补。'),
+ H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>双站点 Offer 状态</h3></div><div class="card-b"><div class="bars">'
+  +[['AE','82','68'],['SA','54','51']].map(x=>'<div class="bar-group"><div class="bar-pair"><div class="bar ae" style="height:'+x[1]+'%"></div><div class="bar sa" style="height:'+x[2]+'%"></div></div><div class="bar-lbl">'+x[0]+'</div></div>').join('')
+  +'</div><div class="legend"><span><i style="background:var(--primary)"></i>已激活 is_active</span><span><i style="background:var(--accent)"></i>前台可见 LIVE</span></div></div></section>'
+  +'<section class="card"><div class="card-h"><h3>常见 issue 分布</h3></div><div class="card-b">'
+  +[['PRICE_MISSING','1','35%'],['CONTENT_INCOMPLETE','1','35%'],['STOCK_EMPTY','1','30%']].map(x=>'<div style="font-size:12px;margin-bottom:10px"><div style="display:flex;justify-content:space-between"><span>'+x[0]+'</span><b>'+x[1]+'</b></div><div style="height:6px;background:var(--subtle);border-radius:4px;margin-top:4px"><div style="height:6px;width:'+x[2]+';background:var(--warning);border-radius:4px"></div></div></div>').join('')
+  +'</div></section></div>'),
+ T('Offer 明细',[C('psku','code','Partner SKU',165),C('site','site','站点',95),C('active','bool','is_active',95),C('live','status','live_status',115),C('price','money','售价',105),C('stock','num','库存',80),C('issues','status','offer_issues',180),C('at','date','回读时间',145)],
+  [['PSKU-AE-RBR01','AE','是','LIVE','AED 299.00','148','—','2026-11-15 08:00'],['PSKU-SA-RBR01','SA','是','LIVE','SAR 309.00','150','—','2026-11-15 08:00'],
+   ['PSKU-AE-AIR06','AE','是','NOT_LIVE','AED 429.00','96','PRICE_MISSING','2026-11-15 08:00'],
+   ['PSKU-AE-CFM07','AE','否','NOT_LIVE','—','0','CONTENT_INCOMPLETE','2026-11-15 08:00'],
+   ['PSKU-SA-IM05','SA','是','LIVE','SAR 179.00','64','STOCK_EMPTY','2026-11-15 08:00']])
+]};
+
+P['P-20']={t:'周账单 WEEKLY',c:'财务 / 结算',fr:'FR-07.1 ~ FR-07.5 · 资金安全',d:'两类账单分别核对、不合并成一张；导入即生成 15 天争议倒计时，≤3 天红色高亮。',b:[
+ A('danger','<b>15 天争议倒计时</b>：STMT-W-2026W46-AE / -SA 仅剩 <b>2 天</b>（截止 2026-11-17）。逾期平台不受理，等于直接资金损失。本版只导出差异清单，<b>不做平台在线提交</b>。'),
+ kpis(K('本周待核对账单','2','W46 · AE + SA'),K('未匹配行','4','matched = 0'),K('最短争议剩余','2 天','红色高亮 · 不可关闭',{tone:'danger'}),K('已回款差额','AED 0.00','W45 已闭合')),
+ T('周 / 月度账单',cSTMT,STMTS,{dangerRow:true,sub:'WEEKLY 与 STORAGE 分开核对；点行查看逐行对账',note:'<code>dispute_deadline = generated_at + statement_dispute_days</code>（默认 15，可按站点覆盖）。导入后 1 分钟内生成截止日。'}),
+ H('<section class="card block"><div class="card-h"><h3>STMT-W-2026W46-AE · 逐行对账</h3><div><button class="btn sm" data-act="go" data-go="P-22">查看差异清单</button> <button class="btn sm primary" data-act="exportDiff">导出差异清单</button></div></div><div class="tbl-scroll"><table><thead><tr>'
+  +[['行号','60'],['line_type','160'],['订单 / SKU','190'],['金额','120'],['本地匹配','110'],['raw_json','110']].map(x=>'<th style="min-width:'+x[1]+'px">'+x[0]+'</th>').join('')+'</tr></thead><tbody>'
+  +[['01','SALE','SO-AE-...-0841 / SKU-1001','AED 598.00','MATCHED','保留'],['17','REFERRAL_FEE','SKU-1001','AED -84.60','未匹配','保留'],['18','FBN_OUTBOUND','SO-AE-...-0841','AED -18.00','MATCHED','保留'],
+    ['42','FBN_OUTBOUND','SO-AE-...-0776','AED -31.00','未匹配','保留'],['55','AD_SPEND','站点汇总','AED -220.00','MATCHED','保留'],['61','COMPENSATION','RMA-AE-0031','AED 45.00','MATCHED','保留']]
+   .map(r=>'<tr data-act="drawer" data-title="账单行详情"><td class="num">'+r[0]+'</td><td class="code">'+r[1]+'</td><td class="muted">'+r[2]+'</td><td class="num">'+r[3]+'</td><td>'+tag(r[4])+'</td><td class="muted">'+r[5]+'</td></tr>').join('')
+  +'</tbody></table></div><div class="tbl-foot"><span>未匹配行进差异清单，<b>不自动猜测归因</b>；AD_SPEND 即使不做广告模块也必须入库，否则净额对不平</span></div></section>')
+]};
+P['P-21']={t:'仓储账单 STORAGE',c:'财务 / 结算',fr:'FR-07.1',d:'月度 FBN 仓储账单必须与周账单分别核对；库龄 >365 天仓储费跳涨，进入补货预警。',b:[
+ A('info','<b>FR-07.1 硬规则</b>：<code>statement_type</code> 必须区分 WEEKLY / STORAGE，STORAGE <b>不会</b>计入 WEEKLY 净额，也不合并成一张账单。'),
+ T('月度仓储账单',[C('no','code','账单号',200),C('site','site','站点',95),C('period','date','账期',115),C('sku','code','SKU',105),C('age','num','库龄(天)',100),C('vol','num','计费体积',100),C('amt','money','金额',120),C('st','status','状态',105)],
+  [['STMT-S-202610-AE','AE','2026-10','SKU-1001','48','0.82 m³','AED 412.00','PENDING'],
+   ['STMT-S-202610-AE','AE','2026-10','SKU-1007','392','1.40 m³','AED 1,186.00','库龄预警'],
+   ['STMT-S-202610-SA','SA','2026-10','SKU-1005','371','0.96 m³','SAR 742.00','库龄预警'],
+   ['STMT-S-202610-AE','AE','2026-10','SKU-1004','62','1.12 m³','AED 504.00','MATCHED']],
+  {note:'库龄 &gt;365 天的 SKU 同步出现在 P-29 预警清单；FBN 仓储费按体积与库龄阶梯计价，费率版本见 P-24。'})
+]};
+P['P-22']={t:'差异清单',c:'财务 / 对账',fr:'FR-07.2 / FR-07.4',d:'未匹配行 matched=0 全部进差异清单，保留 raw_json 原始行；可导出供财务在 Seller Lab 人工提交。',b:[
+ A('danger','<b>争议截止 2026-11-17</b>（剩余 2 天）。导出后由财务在 Seller Lab 人工提交（O-05）；本系统不做在线提交。'),
+ H('<div class="block" style="display:flex;gap:8px"><button class="btn primary" data-act="exportDiff">导出差异清单</button><button class="btn" data-act="go" data-go="P-36">查看 AI 差异候选</button><button class="btn" data-act="drawer" data-title="导入校验规则">查看匹配规则</button></div>'),
+ T('未匹配行（matched = 0）',cDIFF,DIFF,{dangerRow:true,sub:'AI 复核前 matched 字段不改动',note:'差异清单含账单号、行号、金额、原始行、截止日。<b>AI 输出的差异候选在人工复核前不改变任何账单行</b>（FR-11.5）。'})
+]};
+P['P-23']={t:'回款登记',c:'财务 / 回款',fr:'FR-07.5 / FR-06.4',d:'fin_payout 关联 statement_no，汇率按付款日取；账单净额与回款差额可查，COD 单列。',b:[
+ T('回款流水',[C('no','code','回款编号',165),C('stmt','code','关联账单',200),C('bank','code','Bank Transaction ID',205),C('amt','money','到账金额',125),C('cur','','币种',75),C('rate','num','付款日汇率',110),C('cny','money','折合 CNY',120),C('at','date','付款日',135)],
+  [['PAY-20261113-006','STMT-W-2026W45-AE','TXN-AE-998213','AED 38,102.80','AED','1.9800','¥ 75,443.54','2026-11-13'],
+   ['PAY-20261106-005','STMT-W-2026W44-AE','TXN-AE-997104','AED 35,760.40','AED','1.9780','¥ 70,733.27','2026-11-06'],
+   ['PAY-20261105-004','STMT-S-202609-SA','TXN-SA-440182','SAR 12,410.00','SAR','1.8900','¥ 23,454.90','2026-11-05']],
+  {note:'<b>汇率缺失必须报错</b>，禁止用 1 兜底（FR-01.5）。COD 订单未回款部分在回款报表单列，不计入现金口径。'})
+]};
+P['P-24']={t:'费用字典',c:'财务 / 费率',fr:'FR-07.6',d:'类目 × 站点 × 履约模式 × 生效日期版本化；PERCENT / FIXED / TIER 三类，新增版本不覆盖历史，min_amount 支持 KSA 每单最低 1 SAR。',b:[
+ A('warning','<b>A-01 决议</b>：Seller Lab 真实费率表未核到，初值用「人工录入 + 账单反推」校准，<b>不臆造费率</b>。费率变更只新增版本，旧期间利润重算仍用旧费率。'),
+ T('fin_fee_dict',[C('id','code','版本',135),C('cat','code','类目码',145),C('site','site','站点',95),C('mode','code','履约',85),C('type','status','计费类型',110),C('rate','num','费率 / 金额',120),C('min','money','最低金额',110),C('from','date','effective_from',135),C('st','status','状态',90)],
+  [['FEE-2026.11-01','ELEC-AUDIO','AE','FBN','PERCENT','14.0%','AED 0.00','2026-11-01','ACTIVE'],
+   ['FEE-2026.10-01','ELEC-AUDIO','AE','FBN','PERCENT','12.0%','AED 0.00','2026-10-01','HISTORY'],
+   ['FEE-2026.11-01','ELEC-AUDIO','SA','FBN','PERCENT','15.0%','SAR 1.00','2026-11-01','ACTIVE'],
+   ['FEE-2026.11-01','AUTO-APPLIANCE','AE','FBN','FIXED','AED 18.00','—','2026-11-01','ACTIVE'],
+   ['FEE-2026.11-01','HOME-BEDDING','SA','FBN','TIER','阶梯 1–3','SAR 1.00','2026-11-01','ACTIVE']],
+  {note:'<b>口径冲突（C-05）</b>：公开资料称佣金 3%–20%，2026 费率表服饰类达 27%。一律按配置读取，界面不写死任何百分比。'})
+]};
+P['P-25']={t:'L2 费用池',c:'财务 / 期间费用',fr:'FR-08.2 / Q8',d:'头程、关税、清关、包材、汇兑、通道费、AD_SPEND 独立归集，不写入 inv_batch；included_in_partial 决定 PARTIAL 口径包含哪些科目。',b:[
+ A('success','<b>双层利润</b>：L1 = 收入 − 平台费 − FIFO COGS（<b>不含 L2</b>）；净利 = L1 − allocated_expense。登记 L2 费用后 <b>L1 数值不变</b>（FR-08.2 验收）。'),
+ H('<section class="card block"><div class="card-h"><h3>PARTIAL 口径科目勾选</h3><span class="sub">O-03：默认不勾选，由财务配置，不写死规则</span></div><div class="card-b" id="partialBox"></div></section>'),
+ T('fin_expense_pool',[C('no','code','费用单号',165),C('type','code','科目',145),C('period','date','期间',105),C('site','site','站点',95),C('asn','code','关联 ASN',175),C('amt','money','金额 (CNY)',130),C('ch','channel','来源',90)],
+  [['EP-202611-012','FREIGHT','2026-11','AE','ASN-20261113-0006','¥ 4,820.00','MANUAL'],
+   ['EP-202611-013','CUSTOMS_DUTY','2026-11','AE','ASN-20261113-0006','¥ 1,260.00','MANUAL'],
+   ['EP-202611-014','PACKAGING','2026-11','AE','ASN-20261113-0006','¥ 680.00','MANUAL'],
+   ['EP-202611-015','FX_LOSS','2026-11','ALL','—','¥ 342.18','MANUAL'],
+   ['EP-202611-016','CHANNEL_FEE','2026-11','SA','—','¥ 218.40','MANUAL'],
+   ['EP-202611-017','AD_SPEND','2026-11','AE','—','¥ 396.00','EXPORT']],
+  {note:'<code>allocation_policy</code> = NONE / PARTIAL / FULL 三套结果<b>并存互不覆盖</b>，切换口径后历史快照仍可查（FR-08.3）。'})
+]};
+P['P-26']={t:'利润报表与重算',c:'财务 / 利润引擎',fr:'FR-08.1 ~ FR-08.7 · 核心',d:'L1 贡献毛利、L2 费用池、三档合并口径并存；公式版本化，支持按期间全量重算并保留新旧快照。',b:[
+ A('warning','<b>VAT 风险提示（FR-08.7，不可关闭）</b>：售价含 VAT（AE 5% / SA 15%）、费率报价不含 VAT，当前 <code>vat_mode=IGNORE</code>，<b>L1 毛利系统性偏高</b>。字段与科目位已预留，启用 VAT 不需要改表。'),
+ H('<section class="card block"><div class="card-h"><h3>合并口径</h3><div style="display:flex;align-items:center;gap:10px"><span class="sub" id="policyHint">NONE：不摊任何 L2 费用</span><div class="seg plain" id="policySeg">'
+  +['NONE','PARTIAL','FULL'].map(x=>'<button data-act="policy" data-policy="'+x+'" class="'+(x===S.policy?'on':'')+'">'+x+'</button>').join('')+'</div></div></div>'
+  +'<div class="card-b"><div class="grid3" id="profitSummary"></div>'
+  +'<div class="note" id="policyNote"></div></div></section>'),
+ H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>公式定义</h3><span class="sub">写入 formula_version</span></div><div class="card-b"><div class="formula">'
+  +'<span class="c">// L1 · SKU 贡献毛利</span>\nplatform_fee = REFERRAL + OUTBOUND\n              + STORAGE + RETURN − COMPENSATION\n'
+  +'<span class="k">cogs_fifo</span> = Σ inv_batch_consumption.amount\n'
+  +'<span class="k">L1</span> = revenue − platform_fee − cogs_fifo\n\n'
+  +'<span class="c">// L2 · 期间费用池（物理分离）</span>\nL2 = Σ fin_expense_pool.amount\n'
+  +'<span class="k">allocated</span> = 0 / PARTIAL勾选 / 全部\n'
+  +'<span class="k">net_profit</span> = L1 − allocated\n'
+  +'<span class="c">// 注意：不是 L1 + L2（FR-08.6）</span></div></div></section>'
+  +'<section class="card"><div class="card-h"><h3>双站点对比</h3><span class="sub">归一 CNY 后比较，AED 与 SAR 不直接相加</span></div><div class="card-b"><div class="bars">'
+  +[['复古收音机','85','62'],['记忆棉枕','70','48'],['车载冰箱','46','78'],['AI 机器人','92','40']].map(x=>'<div class="bar-group"><div class="bar-pair"><div class="bar ae" style="height:'+x[1]+'%"></div><div class="bar sa" style="height:'+x[2]+'%"></div></div><div class="bar-lbl">'+x[0]+'</div></div>').join('')
+  +'</div><div class="legend"><span><i style="background:var(--primary)"></i>AE (AED→CNY)</span><span><i style="background:var(--accent)"></i>SA (SAR→CNY)</span></div></div></section></div>'),
+ H('<div class="block" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn primary" data-act="recalc" data-only="FINANCE ADMIN">全量重算</button>'
+  +'<button class="btn" data-act="drawer" data-title="公式版本历史">版本历史</button>'
+  +'<span style="font-size:12px;color:var(--t3)">当前公式版本 <code id="fvText">'+S.recalcVer+'</code> · 重算保留新旧两套快照，原始单据不变</span></div>'),
+ T('SKU 利润表（RPT-01）',cPROFIT,PROFIT,{sub:'点击行查看收入 / 平台费 / COGS 明细与公式版本',note:'三档口径切换只改变「净利」列展示，<b>不覆盖历史快照</b>；每张利润报表固定带 VAT 风险提示。'})
+]};
+
+P['P-27']={t:'补货建议',c:'补货 / 建议',fr:'FR-09.1 ~ FR-09.5',d:'suggested_qty = CEIL(日均销量30 × event_factor × (交期 + 安全天数) − 可用 − 在途)，分站点分仓独立出建议；AI 只能写 DRAFT。',b:[
+ A('info','<b>人工复核闸门</b>：AI / 系统只能写 <code>DRAFT</code>；CONFIRMED 必须记 <code>reviewed_by/at</code>，CONVERTED 写 <code>converted_doc_type/no</code> 形成闭环。'),
+ H('<section class="card block"><div class="card-h"><h3>SUG-20261115-001 · 指标依据</h3><div><button class="btn sm primary" data-act="convertSug" data-only="OPERATOR PURCHASE ADMIN" id="sugBtn">确认并转采购单</button></div></div><div class="card-b">'
+  +'<div class="grid3" style="gap:12px">'+[['avg_daily_sales_7','13.2 件'],['avg_daily_sales_30','11.8 件'],['days_of_cover','12 天'],['qty_available','148'],['qty_in_transit','150'],['lead_time_days','28'],['safety_stock','7 天'],['event_factor','1.0'],['suggested_qty','284']].map(x=>'<div style="background:var(--subtle);border-radius:8px;padding:9px 11px"><div style="font-size:11px;color:var(--t3)">'+x[0]+'</div><div style="font-size:15px;font-weight:600;margin-top:2px">'+x[1]+'</div></div>').join('')+'</div>'
+  +'<div class="note" id="sugNote">建议在途增加时会下降；AE 与 SA <b>不跨站点合并</b>。转单后回写 <code>source_ref_no</code>，可在 P-07 反查。</div></div></section>'),
+ T('建议单列表',cSUG,SUG,{note:'<b>一键转单</b>：转采购单 / 调拨单 / ASN 均可，回写单号形成闭环（FR-09.5）。'})
+]};
+P['P-28']={t:'大促系数',c:'补货 / 参数',fr:'FR-09.1 / O-04',d:'event_factor 按站点手动调整，默认 1.0；斋月 / Yellow Friday 期间调高，直接影响 suggested_qty。',b:[
+ T('大促系数',[C('site','site','站点',95),C('event','','活动',165),C('factor','num','event_factor',130),C('from','date','生效起',135),C('to','date','生效止',135),C('st','status','状态',100)],
+  [['AE','常态','1.0','2026-01-01','—','ACTIVE'],['SA','常态','1.0','2026-01-01','—','ACTIVE'],
+   ['AE','Yellow Friday','1.8','2026-11-20','2026-11-30','PENDING'],['SA','Yellow Friday','1.6','2026-11-20','2026-11-30','PENDING'],
+   ['AE','斋月预热','1.4','2027-02-01','2027-03-20','DRAFT']],
+  {note:'O-04 默认 1.0，由运营按站点调整；不写死在公式里。'})
+]};
+P['P-29']={t:'预警',c:'补货 / 预警',fr:'FR-09.6 / NFR-15',d:'断货、滞销、库龄超期（FBN >365 天仓储费跳涨）、批次不足、争议倒计时、DEAD 任务六类告警。',b:[
+ T('预警清单',[C('type','status','类型',120),C('sku','code','SKU',105),C('site','site','站点',95),C('val','muted','当前值',130),C('thr','muted','阈值',110),C('desc','muted','说明',230),C('st','status','处理',100)],
+  [['断货','SKU-1006','AE','可售 7 天','≤7 天','AI 机器人销量上升，在途 200','待处理'],
+   ['库龄超期','SKU-1007','AE','392 天','>365 天','FBN 仓储费跳涨，建议清仓','待处理'],
+   ['库龄超期','SKU-1005','SA','371 天','>365 天','FBN 仓储费跳涨','待处理'],
+   ['滞销','SKU-1008','SA','可售 96 天','>90 天','建议暂停补货','待处理'],
+   ['批次不足','SKU-1003','AE','剩余 40','<安全库存','退货损耗后可用量偏低','已处理'],
+   ['争议倒计时','STMT-W-2026W46-AE','AE','剩余 2 天','≤3 天','立即导出差异清单','待处理']],
+  {dangerRow:true})
+]};
+P['P-30']={t:'报表中心',c:'报表 / RPT',fr:'FR-12 / RPT-01 ~ RPT-10',d:'十张标准报表，全部支持期间、站点筛选与导出；利润类报表固定带 VAT 风险提示与 formula_version。',b:[
+ A('info','每张报表都对应 PRD §4 FR-12 的口径定义；点卡片可跳转到对应业务页面查看源数据。'),
+ H('<div class="rpt-grid">'+[
+  ['RPT-01','SKU 利润表','L1 / L2 / 合并三口径、公式版本、可重算、可导出','P-26'],
+  ['RPT-02','双站点对比','归一币种后对比销量 / 收入 / 毛利 / 可售天数','P-26'],
+  ['RPT-03','账单差异清单','未匹配行 + 争议截止日倒计时','P-22'],
+  ['RPT-04','回款与账期','账单净额 vs 回款差额、COD 单列','P-23'],
+  ['RPT-05','库存四态与库龄','可用 / 在途 / 锁定 / 不可售、>365 天预警','P-10'],
+  ['RPT-06','FIFO 批次流水','批次剩余量、消耗流水、COGS 溯源','P-09'],
+  ['RPT-07','补货建议看板','建议量、依据指标、状态、转单结果','P-27'],
+  ['RPT-08','Offer 健康','live_status / offer_issues（双站点）','P-19'],
+  ['RPT-09','退货与申诉时效','窗口期、申诉截止、分级与补偿','P-18'],
+  ['RPT-10','接口健康','429 / 错误码 / DEAD 任务 / request_id 检索','P-32']
+ ].map(x=>'<div class="rpt" data-act="go" data-go="'+x[3]+'"><div class="id">'+x[0]+'</div><div class="nm">'+x[1]+'</div><div class="ds">'+x[2]+'</div></div>').join('')+'</div>')
+]};
+
+P['P-31']={t:'同步任务',c:'集成 / 任务',fr:'FR-10.4',d:'PENDING → RUNNING → SUCCESS / FAILED → DEAD；429 指数退避，超过重试上限转 DEAD 并告警，业务可切 CSV 通道。',b:[
+ A('danger','<b>1 个 DEAD 任务</b>：Offer 健康回读重试 5 次后转 DEAD。按 FR-10.3 关闭 API 通道后，订单 / 账单仍可 CSV 导入跑通闭环（UAT-01 步 10）。'),
+ T('int_sync_task',[C('no','code','任务编号',170),C('type','','任务类型',160),C('ch','channel','通道',100),C('retry','num','重试',75),C('code','code','错误码',155),C('req','code','X-Request-Id',215),C('st','status','状态',100),C('at','date','时间',145)],
+  [['SYNC-20261115-018','Offer 健康回读','API','5','RATE_LIMITED','req_000_9c21f4b8e...','DEAD','2026-11-15 08:02'],
+   ['SYNC-20261115-017','GetExportCategoryList','API','0','—','req_000_2a71de09f...','SUCCESS','2026-11-15 07:58'],
+   ['SYNC-20261115-016','FBN 订单导出','EXPORT','0','—','—','SUCCESS','2026-11-15 08:40'],
+   ['SYNC-20261115-015','ListWarehouses','API','1','429','req_000_55ab8c102...','SUCCESS','2026-11-15 07:50'],
+   ['SYNC-20261114-014','退货参考号回读','WEBHOOK','0','—','—','RUNNING','2026-11-14 22:14']],
+  {dangerRow:true,note:'读取 <code>X-Ratelimit-Remaining</code> / <code>X-Ratelimit-Burst-Remaining</code> / <code>X-Ratelimit-Retry-After</code>；失败任务写补偿队列。'})
+]};
+P['P-32']={t:'API 日志',c:'集成 / 日志',fr:'FR-10.5 / FR-10.6',d:'记录 X-Request-Id、http_status、error_code、request/response、latency、时间戳；平台侧 Request Logs 只保留 14 天，本地至少留 12 个月。',b:[
+ A('info','<b>M0 实测</b>：7 次生产网关只读调用全部 HTTP 200，<code>x-request-id</code> 格式 <code>req_000_&lt;32hex&gt;</code>。提 Support Case 时可直接从本页检索 request_id。'),
+ T('int_api_log',[C('req','code','X-Request-Id',220),C('method','code','方法',80),C('path','code','端点路径',255),C('http','status','HTTP',90),C('err','code','error_code',145),C('ms','num','latency(ms)',110),C('at','date','时间戳',145)],
+  [['req_000_7f3a91c2e4b6d...','POST','/identity/public/v1/api/login','200','—','182','2026-11-15 07:50:02'],
+   ['req_000_2a71de09f8c4...','GET','/identity/v1/whoami','200','—','96','2026-11-15 07:50:03'],
+   ['req_000_b418c003fa72...','POST','/warehouse-platform/v1/warehouses/list','200','—','244','2026-11-15 07:51:11'],
+   ['req_000_0d8e7721ba93...','GET','/impex/v1/export/category/list','200','—','158','2026-11-15 07:52:40'],
+   ['req_000_c9315aa8d0e2...','GET','/event-notifications/v1/event-type/list','200','—','131','2026-11-15 07:53:02'],
+   ['req_000_55ab8c102de7...','GET','/event-notifications/v1/destination/list','200','—','120','2026-11-15 07:53:31'],
+   ['req_000_9c21f4b8e11a...','GET','/offer/v1/offers','429','RATE_LIMITED','—','2026-11-15 08:02:19']],
+  {note:'<b>错误 envelope</b>：<code>error{status_id, code, message, fields, doc_url}</code>；<code>PERMISSION_DENIED</code> 映射为「检查 service account 角色」的可读指引，不抛原始堆栈。'})
+]};
+P['P-33']={t:'Webhook 事件',c:'集成 / 事件',fr:'FR-10.7 / N-24',d:'≤5 destination；event_id 唯一键幂等；状态 RECEIVED / ACKNOWLEDGED / PROCESSED / FAILED / KILLED；原始 payload_raw 不删减。',b:[
+ A('warning','<b>N-24 实测</b>：仅 3 种事件类型 <code>FBPI::ORDER_SYNC</code> / <code>FBPO::PO_SYNC</code> / <code>RETURNS::REFERENCE_UPDATE</code>，<b>无 FBN 订单事件</b>，destinations 当前为空 → webhook 仅作退货辅助，订单仍走导出。'),
+ T('int_webhook_event',[C('eid','code','event_id',220),C('type','code','event_type',215),C('site','site','站点',95),C('dest','muted','destination',150),C('st','status','状态',120),C('at','date','接收时间',145)],
+  [['EVT-20261115-00041','RETURNS::REFERENCE_UPDATE','AE','https://erp/hooks/noon','PROCESSED','2026-11-15 09:12:44'],
+   ['EVT-20261115-00041','RETURNS::REFERENCE_UPDATE','AE','https://erp/hooks/noon','ACKNOWLEDGED','2026-11-15 09:12:44'],
+   ['EVT-20261114-00038','FBPI::ORDER_SYNC','AE','—','KILLED','2026-11-14 18:02:10'],
+   ['EVT-20261114-00037','FBPO::PO_SYNC','SA','—','RECEIVED','2026-11-14 15:31:02']],
+  {note:'第一条为重复 <code>event_id</code>：幂等校验直接 ACK，<b>不产生重复业务单据</b>。'})
+]};
+P['P-34']={t:'导出任务',c:'集成 / impex',fr:'FR-10.8 / N-23',d:'GetExportCategoryList → CreateExport → GetExportStatus 三步；12 个类别码已实测；int_export_job 记录状态与 file_url。',b:[
+ A('warning','<b>O-07 未验证</b>：<code>CreateExport</code> 是写语义且 Not on MCP，<b>只读 Service Account 能否调用未验证</b>。未验证前按「不可用」处理，继续用 Seller Lab 人工导出 + 账单反推（A-01）。'),
+ T('12 个 export_category_code（M0 实测）',[C('code','code','类别码',330),C('use','muted','ERP 用途',250),C('ch','channel','通道',100),C('st','status','状态',100)],
+  [['noon_noonoms_ordersexport','FBN 订单（is_fulfilled_by_noon 筛选）','EXPORT','可用'],['noon_financeweb_transactionviewreportonitemlevel','item 级交易 / 账单逐行','EXPORT','可用'],
+   ['invoicesandcreditnotes','发票与贷项','EXPORT','可用'],['fbn_inventoryv2_ledgerdetailedview','FBN 库存台账明细','EXPORT','可用'],
+   ['fbn_inventoryv2_agedinventory','FBN 库龄报表','EXPORT','可用'],['fbn_inventoryv2_stockview','FBN 库存视图','EXPORT','可用'],
+   ['noon_catalog_productexport','商品主数据回读','EXPORT','可用'],['noon_returns_returnexport','退货明细','EXPORT','可用'],
+   ['noon_financeweb_statementreport','周 / 月 statement','EXPORT','可用'],['noon_fbn_asn_export','ASN 货件','EXPORT','可用'],
+   ['namshi_catalog_productexport','Namshi 商品（Q9 不使用）','EXPORT','不使用'],['namshi_orders_export','Namshi 订单（Q9 不使用）','EXPORT','不使用']],
+  {note:'<b>R1 口径修正</b>：Statement 无实时 REST 端点，但 impex 报表导出可覆盖 FBN 订单 / 库存台账 / item 级交易 —— CSV 通道存在自动化升级路径，列头与权限仍待验证（O-07 / O-09）。'}),
+ T('导出任务',[C('no','code','任务号',165),C('code','code','export_category_code',300),C('st','status','状态',110),C('file','muted','file_url',190),C('cnt','num','导入行数',100),C('at','date','时间',145)],
+  [['EXP-20261115-004','noon_noonoms_ordersexport','SUCCESS','s3://noon-exports/...csv','318','2026-11-15 08:40'],
+   ['EXP-20261114-003','fbn_inventoryv2_ledgerdetailedview','SUCCESS','s3://noon-exports/...csv','1,204','2026-11-14 21:05'],
+   ['EXP-20261115-005','noon_financeweb_statementreport','PENDING','—','—','2026-11-15 11:20']])
+]};
+P['P-35']={t:'环境配置',c:'集成 / 环境',fr:'FR-10.2 / FR-10.3 / A-03 / A-04',d:'生产与沙箱共用一份 .json 凭据，由 env + 网关 host 区分；四通道统一抽象，任何模块在 API 不可用时可降级到 CSV。',b:[
+ A('success','<b>A-04 已生效</b>：Service Account 设为只读，M0 生产 Login / whoami / 仓清单 / 导出类别 / 事件类型 7 次调用全部 200。官方 MCP 平台侧 <b>0 个写工具</b>，AI 只读边界是平台级硬保证。'),
+ H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>环境与凭据</h3></div><div class="card-b"><dl class="mini-kv">'
+  +'<dt>project_code</dt><dd>PRJ468049</dd><dt>env</dt><dd>PRODUCTION（可切 SANDBOX）</dd>'
+  +'<dt>生产网关</dt><dd class="code">noon-api-gateway.noon.partners</dd><dt>沙箱网关</dt><dd class="code">noon-sandbox-api-gateway.noon.partners</dd>'
+  +'<dt>凭据引用</dt><dd class="code">credential_ref（仅路径，私钥不入库 / 不进 Git / 不进日志）</dd>'
+  +'<dt>鉴权</dt><dd>RS256 JWT → /identity/public/v1/api/login → session cookie（30 天）</dd>'
+  +'<dt>角色</dt><dd>只读 READ（A-04）</dd><dt>md_partner_account</dt><dd>1 条记录（A-03 共用凭据）</dd></dl>'
+  +'<div class="note">沙箱是<b>静态 mock</b>，且跳过权限 / 库存 / 定价校验，<b>不能用来验证权限或取真实字典</b>；login 仍走生产。</div></div></section>'
+  +'<section class="card"><div class="card-h"><h3>四通道降级开关</h3><span class="sub">FR-10.3 / UAT-01 步 10</span></div><div class="card-b" id="channelBox"></div></section></div>'),
+ T('集成能力边界',[C('cap','','能力',205),C('api','status','公开 API',115),C('mcp','status','官方 MCP',115),C('erp','muted','ERP 主通道',190)],
+  [['Catalog / Content / Pricing','已公开','部分 Read','本版不用（Q4）'],['GetProductOffers','已公开','Not on MCP','只读 service account 直连（O-08）'],
+   ['ListWarehouses / GetStock','已公开','Read','本版不推送库存（N-22）'],['ListReturnReferences','已公开','Not on MCP','退货辅助'],
+   ['impex 三步导出','已公开','Not on MCP','Seller Lab CSV（O-07 待验证）'],['Event Notifications','已公开','Read','退货辅助（无 FBN 订单事件）'],
+   ['FBN Inbound(ASN)','未公开','无','Seller Lab 手工登记'],['FBN 订单','未公开','无','CSV 导出'],
+   ['Statement / 仓储账单','未公开','无','CSV 导出'],['广告投放','未公开','无','本版不做（Q7）']],
+  {note:'<b>N-25</b>：全量 54 个 API Reference 端点中，官方 MCP 仅 11 个 Read 工具、<b>0 个写工具</b>；43 个端点 Not on MCP。AI 取数主力是 ERP 本地 <code>v_ai_*</code> 视图，MCP 只是补充。'})
+]};
+
+P['P-36']={t:'系统管理',c:'系统 / 管理',fr:'FR-01.3 / FR-01.4 / FR-11 / FR-13',d:'用户、角色、审计日志、导入模板与 AI 建议复核。首个 AI 场景 STATEMENT_RECON：AI 只输出差异候选，人工复核前任何账单行都不改动。',b:[
+ A('warning','<b>AI 三不碰</b>：不碰库存台账、采购单、财务账；唯一可写表 <code>ai_suggestion</code> 且只能 <code>status=PENDING</code>。APPROVED 后<b>由核心系统</b>生成业务单，AI 不参与落单。'),
+ H('<div class="tabs" id="sysTabs">'+[['ai','AI 建议复核 (4)'],['user','用户'],['role','角色权限'],['audit','审计日志'],['import','导入模板']].map(x=>'<button data-tab="'+x[0]+'" class="'+(S.tab===x[0]?'on':'')+'">'+x[1]+'</button>').join('')+'</div>'),
+ H('<div id="sysTabBody"></div>')
+]};
+
+/* ---------- dynamic blocks ---------- */
+function stepperHTML(states,cur){
+  const i=states.indexOf(cur);
+  return states.map((s,j)=>{
+    const cls=j<i?'done':(j===i?'cur':'');
+    return (j?'<span class="step-line '+(j<=i?'done':'')+'"></span>':'')
+      +'<span class="step '+cls+'"><span class="bul">'+(j<i?'v':j+1)+'</span>'+esc(s)+'</span>';
+  }).join('');
+}
+function aiTabHTML(){
+  const done=AI_ITEMS.filter(x=>S.ai[x.id]).length;
+  return '<div class="block" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+   +'<span style="font-size:12px;color:var(--t2)">场景 <b>STATEMENT_RECON</b> · 取数 <code>v_ai_statement_open</code> + 账单行 + 本地订单（只读）· 已复核 '+done+' / '+AI_ITEMS.length+'</span>'
+   +'<span class="spacer" style="flex:1"></span><button class="btn sm" data-act="exportDiff">导出差异清单</button></div>'
+   +AI_ITEMS.map(x=>{
+     const st=S.ai[x.id]||'PENDING';
+     return '<div class="ai-card '+(st==='APPROVED'?'approved':st==='REJECTED'?'rejected':'')+'">'
+      +'<div class="ai-top"><span class="tag purple">'+x.scene+'</span><span class="code" style="font-size:11px;color:var(--t3)">'+x.id+'</span>'
+      +'<span class="ttl">'+esc(x.title)+'</span>'+tag(st=== 'PENDING'?'待复核':st)+'</div>'
+      +'<div class="ai-ev"><b>证据字段</b>：'+esc(x.ev)+'　|　<b>涉及金额</b> '+esc(x.amt)+'　|　<b>账单</b> '+esc(x.stmt)+'</div>'
+      +'<div class="ai-acts"><span class="conf">confidence '+x.conf+'</span><span style="flex:1"></span>'
+      +'<span style="font-size:11px;color:var(--t3);margin-right:6px">复核前 matched 未改动</span>'
+      +(st==='PENDING'
+        ?'<button class="btn sm primary" data-act="aiReview" data-id="'+x.id+'" data-d="APPROVED">通过</button><button class="btn sm danger" data-act="aiReview" data-id="'+x.id+'" data-d="REJECTED">驳回</button>'
+        :'<span class="tag green">reviewed_by '+esc(S.role)+' · 2026-11-15 22:48</span>')
+      +'</div></div>';
+   }).join('')
+   +'<div class="note"><b>落单闸门（FR-11.4 / §8.4）</b>：通过只把建议单状态改为 APPROVED 并写 <code>reviewed_by/at</code>；<b>由核心系统</b>才更新 <code>fin_statement_line.matched</code>、生成差异清单导出件并回写 <code>converted_doc_no</code>。驳回必须可填原因，全程写 <code>sys_audit_log</code>。</div>';
+}
+function sysTabHTML(){
+  if(S.tab==='ai')return aiTabHTML();
+  if(S.tab==='user')return T('用户（≤10 人）',[C('id','code','账号',130),C('name','','姓名',110),C('role','status','角色',120),C('scope','site','site_scope',100),C('st','status','状态',95),C('at','date','创建时间',145)],
+   [['u.admin','管理员','ADMIN','ALL','ACTIVE','2026-11-12 10:00'],['u.op1','运营 A','OPERATOR','AE','ACTIVE','2026-11-12 10:05'],['u.op2','运营 B','OPERATOR','SA','ACTIVE','2026-11-12 10:06'],
+    ['u.pur1','采购 A','PURCHASE','ALL','ACTIVE','2026-11-12 10:08'],['u.wh1','仓管 A','WAREHOUSE','AE','ACTIVE','2026-11-12 10:10'],
+    ['u.fin1','财务 A','FINANCE','ALL','ACTIVE','2026-11-12 10:12'],['u.svc1','客服 A','SERVICE','ALL','ACTIVE','2026-11-12 10:14'],
+    ['svc.noon.ai','AI 外挂','AGENT','ALL','只读','2026-11-13 21:26']],{noFilter:true});
+  if(S.tab==='role')return T('权限矩阵（PRD §1.4）',[C('domain','','功能域',215),C('ad','muted','ADMIN',90),C('op','muted','OPERATOR',100),C('pu','muted','PURCHASE',100),C('wh','muted','WAREHOUSE',105),C('fi','muted','FINANCE',95),C('sv','muted','SERVICE',95),C('ai','muted','AGENT',110)],
+   [['系统参数 / 用户角色','V C U X','V','—','—','V','—','—'],['SKU / Partner SKU','V C U X','V C U X','V','V','V','V','只读视图'],
+    ['供应商 / 采购单','V C U X','V','V C U X','V','V','—','—'],['库存 / 批次 / 调拨 / 盘点','V C U X','V','V','V C U X','V','V','—'],
+    ['ASN / 头程费用','V C U X','V','V','V C U','V','—','—'],['订单 / 退货','V C U X','V','V','V','V C U','V C U','—'],
+    ['账单 / 费用字典 / 利润重算','V C U X','V','—','—','V C U X','—','—'],['补货建议复核与转单','V C U X','V C X','V C X','—','V','—','只读'],
+    ['AI 建议单','V C U X','V C X','V X','—','V X','—','仅 C(DRAFT)']],{noFilter:true,note:'V=查看 / C=新增 / U=修改 / X=复核导出 / —=无权。非财务角色访问利润重算接口返回 403。'});
+  if(S.tab==='audit')return T('sys_audit_log',[C('no','code','log_no',170),C('actor','muted','操作人',110),C('obj','code','对象',190),C('act','status','动作',105),C('before','muted','before_json',165),C('after','muted','after_json',165),C('at','date','时间戳',145)],
+   [['LOG-000942','财务 A','fin_statement_line:17','AI_REVIEW','matched=0','—','2026-11-15 22:48'],['LOG-000941','AI 外挂','ai_suggestion:001','CREATE','—','status=PENDING','2026-11-15 22:40'],
+    ['LOG-000940','仓管 张','inv_batch:BAT-...-002','UPDATE','qty_remaining=150','qty_remaining=148','2026-11-15 10:22'],
+    ['LOG-000939','系统','fin_statement:W46-AE','IMPORT','—','dispute_deadline=11-26','2026-11-15 09:12']],{noFilter:true,note:'所有写操作带 <code>log_no</code> + 操作人 + before/after + 时间戳；AI 取数与建议同样留痕，可回放「哪次取数产出了哪条建议」。'});
+  if(S.tab==='import')return T('8 类标准导入模板（FR-13.1）',[C('name','','模板',190),C('target','code','目标表',205),C('fields','num','字段数',85),C('map','status','列头映射',120),C('st','status','状态',100)],
+   [['SKU 主数据','md_sku','12','可配置','READY'],['供应商','md_supplier / md_sku_supplier','9','可配置','READY'],['Partner SKU 映射','md_partner_sku','7','可配置','READY'],
+    ['期初 FIFO 批次','inv_batch / inv_stock_ledger','10','可配置','READY'],['订单','sal_order(_item)','18','可配置','READY'],['周账单 WEEKLY','fin_statement(_line)','16','可配置','READY'],
+    ['月度仓储账单 STORAGE','fin_statement(_line)','14','可配置','READY'],['费用池','fin_expense_pool','9','可配置','READY']],
+   {noFilter:true,note:'<b>A-01 决议</b>：Seller Lab 列头未核到 → 列头映射做成可配置，先用人工录入 + 账单反推开工；拿到真实样本只改映射配置、不改表。每次导入生成批次号 + 操作人 + 时间戳，原始行可下载复现。'});
+  return '';
+}
+function partialHTML(){
+  const items=[['FREIGHT','头程运费','¥ 4,820.00'],['CUSTOMS_DUTY','关税','¥ 1,260.00'],['PACKAGING','包材','¥ 680.00'],['FX_LOSS','汇兑损益','¥ 342.18'],['CHANNEL_FEE','收款通道费','¥ 218.40'],['AD_SPEND','广告扣款','¥ 396.00']];
+  const chosen=Object.keys(S.expensePartial).filter(k=>S.expensePartial[k]).length;
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+   +items.map(x=>'<label style="display:flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:7px;padding:7px 11px;font-size:12px;cursor:pointer;background:'+(S.expensePartial[x[0]]?'var(--primary-weak)':'var(--surface)')+'">'
+     +'<input type="checkbox" data-act="partial" data-k="'+x[0]+'" '+(S.expensePartial[x[0]]?'checked':'')+'> '+x[1]+' <span style="color:var(--t3)">'+x[2]+'</span></label>').join('')
+   +'</div><div class="note">当前 PARTIAL 已勾选 <b>'+chosen+'</b> 个科目，合计将计入净利的 <code>allocated_expense</code>。<b>NONE</b> 恒为 0，<b>FULL</b> 忽略勾选包含全部科目。三套结果并存互不覆盖。</div>';
+}
+function channelHTML(){
+  const defs=[['API','Noon 公开 REST 端点','GetProductOffers / ListWarehouses / 事件类型'],['CSV','Seller Lab / impex 导出','FBN 订单 · 账单 · 库存台账（主通道）'],['WEBHOOK','Event Notifications','≤5 destination，仅退货辅助（N-24）'],['MANUAL','人工登记','ASN · 头程费用 · 费率初值']];
+  const apiOff=!S.channels.API;
+  return defs.map(x=>'<div class="channel-row"><div><div class="ch-name">'+channelTag(x[0])+' '+x[1]+'</div><div class="ch-desc">'+x[2]+'</div></div>'
+   +'<div class="switch '+(S.channels[x[0]]?'on':'')+'" data-act="channel" data-ch="'+x[0]+'"></div></div>').join('')
+   +'<div class="alert '+(apiOff?'warning':'info')+'" style="margin:14px 0 0"><span class="ico">'+(apiOff?'!':'i')+'</span><div>'
+   +(apiOff?'<b>API 通道已关闭</b>：按 FR-10.3 / UAT-01 步 10，订单与账单仍可通过 <b>CSV 通道导入跑通完整闭环</b>，业务不停摆。'
+           :'四通道全部启用。任何模块都必须能在 API 不可用时切到 CSV，不影响业务闭环。')
+   +'</div></div>';
+}
+function profitSummaryHTML(){
+  const l1=78210, pool=7716.58;
+  const chosen=Object.keys(S.expensePartial).filter(k=>S.expensePartial[k]);
+  const partialSum=chosen.reduce((a,k)=>a+({FREIGHT:4820,CUSTOMS_DUTY:1260,PACKAGING:680,FX_LOSS:342.18,CHANNEL_FEE:218.4,AD_SPEND:396}[k]||0),0);
+  const alloc=S.policy==='NONE'?0:(S.policy==='FULL'?pool:partialSum);
+  const net=l1-alloc;
+  const fmt=n=>'¥ '+n.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return [['L1 贡献毛利',fmt(l1),'revenue − platform_fee − cogs_fifo'],
+          ['L2 期间费用池',fmt(pool),'独立归集 · 不写入 inv_batch'],
+          ['净利（'+S.policy+'）',fmt(net),'L1 − allocated_expense = '+fmt(alloc)]]
+    .map(x=>'<div style="background:var(--subtle);border-radius:8px;padding:12px 14px"><div style="font-size:11px;color:var(--t3)">'+x[0]+'</div><div style="font-size:20px;font-weight:650;margin:5px 0 3px;letter-spacing:-.4px">'+x[1]+'</div><div style="font-size:11px;color:var(--t3)">'+x[2]+'</div></div>').join('');
+}
+function policyNoteHTML(){
+  const map={NONE:'<b>NONE</b>：allocated_expense = 0，净利 = L1。头程/关税/包材/汇兑/通道费仅单独展示，不摊到 SKU。',
+    PARTIAL:'<b>PARTIAL</b>：只把 P-25 中勾选 <code>included_in_partial=1</code> 的科目计入净利，组合由财务配置，不写死规则。',
+    FULL:'<b>FULL</b>：全部 L2 科目计入净利（忽略勾选）。三档结果<b>并存互不覆盖</b>，切换后历史快照仍可查。'};
+  return map[S.policy]+' 当前公式版本 <code>'+S.recalcVer+'</code>；改费率或公式后可指定期间全量重算，保留新旧两套结果。';
+}
+
+/* ---------- render ---------- */
+function renderNav(){
+  document.getElementById('nav').innerHTML=MENU.map(g=>'<div class="group"><div class="group-label">'+g[0]+'</div>'
+   +g[2].map(it=>'<button class="nav-item '+(S.page===it[0]?'active':'')+'" data-act="go" data-go="'+it[0]+'">'
+     +'<span class="nav-ico">'+g[1]+'</span><span class="nav-text">'+it[1]+'</span>'
+     +(it[0]==='P-20'?'<span class="nav-badge">2</span>':'')
+     +(it[0]==='P-36'?'<span class="nav-badge">4</span>':'')+'</button>').join('')+'</div>').join('');
+}
+function renderPage(){
+  const p=P[S.page];
+  document.getElementById('crumb').innerHTML='<b>'+esc(p.c.split(' / ')[0])+'</b> / '+esc(p.c.split(' / ').slice(1).join(' / '))+'　<span style="color:var(--t3)">'+S.page+'</span>';
+  let html='<div class="page-head"><div><h1><span class="fr-chip">'+p.fr.split(' / ')[0]+'</span>'+esc(p.t)+'</h1><div class="page-desc">'+esc(p.d)+'</div></div>'
+   +pageActionsHTML(PAGE_CAP[S.page]||{})+'</div>';
+  html+=p.b.map(b=>{
+    if(b.type==='kpis')return kpisHTML(b);
+    if(b.type==='alert')return alertHTML(b);
+    if(b.type==='table')return tableHTML(b);
+    return b.html||'';
+  }).join('');
+  const v=document.getElementById('view');v.innerHTML=html;
+  // dynamic fragments
+  const po=document.getElementById('poStep');if(po)po.innerHTML=stepperHTML(['DRAFT','CONFIRMED','PARTIAL_RECEIVED','RECEIVED','CLOSED'],S.poConfirmed?'CONFIRMED':'DRAFT');
+  const pb=document.getElementById('poConfirmBtn');if(pb&&S.poConfirmed){pb.textContent='已确认 CONFIRMED';pb.disabled=true;}
+  const as=document.getElementById('asnStep');if(as)as.innerHTML=stepperHTML(['DRAFT','SEALED','SLOT_BOOKED','IN_TRANSIT','RECEIVED'],S.asnSlot?'SLOT_BOOKED':(S.asnSealed?'SEALED':'DRAFT'));
+  const am=document.getElementById('asnMsg');if(am&&S.asnSealed)am.innerHTML='<span class="ico">v</span><div>已 <b>SEALED</b>'+(S.asnSlot?'，且已预约 <code>slot_date = 2026-11-18</code>':'，现在允许填写 slot_date')+'。状态机约束验证通过。</div>',am.className='alert success';
+  const sb=document.getElementById('sugBtn');if(sb&&S.sugConfirmed){sb.textContent='已转采购单';sb.disabled=true;}
+  const sn=document.getElementById('sugNote');if(sn&&S.convertedPO)sn.innerHTML='<b>已转单</b>：生成采购单 <code>'+S.convertedPO+'</code>，<code>source_ref_no = SUG-20261115-001</code> 已回写，可在 P-07 反查。状态 CONVERTED。';
+  const ps=document.getElementById('profitSummary');if(ps)ps.innerHTML=profitSummaryHTML();
+  const pn=document.getElementById('policyNote');if(pn)pn.innerHTML=policyNoteHTML();
+  const ph=document.getElementById('policyHint');if(ph)ph.textContent=S.policy+'：'+({NONE:'不摊任何 L2 费用',PARTIAL:'仅勾选科目计入',FULL:'全部 L2 科目计入'}[S.policy]);
+  const fv=document.getElementById('fvText');if(fv)fv.textContent=S.recalcVer;
+  const pbx=document.getElementById('partialBox');if(pbx)pbx.innerHTML=partialHTML();
+  const cbx=document.getElementById('channelBox');if(cbx)cbx.innerHTML=channelHTML();
+  const tb=document.getElementById('sysTabBody');if(tb)tb.innerHTML=sysTabHTML();
+  const tabs=document.getElementById('sysTabs');if(tabs)tabs.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.tab===S.tab));
+  applyRole();
+  document.getElementById('content').scrollTop=0;
+}
+function applyRole(){
+  document.querySelectorAll('[data-only]').forEach(el=>{
+    const ok=el.dataset.only.split(' ').includes(S.role);
+    el.style.display=ok?'':'none';
+  });
+  // 角色切换后若页头按钮全被隐藏，补一条权限说明，避免留下空白操作区
+  const pa=document.querySelector('.page-actions');
+  if(pa){
+    const visible=[...pa.querySelectorAll('button')].filter(b=>b.style.display!=='none');
+    if(!visible.length&&!pa.querySelector('.no-act')){
+      const d=document.createElement('div');d.className='no-act';
+      d.textContent='当前角色 '+S.role+' 无本页写操作权限（RBAC），仅可查看与导出';
+      pa.appendChild(d);
+    }
+  }
+  const av=document.getElementById('avatar');
+  av.textContent=({ADMIN:'管',OPERATOR:'运',PURCHASE:'采',WAREHOUSE:'仓',FINANCE:'财',SERVICE:'客',AGENT:'AI'})[S.role];
+  av.style.background=S.role==='AGENT'?'#F3EDFF':'var(--primary-weak)';
+  av.style.color=S.role==='AGENT'?'#6C3BD1':'var(--primary)';
+}
+function toast(msg,type){
+  const t=document.createElement('div');t.className='toast '+(type||'ok');t.innerHTML=msg;
+  document.getElementById('toast').appendChild(t);
+  setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .25s';setTimeout(()=>t.remove(),260);},3200);
+}
+function openDrawer(title){
+  document.getElementById('drTitle').textContent=title||'单据详情';
+  document.getElementById('drBody').innerHTML=
+   '<div class="dr-sec"><h4>状态机</h4><div class="stepper">'+stepperHTML(['DRAFT','CONFIRMED','PARTIAL_RECEIVED','RECEIVED','CLOSED'],'CONFIRMED')+'</div></div>'
+   +'<div class="dr-sec"><h4>关键字段</h4><dl class="mini-kv">'
+   +[['单据编号',title&&title.indexOf('ASN')>=0?'ASN-20261115-0007':'DOC-20261115-0001'],['site_code','AE · AED'],['source_channel','EXPORT'],['操作人','财务 A'],['创建时间','2026-11-15 09:12:44 (GMT+8)'],['formula_version',S.recalcVer],['raw_payload','保留全部原始字段，未删减']].map(x=>'<dt>'+x[0]+'</dt><dd>'+esc(x[1])+'</dd>').join('')+'</dl></div>'
+   +'<div class="dr-sec"><h4>关联单据</h4><div style="font-size:12px;line-height:24px;color:var(--t2)">'
+   +'采购单 PO-20261114-0008<br>入库单 IN-20261115-002<br>FIFO 批次 BAT-20261108-002<br>ASN ASN-20261113-0006<br>订单 SO-AE-20261113-0841<br>周账单 STMT-W-2026W46-AE</div></div>'
+   +'<div class="dr-sec"><h4>原始报文 raw_payload</h4><details class="raw" open><summary>展开 / 收起（字段不删减）</summary><div class="code-block">{'
+   +'\n  "order_no": "SO-AE-20261113-0841",\n  "site_code": "AE",\n  "partner_sku": "PSKU-AE-RBR01",\n  "qty": 2,\n  "gross_amount": 598.00,\n  "currency": "AED",\n  "payment_type": "PAID",\n  "delivered_at": "2026-11-13T14:22:00+04:00",\n  "is_fulfilled_by_noon": true,\n  "platform_raw": { ... }\n}</div></details></div>'
+   +'<div class="dr-sec"><h4>审计链</h4><div style="font-size:12px;line-height:23px;color:var(--t2)">'
+   +'LOG-000939　系统　 IMPORT　2026-11-15 09:12<br>LOG-000940　财务 A　 MATCH　2026-11-15 09:15<br>LOG-000941　AI 外挂　 READ(v_ai_statement_open)　2026-11-15 22:40<br>LOG-000942　财务 A　 AI_REVIEW　2026-11-15 22:48</div></div>';
+  document.getElementById('mask').classList.add('show');
+  document.getElementById('drawer').classList.add('show');
+}
+function closeDrawer(){document.getElementById('mask').classList.remove('show');document.getElementById('drawer').classList.remove('show');}
+function confirmModal(title,text,onOK){
+  document.getElementById('modalBox').innerHTML='<h3>'+esc(title)+'</h3><p>'+text+'</p><div class="modal-acts"><button class="btn" data-act="closeModal">取消</button><button class="btn primary" id="modalOK">确认</button></div>';
+  document.getElementById('modal').classList.add('show');
+  document.getElementById('modalOK').onclick=()=>{document.getElementById('modal').classList.remove('show');onOK();};
+}
+function go(id){if(!P[id])return;S.page=id;location.hash=id;document.getElementById('searchpop').classList.remove('show');renderNav();renderPage();}
+
+/* ---------- interactions ---------- */
+document.addEventListener('click',e=>{
+  const t=e.target.closest('[data-act]');
+  if(!t)return;
+  const a=t.dataset.act;
+  if(a==='go'){go(t.dataset.go);return;}
+  if(a==='drawer'){openDrawer(t.dataset.title);return;}
+  if(a==='closeDrawer'){closeDrawer();return;}
+  if(a==='closeModal'){document.getElementById('modal').classList.remove('show');return;}
+  if(a==='export'){toast('已创建导出任务：<b>'+esc((P[S.page]||{}).t||'本页')+'</b> 当前筛选结果集（GMT+8 时间戳 + 操作人 + 列头映射版本），写 <code>int_export_job</code>','info');return;}
+  if(a==='filter'){toast('已应用本页筛选条件（站点由顶栏统一控制），结果集已更新','info');return;}
+  if(a==='resetFilter'){toast('筛选条件已重置','info');return;}
+  if(a==='pageAct'){
+    const k=t.dataset.kind,l=t.dataset.label,h=t.dataset.hint||'';
+    const msg={
+      create:'已创建 <b>'+esc(l)+'</b> 草稿 · 状态 <code>DRAFT</code>，写入 <code>sys_audit_log</code>。'+esc(h),
+      import:'已进入导入向导：选择文件 → 列头映射（A-01 可配置）→ 校验 → 错误行进异常清单，不整批回滚（FR-13.2）。'+esc(h),
+      run:'已提交计算任务：结果只写 <code>DRAFT</code> 建议单，须人工复核后才落单（FR-11.4）。'+esc(h)
+    }[k];
+    toast(msg||('原型演示：'+esc(l)),'info');return;
+  }
+  if(a==='confirmPO'){
+    if(S.poConfirmed){toast('该采购单已确认','info');return;}
+    confirmModal('确认采购单 PO-20261115-0001','校验：至少 1 行明细 + 供应商有效 + 报价在有效期内。<br>确认后状态从 <b>DRAFT → CONFIRMED</b>，并写入审计日志。',()=>{S.poConfirmed=true;renderPage();toast('已确认 · CONFIRMED，审计日志 LOG-000943 已写入');});
+    return;
+  }
+  if(a==='sealAsn'){
+    if(S.asnSealed){toast('ASN 已 SEALED','info');return;}
+    S.asnSealed=true;renderPage();toast('已封箱 · SEALED，现在允许填写 slot_date');return;
+  }
+  if(a==='bookSlot'){
+    if(!S.asnSealed){toast('<b>被拦截（FR-05.1 / N-09）</b>：DRAFT 状态不可约 Slot，必须先 SEALED','err');return;}
+    if(S.asnSlot){toast('Slot 已预约：2026-11-18','info');return;}
+    S.asnSlot=true;renderPage();toast('已预约 Slot · SLOT_BOOKED，slot_date = 2026-11-18');return;
+  }
+  if(a==='convertSug'){
+    if(S.sugConfirmed){toast('该建议单已转单','info');return;}
+    confirmModal('确认并转采购单','AI / 系统只写 <code>DRAFT</code>；本次由人工账号 <b>'+S.role+'</b> 复核，记录 <code>reviewed_by/at</code>，CONVERTED 后回写 <code>converted_doc_type/no</code>。',()=>{
+      S.sugConfirmed=true;S.convertedPO='PO-20261115-0009';renderPage();toast('已生成采购单 PO-20261115-0009，source_ref_no 可反查');});
+    return;
+  }
+  if(a==='recalc'){
+    confirmModal('利润全量重算','按当前 <code>formula_version</code> 重算指定期间，<b>保留新旧两套快照</b>，原始单据不变。重算结果带 <code>recalculated_at</code> 时间戳。',()=>{
+      const n=parseInt(S.recalcVer.split('-').pop().split('.').pop(),10)||3;
+      S.recalcVer='FV-2026.11-'+String(n+1).padStart(2,'0');renderPage();toast('重算完成 · 新版本 '+S.recalcVer+'，旧快照保留');});
+    return;
+  }
+  if(a==='exportDiff'){toast('差异清单已导出（含账单号 / 行号 / 金额 / 原始行 / 争议截止日），请在 Seller Lab 人工提交','ok');return;}
+  if(a==='aiReview'){
+    const id=t.dataset.id,d=t.dataset.d;
+    if(d==='REJECTED'){confirmModal('驳回建议','驳回必须可填原因，并写 <code>sys_audit_log</code>。原型演示原因：「证据不足，需人工核对原始账单」。',()=>{S.ai[id]='REJECTED';renderPage();toast('已驳回 · REJECTED，账单行 matched 仍未改动');});}
+    else{confirmModal('通过建议','通过后 <b>由核心系统</b>更新 <code>fin_statement_line.matched</code> 并回写 <code>converted_doc_no</code>；AI 不参与落单。<br>复核人：<b>'+S.role+'</b>。',()=>{S.ai[id]='APPROVED';renderPage();toast('已通过 · APPROVED，reviewed_by/at 已记录');});}
+    return;
+  }
+  if(a==='policy'){
+    if(S.policy===t.dataset.policy)return;
+    S.policy=t.dataset.policy;renderPage();toast('利润口径切换为 <b>'+S.policy+'</b>，历史快照未被覆盖','info');return;
+  }
+  if(a==='partial'){return;}
+  if(a==='channel'){
+    const ch=t.dataset.ch;S.channels[ch]=!S.channels[ch];renderPage();
+    toast(ch+' 通道已'+(S.channels[ch]?'开启':'关闭')+(ch==='API'&&!S.channels.API?' · CSV 通道仍可跑通完整闭环':''),S.channels[ch]?'ok':'info');return;
+  }
+});
+document.addEventListener('change',e=>{
+  if(e.target.dataset.act==='partial'){S.expensePartial[e.target.dataset.k]=e.target.checked;renderPage();return;}
+});
+document.getElementById('siteSeg').addEventListener('click',e=>{
+  const b=e.target.closest('[data-site]');if(!b)return;
+  S.site=b.dataset.site;
+  document.querySelectorAll('#siteSeg button').forEach(x=>x.classList.toggle('on',x.dataset.site===S.site));
+  renderPage();toast('站点过滤：'+S.site+(S.site==='ALL'?'（全部站点，跨站点金额已归一 CNY）':''),'info');
+});
+document.getElementById('roleSel').addEventListener('change',e=>{
+  S.role=e.target.value;applyRole();
+  toast('已切换角色 <b>'+S.role+'</b>：受 RBAC 控制的按钮已按权限矩阵显隐（非财务角色看不到「全量重算」）','info');
+});
+document.addEventListener('click',e=>{
+  const b=e.target.closest('#sysTabs [data-tab]');if(!b)return;
+  S.tab=b.dataset.tab;renderPage();
+});
+document.getElementById('collapseBtn').addEventListener('click',()=>document.getElementById('sidebar').classList.toggle('collapsed'));
+document.getElementById('mask').addEventListener('click',closeDrawer);
+document.getElementById('protoTag').addEventListener('click',()=>{
+  confirmModal('Noon ERP 系统原型 v1.0','按 <b>PRD v1.0.2</b> 制作，覆盖 FR-14 全部 <b>11 组菜单 / 36 个页面</b>。<br>'
+   +'设计系统与 Figma 落地规范见 <code>docs/noon-erp-prototype-design-v1.0.md</code>，token 见 <code>prototype/figma-tokens.json</code>。<br>'
+   +'数据为原型示意值，<b>Seller Lab 真实列头 / 仓编码 / 费率表按 A-01 未用推测补齐</b>。',()=>{});
+});
+const searchInput=document.getElementById('searchInput'),sp=document.getElementById('searchpop');
+function doSearch(q){
+  q=q.trim().toLowerCase();
+  const all=MENU.flatMap(g=>g[2].map(it=>({id:it[0],name:it[1],group:g[0]})));
+  const r=q?all.filter(x=>(x.name+x.id+x.group).toLowerCase().includes(q)):all.slice(0,8);
+  sp.innerHTML=r.length?r.map(x=>'<button class="sp-item" data-act="go" data-go="'+x.id+'">'+esc(x.name)+'<small>'+x.id+' · '+esc(x.group)+'</small></button>').join(''):'<div class="sp-empty">未找到匹配页面</div>';
+  sp.classList.add('show');
+}
+searchInput.addEventListener('focus',()=>doSearch(searchInput.value));
+searchInput.addEventListener('input',()=>doSearch(searchInput.value));
+document.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();searchInput.focus();sp.classList.add('show');doSearch('');}
+  if(e.key==='Escape'){closeDrawer();document.getElementById('modal').classList.remove('show');sp.classList.remove('show');}
+});
+document.addEventListener('click',e=>{if(!e.target.closest('#searchpop')&&!e.target.closest('#searchBox'))sp.classList.remove('show');});
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(P[h]&&h!==S.page){S.page=h;renderNav();renderPage();}});
+
+/* boot */
+const boot=location.hash.slice(1);if(P[boot])S.page=boot;
+renderNav();renderPage();
+toast('原型已就绪 · 36 个页面可点击导航，试试 P-14 的 ASN 拦截、P-26 三档口径、P-35 通道降级','info');
+</script>
+</body>
+</html>

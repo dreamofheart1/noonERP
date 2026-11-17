@@ -1,0 +1,25 @@
+# Noon API Service Account credentials — NEVER commit private keys
+*credentials*.json
+*credential*.json
+noon_*_sensitive.json
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+application-local.yml
+application-secret.yml
+config/secrets/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# WorkBuddy local project data
+.workbuddy/
