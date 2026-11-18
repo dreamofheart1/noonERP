@@ -54,6 +54,7 @@ def main():
     suite_group = parser.add_mutually_exclusive_group()
     suite_group.add_argument("--config-history", action="store_true", help="额外验证真实参数历史 Mapper")
     suite_group.add_argument("--config-write", action="store_true", help="额外验证真实参数写事务")
+    suite_group.add_argument("--config-api", action="store_true", help="验证参数管理真实 HTTP")
     args = parser.parse_args()
     jar = ROOT / "yx-erp/yxerp-admin/target/yxerp-admin.jar"
     if not jar.is_file():
@@ -138,8 +139,8 @@ def main():
             command += ["-s", str(args.maven_settings)]
         if args.maven_repo:
             command += ["-Dmaven.repo.local=" + str(args.maven_repo)]
-        test_class = "MySqlRuleConfigWriteIT" if args.config_write else ("MySqlConfigHistoryIT" if args.config_history else "MySqlSiteAuthorizationIT")
-        test_count = "21" if args.config_write else ("17" if args.config_history else "16")
+        test_class = "MySqlRuleConfigWriteIT" if (args.config_write or args.config_api) else ("MySqlConfigHistoryIT" if args.config_history else "MySqlSiteAuthorizationIT")
+        test_count = "21" if (args.config_write or args.config_api) else ("17" if args.config_history else "16")
         command += ["-Dtest=" + test_class, "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
         # 原生套件：继承 14 项 + RR/确定性锁等待 2 项，各用独立数据库。
         report = ROOT / ("yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site." + test_class + ".xml")
@@ -160,6 +161,9 @@ def main():
                                    input=(ROOT / "yx-erp/sql/noon_wp1_site_auth.sql").read_text())
         check("重复迁移明确失败且保留原用户", duplicate.returncode != 0
               and sql("select count(*) from sys_user", "noon_runtime") == before)
+        if args.config_api:
+            sql((ROOT / "docs/noon-erp-schema-v0.5.sql").read_text(), "noon_runtime")
+            check("参数 API 测试库执行 v0.5 全量 DDL", sql("select count(*) from noon_rule_config", "noon_runtime") == "15")
         sql("update sys_job set status='1';", "noon_runtime")
         # 避免加载仓库 druid 外部数据源配置；命令行只启用独立 profile，配置全部使用本机。
         config = work / "application-noon-runtime.properties"
@@ -224,6 +228,46 @@ logging.level.com.yx=info
         check("普通用户不能修改自己的授权", http("PUT", "/noon/site-grants/2", user, ["SA"]).get("code") == 403)
         check("超管授权 AE", http("PUT", "/noon/site-grants/2", admin, ["AE"]).get("code") == 200)
         check("原登录态立即读取 AE", http("GET", "/noon/sites", user).get("data") == ["AE"])
+        if args.config_api:
+            path = "/noon/rule-config"
+            body = {"key": "return_window_days", "scope": "AE", "value": "15", "effectiveFrom": "2026-01-01T00:00:00"}
+            check("参数 API 未登录拒绝", http("POST", path, payload=body).get("code") == 401)
+            check("普通用户即使获 AE 也不能创建参数", http("POST", path, user, body).get("code") == 403)
+            check("普通用户不能读取参数历史", http("GET", path + "/history?key=return_window_days&scope=AE", user).get("code") == 403)
+            created = http("POST", path, admin, body)
+            version_id = created.get("data")
+            check("超管创建站点版本", created.get("code") == 200 and isinstance(version_id, int))
+            check("重叠区间返回冲突", http("POST", path, admin, body).get("code") == 409)
+            invalid = {**body, "effectiveFrom": "2026-01-01T00:00:00+04:00"}
+            check("带偏移时间拒绝", http("POST", path, admin, invalid).get("code") == 400)
+            check("未知键和非法参数值拒绝", http("POST", path, admin, {**body, "key": "bad-key"}).get("code") == 400 and http("POST", path, admin, {**body, "value": "invalid"}).get("code") == 400)
+            check("自动审核参数未开放", http("POST", path, admin, {**body, "key": "ai_auto_review_enabled", "value": "true"}).get("code") == 400)
+            ai_id = int(sql("select id from noon_rule_config where config_key='ai_auto_review_enabled' and scope='GLOBAL'", "noon_runtime"))
+            check("自动审核参数不能通过撤销接口绕过", http("POST", path + f"/{ai_id}/revoke", admin).get("code") == 400)
+            precise = {**body, "effectiveFrom": "2026-01-01T00:00:00.000001"}
+            check("超出毫秒精度拒绝", http("POST", path, admin, precise).get("code") == 400)
+            check("非法范围与分页拒绝", http("POST", path, admin, {**body, "scope": "XX"}).get("code") == 400 and
+                  http("GET", path + "/history?key=return_window_days&scope=AE&limit=0", admin).get("code") == 400)
+            history = http("GET", path + "/history?key=return_window_days&scope=AE", admin)
+            check("超管历史查询返回创建版本", history.get("code") == 200 and len(history.get("data", [])) == 1 and history["data"][0]["id"] == version_id)
+            check("历史游标不会重复上一页", http("GET", path + f"/history?key=return_window_days&scope=AE&afterId={version_id}", admin).get("data") == [])
+            check("普通用户不能撤销参数", http("POST", path + f"/{version_id}/revoke", user).get("code") == 403)
+            check("超管撤销版本", http("POST", path + f"/{version_id}/revoke", admin).get("code") == 200)
+            check("重复撤销返回冲突", http("POST", path + f"/{version_id}/revoke", admin).get("code") == 409)
+            history = http("GET", path + "/history?key=return_window_days&scope=AE", admin)
+            check("撤销后历史仍保留", history.get("code") == 200 and len(history.get("data", [])) == 1 and history["data"][0]["revoked_at"] is not None)
+            check("创建与撤销的审计均落库", sql("select group_concat(action order by id) from noon_rule_config_audit where config_key='return_window_days'", "noon_runtime") == "CREATE,REVOKE")
+            next_version = http("POST", path, admin, {**body, "value": "16", "effectiveFrom": "2099-01-01T00:00:00"})
+            versions = http("GET", path + "/history?key=return_window_days&scope=AE", admin)
+            check("撤销后新版本独立保留历史", next_version.get("code") == 200 and len(versions.get("data", [])) == 2 and [row["version_no"] for row in versions["data"]] == [1, 2] and versions["data"][0]["revoked_at"] is not None)
+            sql("alter table noon_rule_config_audit add constraint api_reject_create check (config_key <> 'statement_dispute_days' or action <> 'CREATE')", "noon_runtime")
+            failed = http("POST", path, admin, {**body, "key": "statement_dispute_days"})
+            check("审计失败回滚新版本并保留原锁行", failed.get("code") == 500 and failed.get("msg") == "参数操作失败，请联系管理员" and
+                  sql("select count(*) from noon_rule_config where config_key='statement_dispute_days' and scope='AE'", "noon_runtime") == "0" and
+                  sql("select count(*) from noon_rule_config_lock where config_key='statement_dispute_days' and scope='AE'", "noon_runtime") == "1")
+            global_body = {**body, "key": "payout_threshold", "value": "1000", "scope": "GLOBAL", "effectiveFrom": "2025-01-01T00:00:00", "effectiveTo": "2026-11-12T00:00:00"}
+            check("普通用户不能写 GLOBAL", http("POST", path, user, global_body).get("code") == 403)
+            check("超管可写 GLOBAL", http("POST", path, admin, global_body).get("code") == 200)
         check("非法站点不改变旧授权", http("PUT", "/noon/site-grants/2", admin, ["XX"]).get("code") == 400
               and http("GET", "/noon/sites", user).get("data") == ["AE"])
         check("超管不能被覆盖", http("PUT", "/noon/site-grants/1", admin, []).get("code") == 400)

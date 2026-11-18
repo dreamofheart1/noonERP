@@ -64,9 +64,34 @@ public class RuleConfigWriteService
         return id.longValue();
     }
 
+    /** 仅超管查看指定范围的历史；按 ID 游标分页，不依据当前状态过滤。 */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> history(String key, String scope, long afterId, int limit)
+    {
+        guard.requireAdministrator();
+        validateKeyScope(key, scope);
+        if (!"GLOBAL".equals(scope)) guard.requireSite(scope);
+        if (afterId < 0 || limit < 1 || limit > 100) throw new IllegalArgumentException("分页参数无效");
+        return jdbc.queryForList("SELECT id,config_key,scope,config_value,version_no,effective_from,effective_to,status,revoked_at,revoked_by,created_by,created_at FROM noon_rule_config WHERE config_key=? AND scope=? AND id>? ORDER BY id LIMIT ?",
+                key, scope, afterId, limit);
+    }
+
     /** 撤销从当前北京时间生效；历史值保留，不提供追溯性修改。 */
     @Transactional(rollbackFor = Exception.class)
     public void revoke(long id)
+    {
+        revokeChecked(id, null);
+    }
+
+    /** 面向管理接口的范围保护；检查与撤销处于同一事务。 */
+    @Transactional(rollbackFor = Exception.class)
+    public void revokeManaged(long id, java.util.Set<String> allowedKeys)
+    {
+        if (allowedKeys == null) throw new IllegalArgumentException("缺少允许的参数键");
+        revokeChecked(id, java.util.Set.copyOf(allowedKeys));
+    }
+
+    private void revokeChecked(long id, java.util.Set<String> allowedKeys)
     {
         long actor = guard.requireAdministrator();
         if (id <= 0) throw new IllegalArgumentException("版本 ID 无效");
@@ -75,6 +100,7 @@ public class RuleConfigWriteService
         String key = (String) keys.get(0).get("config_key");
         String scope = (String) keys.get(0).get("scope");
         validateKeyScope(key, scope);
+        if (allowedKeys != null && !allowedKeys.contains(key)) throw new IllegalArgumentException("未开放的参数键");
         if (!"GLOBAL".equals(scope)) guard.requireSite(scope);
         lock(key, scope);
         Existing row = currentRows(key, scope).stream().filter(e -> e.id() == id).findFirst()

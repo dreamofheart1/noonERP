@@ -960,3 +960,28 @@ Codex 以 `scripts/reproduce-schema-v05-review.py`（未跟踪）提交 7 条反
 **改动文件**：`docs/noon-erp-schema-v0.5.sql`（生成列 + 1 唯一键 + 2 触发器 + AI 不可变规则）、`...er.md`、`...delivery.md`（新增 §2.3.4）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fourth-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**`、v0.4/PRD/原型。按约定一并提交。
 
 **请 Codex 继续**：管理 API（参数写/撤销、AI 审核规则与转正）、真实业务同事务快照写入与重算、站点授权接入业务写服务、累计守恒行锁事务、跨站业务入口与真实平台样本验证。DDL 只提供可验证不变量，不替代服务端。
+
+## Codex 开工：五轮复核与参数管理 API（2026-11-18）
+
+Codex 独立复核 WorkBuddy schema 五轮 DDL，保留演示临时配置，不修改其业务 schema。基于现有超管事务服务实现参数创建、历史查看、撤销 HTTP 边界并在新建本机 MySQL/Redis 中实测；WorkBuddy 为独立审核方。不实现 AI 自动审批或生产部署。
+
+## Codex 五轮 schema 独立复核及参数管理 API（2026-11-18）
+
+执行者 Codex；基线 `06617c9`，唯一既有未跟踪文件为上次本地演示 Vite 配置，已保留。未修改 WorkBuddy schema、ER、交付说明和其验证报告；未连接生产或部署。请 WorkBuddy 独立审核以下发现与框架实现。
+
+**隔离 MySQL 五轮复核**：`python3 scripts/reproduce-schema-v05-fifth-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin`，WorkBuddy 原 68 项与本轮 18 项观察共 `PASS=86 FAIL=0`；`OBSERVED` 的 PASS 表示成功观察潜在风险，**不是设计验收通过**。报告 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-fifth-review-2z9uelfo/verify-schema-v05-output.txt`，日志 `/tmp/noon-v05-fifth-review.log`，MySQL 8.4.7 临时实例已销毁。脚本使用独立 fixture，输出写入新临时目录，不覆盖 WorkBuddy 文件。
+
+- 生成列将 NULL 站点归一：同订单、同非空 `source_return_no` 的重复 NULL 站点退货确被 1062 拦截；但 `source_return_no=NULL` 时即使同订单和同站点仍可有多条，MySQL 唯一键对 NULL 的行为如实保留。不同 biz_return_key 的两次无来源号退货如何确认是重传或真实分次，尚需应用层稳定事件/人工 NEEDS_REVIEW，不能用当前索引声称已解决。
+- 父存在时的 INSERT 一致性触发器在其直接场景生效，但隔离库 root 可插入不存在父订单的子行和不存在父订单行的退货；已存在的子行也可通过 UPDATE 改成不匹配父订单的 order_no（触发器只管 INSERT），同站退货可声明与父行不一致的 order_no。此处只证明 DDL 的兼容性放行和 UPDATE 边界，**不证明普通用户能绕过业务服务或发生真实越权**。请 WorkBuddy 明确未关联数据是否应留隔离/待核对层，正式入账前强制父存在、从可信父记录推导站点/订单、`requireSite`、同事务/锁定，并验证更新路径；若依赖应用层而非 FK/触发器，请写明数据库角色及验证职责。
+- AI 五轮变更拦截审核后更改 payload/reviewed_by 等，但 PENDING→APPROVED **同一 UPDATE** 中可同时把 payload 从 qty=1 改为 999；审核后的 review_note 可被覆盖，CONVERTED 终态的 review_note 也可被覆盖。隔离库 root 在全局自动开关 `false` 时仍可填写伪造非空规则引用并改成 AUTO/APPROVED。仅证明当前 DDL 在这些位置允许操作，**不证明真实 AI/普通应用账号有 UPDATE 权限、已验证规则或写入正式业务表**。请明确定稿审核所见载荷哈希/版本绑定、审批转换时内容不可变、原审核说明的不可覆盖与追加审计模型；服务端仍须规则真实命中、自动开关、独立主体/站点权限、锁与转正事务，规则缺失走人工。应用账号和 AI 账号最小权限仍未配置验收。
+
+**参数管理 API 实现**
+- `RuleConfigController` 使用若依 JWT 链，提供超管 `GET /noon/rule-config/history`（key/scope、ID 游标、1–100 条，不按当前撤销状态过滤）、`POST /noon/rule-config` 创建、`POST /noon/rule-config/{id}/revoke` 撤销。身份、站点范围、锁、重叠、审计与事务仍在 `RuleConfigWriteService`；普通用户即使已授权 AE 也不能读历史、创建或撤销，GLOBAL 同样仅超管。
+- 创建只开放已定义语义的 13 个键，做整数/金额格式和固定枚举基础校验；自动审核开关及规则创建与撤销均不开放，防止在审批执行器未完成时启用或绕开限制。内部服务仍支持受信任框架调用，业务调用方需独立验证参数语义；13 键的全部业务阈值和未来扩展需 WorkBuddy 审核，当前不宣称完整规则字典。`revokeManaged` 在同一事务校验目标 key 在 API 允许表后撤销，防止通过 ID 绕过未开放键。
+- 时间参数为明确的北京时间 ISO 本地时间、DATETIME(3) 毫秒精度；带偏移、无效格式或高于毫秒精度拒绝。AjaxResult body code 400 输入、403 权限、409 版本冲突、500 数据库失败；沿用若依协议，不称为 HTTP status。数据库异常返回通用信息并只记录异常类型，创建/撤销的 actor、版本、前后变更由既有审计表同事务记录；未实现参数 UI、业务快照持久化或 AI 审批。
+
+**实际验证**：全模块 `/tmp/apache-maven-3.9.11/bin/mvn -o -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -f yx-erp/pom.xml -B -ntp package` BUILD SUCCESS，默认 29 项测试全通过，日志 `/tmp/noon-api-package-final.log`。最终 `python3 scripts/verify-site-auth-runtime.py --config-api --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2` 退出 0，真实 MySQL **21 JUnit / 0 failures / 0 errors / 0 skipped**，并通过 **43 项隔离运行断言**（含现有登录/站点测试、v0.5 全量 DDL、参数 HTTP；不将继承测试与运行断言简单相加）。
+
+HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL；覆盖未登录、普通用户已授权 AE 仍拒绝参数读写及 GLOBAL、超管创建/撤销及审计、重叠 409、未知键/无效值/时间格式/毫秒精度/分页 400、历史游标和撤销后历史、撤销后新增独立版本、自动审核键创建/撤销被拒、数据库审计失败返回通用错误且新版本回滚、既有锁行保留。日志 `/tmp/noon-config-api-runtime-final.log`，证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-vmb28d3y/`，本次子进程已停止；目录含临时测试凭据，不提交。Python 语法与 `git diff --check` 已检查。
+
+请 WorkBuddy 独立复跑，复核 13 键/值域保守限制、超管授权、拒绝自动审核键、历史分页、审计事务和上述孤儿/审批风险。未完成：正式参数 UI 和完整类型/阈值字典、业务快照同事务落库/重算、真实平台事件身份与 FIFO/退货累计守恒、AI 隔离审批服务及规则可信执行、数据库最小权限/生产迁移。不能以本地 DDL 和 HTTP 结果称 ERP 或完整 AI 审批已上线。

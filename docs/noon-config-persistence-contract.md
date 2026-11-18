@@ -9,3 +9,11 @@
 - 区间校验将历史版本的实际结束视为 `min(effective_to, revoked_at)`，均为空表示无穷；半开区间边界相接允许。未来版本在生效之前撤销时无有效区间，但历史行仍保留。该规则不是允许修改/删除旧快照的授权。
 - 撤销生效时刻和操作者必须审计，不能用当前状态覆盖历史；追溯性更正的记录时间与业务生效时间是不同维度。本阶段未实现双时态或回溯修正流程，不得靠覆盖旧行假装支持。
 - 数据库并发提交、锁等待、回滚、跨站越权、重复提交、审计失败、时区和精度、迁移、快照重算需在实际适配器接入后用隔离 MySQL 测试。本包的内存测试不证明这些数据库行为。
+
+## 内部管理 API 首阶段（2026-11-18）
+
+已实现超管接口：`GET /noon/rule-config/history?key=...&scope=AE|SA|GLOBAL&afterId=0&limit=50` 按版本 ID 游标读取历史（每页 1–100，不按当前撤销状态过滤）；`POST /noon/rule-config` 创建；`POST /noon/rule-config/{id}/revoke` 从当前北京时间撤销。创建 JSON 为 `key/scope/value/effectiveFrom/effectiveTo`，时间使用不含偏移的 ISO 本地格式，解释为北京时间，要求毫秒精度；不接受客户端传入操作者或站点授权。
+
+服务层再次校验有效超管、站点、持久锁、区间和审计事务。API 创建仅开放已确定语义的 13 个参数键并进行基础类型/枚举校验；AI 自动审核开关和规则的创建与撤销均暂不开放，待规则执行与审批安全边界就绪。内部受信任调用方仍须负责其业务值验证；API 的数值校验不是全部业务阈值政策。历史只读包含已撤销版本；新版本不改变历史快照。错误沿用若依 AjaxResult 的 body code：400 输入、403 无权限、409 版本冲突、500 数据库失败；不能将这些 body code 等同真实 HTTP 状态码。
+
+真实 HTTP/MySQL 测试命令：在 `yx-erp/` 执行 `mvn package`，再从项目根目录运行 `python3 scripts/verify-site-auth-runtime.py --config-api --mysql-bin-dir <独立MySQL bin> --redis-bin-dir <独立Redis bin> --maven <mvn路径>`；可选 `--maven-settings` 和 `--maven-repo`。脚本创建自己的本机数据库/Redis、加载 v0.5 DDL，验证 JWT 登录、权限、输入、历史分页、创建撤销、重叠和审计失败回滚。它不访问生产，也不验证参数页面、业务快照落库或 AI 审批。
