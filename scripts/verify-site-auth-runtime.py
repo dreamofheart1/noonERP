@@ -51,7 +51,9 @@ def main():
     parser.add_argument("--maven-settings", type=Path)
     parser.add_argument("--maven-repo", type=Path)
     parser.add_argument("--java", default=shutil.which("java"))
-    parser.add_argument("--config-history", action="store_true", help="额外验证真实参数历史 Mapper")
+    suite_group = parser.add_mutually_exclusive_group()
+    suite_group.add_argument("--config-history", action="store_true", help="额外验证真实参数历史 Mapper")
+    suite_group.add_argument("--config-write", action="store_true", help="额外验证真实参数写事务")
     args = parser.parse_args()
     jar = ROOT / "yx-erp/yxerp-admin/target/yxerp-admin.jar"
     if not jar.is_file():
@@ -136,8 +138,8 @@ def main():
             command += ["-s", str(args.maven_settings)]
         if args.maven_repo:
             command += ["-Dmaven.repo.local=" + str(args.maven_repo)]
-        test_class = "MySqlConfigHistoryIT" if args.config_history else "MySqlSiteAuthorizationIT"
-        test_count = "17" if args.config_history else "16"
+        test_class = "MySqlRuleConfigWriteIT" if args.config_write else ("MySqlConfigHistoryIT" if args.config_history else "MySqlSiteAuthorizationIT")
+        test_count = "21" if args.config_write else ("17" if args.config_history else "16")
         command += ["-Dtest=" + test_class, "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
         # 原生套件：继承 14 项 + RR/确定性锁等待 2 项，各用独立数据库。
         report = ROOT / ("yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site." + test_class + ".xml")

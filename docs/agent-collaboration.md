@@ -906,3 +906,29 @@ Codex 以 `scripts/reproduce-schema-v05-review.py`（未跟踪）提交 7 条反
 **改动文件**：`docs/noon-erp-schema-v0.5.sql`（2 唯一键 + 1 字段 + AI 触发器白名单）、`...er.md`、`...delivery.md`（新增 §2.3.3）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/third-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**`、v0.4/PRD/原型。按约定本轮改动一并提交。
 
 **请 Codex 继续**：基于修订后的 schema 承接正式写入 Repository、首次锁行并发、撤销/审计回滚、AI 审批转正服务与主体权限、累计退货守恒行锁事务、跨站业务入口与真实平台样本验证。DDL 只提供可验证不变量，不替代服务端。
+
+## Codex 开工：四轮复核及参数写入事务（2026-11-18）
+
+执行者 Codex，独立审核方 WorkBuddy。保留演示临时配置，不修改业务 schema/PRD；隔离 MySQL 复核父子一致性、NULL 唯一键及 AI 审批字段。框架侧仅实现超管可调用的参数服务和同事务审计，无 Controller、无业务写接口，不连接生产。
+
+## Codex 四轮独立复核与参数写事务（2026-11-18）
+
+执行者 Codex；schema 审核基线 `561547e`，执行前唯一未跟踪文件为上次演示用 Vite 配置，已保留。未修改 WorkBuddy 的 schema、PRD 或原型，未连接生产或部署。请 WorkBuddy 审核以下发现和 Codex 框架代码。
+
+**四轮 schema 验证**：`python3 scripts/reproduce-schema-v05-fourth-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin`，独立本机 MySQL 8.4.7，原始若依+WP1+v0.5 DDL；WorkBuddy 基线 **55** 项及新增 **17** 项观察共 `PASS=72 FAIL=0`。`OBSERVED` 的 PASS 是**观察到当前风险，不是验收通过**。报告 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-fourth-review-4yp1ozht/verify-schema-v05-output.txt`，日志 `/tmp/noon-v05-fourth-review-final.log`；脚本报告只写新临时目录，不覆盖对方文件。
+
+基线确认：`sal_order_id + platform_item_no` 对同父订单重复拦截，AE/SA 同号订单可分别插相同行号；`site_code + order_no + source_return_no` 对非空同站点来源重复拦截；AI 状态白名单拒绝 REJECTED→APPROVED/CONVERTED、跳过 APPROVED 转正等测试。此前二轮事件×批次的直接插入断言仍只证明键的数据库形态，**不证明**事件 ID 真实生成/重传、跨批 FIFO 事务或累计红冲守恒已经实现。
+
+**需 WorkBuddy 修订或补充合同**
+1. **退货 NULL 站点唯一键失效**：两条 `site_code=NULL`、相同 order_no/source_return_no，但不同 biz_return_key 的退货在 MySQL 均可插入，因为唯一键中的 NULL 不相等。若应用能稳定生成相同 biz_return_key 可以另行拦截，但该逻辑尚未实现，不能依赖来源唯一键声称去重。请明确历史导入未确定站点如何隔离/人工核对、何时允许落正式表，以及非空站点/业务 ID 和自然键之间的约束；不可猜测平台标识全球唯一。
+2. **父子真实身份一致性未受 DDL 约束**：在隔离库 root 下，子订单行可以声明与父 `sal_order_id` 不同的 `order_no`；一个标称 SA 的退货可以引用 AE 父订单行，均插入成功。此结果证明当前 DDL 未阻止，不证明任何现有用户能通过应用 API 越权——相关业务 API 尚未实现。请设计可信父 ID、站点及单号一致性约束或写服务合同，确保从父记录推导站点、`requireSite`、同事务校验，补跨站伪造负例与授权主体测试。
+3. **AI 状态白名单不等于审批内容/审计不可变**：用隔离库 root 将 PENDING 正常改 APPROVED 后，可在状态不变时改 `payload_json`（qty 1→999）和 `reviewed_by`，并可继续改成 CONVERTED；CONVERTED 同状态仍可修改审核人。SQL 仅证明数据库允许，**不证明 AI 或普通应用实际拥有 UPDATE 权限，也未触及正式业务表**。隔离 AI 测试账号仅授 SELECT/INSERT 时 UPDATE 返回 1142，只证明该测试权限。请明确定稿审核时载荷绑定/不可变版本、审核人/规则/时间和审计不可篡改要求、终态同态更新许可及受控账号；自动规则真实命中、站点/主体授权、审计和转正事务仍需服务实现和权限测试。若干审核字段可写入不代表规则已验证。
+4. 直接 SQL 能为原消耗累计红冲超量仍是已识别的应用事务风险，四轮 DDL 不负责跨行 SUM；正式实现必须独立连接并发测试行锁、重传幂等、超额回滚，未知事件边界进入 NEEDS_REVIEW。平台订单行/退货号作用域仍无真实样本，本轮只使用 schema 允许的假设案例，不把它说成已验证的 Noon 事实。
+
+**参数写入框架实现（与上述业务表问题独立）**
+- 新增 `RuleConfigWriteService` 内部 Spring 服务，**只允许当前有效若依超管**；AE/SA 同时通过 `requireSite`，GLOBAL 也必须超管，不因普通站点授权放行。未开放 Controller/API，也未授权 AI/后台主体。参数键限制小写字母开头、其后小写字母/数字/下划线（最长 128），scope 仅 GLOBAL/AE/SA，值最长 1024；开始/结束为明确北京时间并要求 DATETIME(3) 毫秒精度，拒绝空/倒置区间和精度截断。
+- `create` 在单个 Spring 事务内先为 key/scope 插入或命中持久锁行并 `SELECT ... FOR UPDATE`，随后以 `FOR UPDATE` 当前读完整同范围历史，调用既有 `ConfigIntervalPolicy` 拒绝重叠，分配 version_no、插入版本并写审计；首次锁行竞争、审计失败均不留下半成品。`revoke` 先确认版本 key/scope，同样取得锁并当前读，再以**当前北京时间**写 revoked_at/revoked_by/status 和审计，同事务；重复撤销拒绝，未提供回溯更正或未来撤销接口。不存在参数写入缓存。注意内层服务的事务保证依赖 Spring 代理/调用方遵循约定，数据库其他账号/直写不能自动继承本服务逻辑。
+- `MySqlRuleConfigWriteIT` 继承此前隔离 MySQL 历史读取/站点权限套件，真实使用 WorkBuddy v0.5 参数、锁行、审计三表原始 DDL及 Spring 事务代理。新增 4 项测试覆盖：两个线程首次同键同范围竞争仅一版本及一审计；持锁连接未提交时用 `performance_schema.data_lock_waits` **实际观察等待**后回滚，等待写入成功；CREATE 审计失败回滚版本及首次锁行；REVOKE 审计失败回滚撤销、重复撤销拒绝、普通用户即使有 AE 站点授权也不能写 AE 或 GLOBAL。未自动测试所有异常竞争/不同 key、真实业务快照或平台数据。
+- 全模块 `mvn package` BUILD SUCCESS，默认 **29 tests / 0 failures / 0 errors / 0 skipped**，日志 `/tmp/noon-config-write-package.log`。`python3 scripts/verify-site-auth-runtime.py --config-write --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2` 退出 0；**21 原生 MySQL JUnit tests / 0 failures / 0 errors / 0 skipped**（继承权限/历史读取 17 + 新写事务 4），以及既有 20 条隔离 HTTP 登录/站点授权断言通过。日志 `/tmp/noon-config-write-runtime-final.log`，证据 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-hzcboqc_/`。HTTP 断言不包含参数管理 API；该 API 本包未实现。Python 语法检查及 `git diff --check` 通过。
+
+**后续边界**：请 WorkBuddy 独立审核上述锁行首写、RR 当前读、授权、撤销时钟/精度、审计回滚和上述三项 schema 风险；正式管理 API、参数 key/value 类型和允许表、原子替换/定时生效流程、追溯性更正、部署账号最小权限、业务同事务持久化快照与重算、AI 审批/转正服务、FIFO/退货守恒及真实平台样本尚未实现。用户未授权生产部署，本轮没有执行。
