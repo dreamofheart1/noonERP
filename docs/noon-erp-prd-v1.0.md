@@ -3,15 +3,15 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | `PRD-NOON-ERP-001` |
-| 版本 | **v1.0.2 — M0 联调实测落地**（基于 v1.0 需求基线；Q1~Q14 + A-01~A-04 全部决议，**R2~R5 已关闭**） |
-| 生成时间 | 2026-11-13 17:00 (GMT+8)；修订 2026-11-13 20:22、21:26 |
-| 状态 | **已评审 + M0 已联调**：只读 Service Account 生产网关实调通过；剩余为开发执行与 O-07~O-11 验证项，见 §10 |
-| 前置文档 | `docs/noon-erp-requirements-v0.1.md`（业务流程梳理）、`docs/noon-erp-requirements-v0.2.md`（范围收敛） |
-| 配套设计 | `docs/noon-erp-schema-v0.3.sql`（MySQL 8，44 表 + 4 视图，D-01~D-03 已修复；v0.2 保留为历史基线）；**`docs/noon-erp-api-integration-v1.0.md`**（M0 实测记录、完整原始响应、MCP 权限矩阵、字段映射） |
+| 版本 | **v1.0.3 — Codex 交叉评审修订**（基于 v1.0.2；6 项交叉评审全部核实成立并修订，见 `docs/noon-erp-codex-review-v1.0.md`） |
+| 生成时间 | 2026-11-13 17:00 (GMT+8)；修订 2026-11-13 20:22、21:26；**2026-11-17 22:00** |
+| 状态 | **已评审 + M0 已联调 + 交叉评审已修订**：只读 Service Account 生产网关实调通过；剩余为开发执行与 O-07~O-11 验证项，见 §10 |
+| 前置文档 | `docs/noon-erp-requirements-v0.1.md`（业务流程梳理）、`docs/noon-erp-requirements-v0.2.md`（范围收敛）、`docs/noon-erp-codex-review-v1.0.md`（6 项核实证词） |
+| 配套设计 | **`docs/noon-erp-schema-v0.4.sql`**（MySQL 8，45 表 + 4 视图，Codex 评审 6 项修订；v0.3 为评审基线保持不变）；**`docs/noon-erp-api-integration-v1.0.md`**（M0 实测记录、完整原始响应、MCP 权限矩阵、字段映射） |
 | 事实依据 | Noon 官方开发文档站 `noon-docs.noonpartners.dev`（123 页 sitemap）、已登录 Developer Portal、Service Account 凭据文件字段核对、**2026-11-13 21:20 生产网关 7 次只读实调 + 54 页 API Reference 的 `MCP access` 全量扫描**、v0.1 公开资料核查 |
 | 架构前提 | Java SpringBoot **单体** · MySQL 8 单库 · 云端单机 · ≤10 人 · Web 端 · AI 外挂不侵入核心 |
 | 事实纪律 | 事实带编号与核查时间；公开资料冲突项一律参数化；**未核到的后台字段不用推测补齐**；原始字段不删减 |
-| 文件说明 | 文件名沿用 `noon-erp-prd-v1.0.md` 以保持引用稳定，**内部版本以本表 v1.0.2 为准** |
+| 文件说明 | 文件名沿用 `noon-erp-prd-v1.0.md` 以保持引用稳定，**内部版本以本表 v1.0.3 为准** |
 
 ---
 
@@ -43,6 +43,7 @@
 4. 未继续浏览器核查（用户本轮转向 PRD），Seller Lab 后台字段未核到；**按 A-01 决议不阻塞开工**，仍未用推测补齐。
 5. **v1.0.1 修订（三项评审决议按推荐落地）**：A-01 O-01 不阻塞开工（人工录入 + 账单反推）、A-02 授权修订 DDL 产出 `schema-v0.3.sql`（D-01~D-03 关闭）、A-03 生产/沙箱共用一份凭据用 `env` 区分。详见 §2.2、§6.4、§11 E。
 6. **v1.0.2 修订（M0 生产实调 + A-04 只读权限）**：Service Account 设为只读后完成 Login/whoami/仓清单/导出类别/事件类型实调 → **R2~R5 关闭**；新增 N-21~N-25，修正「Statement 无 API」「MCP 可供 AI 取数」两处口径，明确官方 MCP 仅 11 个 Read 工具 / 0 个写工具；新增 A-04、O-07~O-11。完整实测数据见 `docs/noon-erp-api-integration-v1.0.md`。
+7. **v1.0.3 修订（Codex 交叉评审 6 项）**：全部核实成立并修订；新增 `docs/noon-erp-codex-review-v1.0.md` 逐条证据；DDL 升 v0.4（45 表）；范围不变（FBN/双站点/FIFO/头程独立/AI 人工复核）
 
 ---
 
@@ -183,7 +184,9 @@ md_partner_account (PRJ468049, 1)
 | --- | --- | --- | --- |
 | `cost_method` | `FIFO` | Q5 | 批次成本 |
 | `vat_mode` | `IGNORE` | Q6 | 不做 VAT；毛利虚高风险 R7 |
-| `allocation_policy` | `NONE` | Q8 | `NONE` / `PARTIAL` / `FULL` |
+| `allocation_policy`（维度A） | `NONE` | Q8 | 站点层 L2 合并范围 `NONE`/`PARTIAL`/`FULL`；与是否摊到 SKU 无关 |
+| `sku_allocation_enabled`（维度B） | `0` | 2026-11-18 决议 | SKU 分摊独立开关，默认关闭；1=启用后按 `profit_allocation_basis` 分摊，ΣSKU=SITE |
+| `profit_allocation_basis` | `REVENUE_SHARE` | 2026-11-18 决议 | 维度B方法参数（非开关）：收入占比 / 件数 / 平均 |
 | `return_window_days` | `15` | C-03 | 14/15 冲突取宽口径 |
 | `appeal_window_days` | `14` | C-03 | Directship 7 天需按场景覆盖 |
 | `statement_dispute_days` | `15` | F-10 | 逾期争议不受理 |
@@ -336,11 +339,35 @@ md_partner_account (PRJ468049, 1)
 | FR-04.2 | FIFO 出库扣减 | 订单妥投事件 | 按 `received_at ASC, batch_id ASC` 依次扣 `qty_remaining`；每扣一批写一条 `inv_batch_consumption`；扣到 0 关闭批次 | COGS 流水 | 构造 3 批不同单价，卖出跨批数量后 `COGS = Σ(qty×unit_cost)` 与手算一致 | `inv_batch_consumption` |
 | FR-04.3 | COGS 唯一来源 | 订单行 | `sal_order_item.cogs_amount` **只从 `inv_batch_consumption` 汇总回填**，禁止手工填、禁止移动加权 | 订单行成本 | 删除消耗流水后订单 COGS 归零且利润重算随之变化 | `inv_batch_consumption` `sal_order_item` |
 | FR-04.4 | 四态台账 | 所有库存变动 | `qty_available / qty_in_transit / qty_reserved / qty_unsellable` 分离；`qty_reserved` 由平台扣、**不通过 Stock API 设置**（N-11） | `inv_stock_ledger` | 每次变动后台账与流水、批次剩余量三者守恒 | `inv_stock_ledger` `inv_stock_move` |
-| FR-04.5 | 调拨与盘点 | 调拨单 / 盘点单 | 调拨多段在途；盘点盈亏写调整单并**按批次追补/冲销消耗流水** | 单据与流水 | 盘亏后批次剩余量同步减少且 COGS 可重算 | `inv_transfer(_item)` `inv_stocktake(_item)` |
-| FR-04.6 | 退货二次上架 | 退货分级 A / 补偿金额 | 生成**新批次插队尾**，成本按 `return_restock_cost`（默认原批次成本），不回流原批次 | 新 `inv_batch` | 新批次 `received_at` 晚于所有在库批次，FIFO 顺序正确 | `inv_batch` `sal_return` |
+| FR-04.5 | 调拨与盘点 | 调拨单 / 盘点单 | 调拨多段在途；盘点盈亏写调整单并**按批次追补/冲销消耗流水**；**过账唯一责任**：调拨/ASN 只改 `inv_stock_ledger` 四态与 `inv_batch` 拆批血缘，**不写 `inv_batch_consumption`**（C-5） | 单据与流水 | 盘亏后批次剩余量同步减少且 COGS 可重算；调拨/ASN 全流程 COGS 不变 | `inv_transfer(_item)` `inv_stocktake(_item)` `inv_batch` |
+| FR-04.6 | **退货成本冲回 + 分级处置**（C-2/C-2b） | 退货分级 A/B/C、补偿、退款 | **任何退货第一步都是红冲原 SALE 消耗层**（`sign=-1`，`reversal_of_id` 指向原流水）。**A 级**：按 `return_restock_cost` 建新批次插队尾（资产转移，不产生损益）。**B/C 级**：`RETURN_LOSS` **按原采购层成本全额计损**（`amount = 原消耗 amount × 退货比例`，**不得扣减补偿**）；平台赔偿**只在 `COMPENSATION` 确认一次**（`platform_fee` 减项，即收益 +），禁止同时在 `RETURN_LOSS` 里减补偿 —— 双计会把净损从 70 错算成 40。退款记 `refund_amount` 冲减 revenue；跨期红冲指向 `original_period` 并触发原期快照重算 | 冲回流水 + 新批次/损耗 | **成本100 / 售价150 / 全额退款 / 赔偿30 → 累计净损失 70**（不是 40、不是 200）；红冲可追到原消耗层 | `inv_batch_consumption` `sal_return` `inv_batch` |
 | FR-04.7 | 原始留痕 | 平台报文 / CSV 行 | `raw_payload` 字段**不删减**；每条流水带 `move_no` + `ref_doc_type/no` + 操作人 + 时间戳 | 可回溯 | 任一库存变动可查到来源单据与原始报文 | `inv_stock_move` |
+| FR-04.8 | **拆批在途与守恒**（C-5） | 采购到货 100、发运 40、目的仓收货 38 | 拆批时父批次保留采购成本血缘，子批次 `parent_batch_id` 指向父批；在途段只计 `qty_in_transit`，目的仓部分收货生成第二段拆批，短少 2 记 `TRANSFER_SHORT` 且不进 COGS | 批次余额 + 四态台账 | 任意时点 `Σ批次(qty_remaining + qty_in_transit)` = 台账四态对应量；短少可追到采购价 | `inv_batch` `inv_stock_ledger` `inv_stock_move` |
 
 > **设计理由**：Q8 要求「不摊、单独、部分合并」。若把头程摊进 `unit_cost`，就再也无法单独出「不含期间费用的 SKU 贡献毛利」。FIFO 管采购成本，L2 管期间/批次费用，两者必须物理分离。
+
+**C-2 退货数字案例（统一验算基准：单件成本 100、售价 150、全额退款；L1 = revenue − platform_fee − cogs_fifo）**
+
+| 场景 | revenue | platform_fee | cogs_fifo（SALE/红冲/RETURN_LOSS） | 赔偿确认位置 | L1 净损益 |
+| --- | --- | --- | --- | --- | --- |
+| **A 级可售**（货回仓） | 150 − 150 = 0 | 0 | 100 − 100 + 0 = 0 | 无 | **0**（新批次资产 100，不产生损益） |
+| **B/C 级报废，赔偿 30**（★验收基准） | 150 − 150 = 0 | **−30**（COMPENSATION 减项，仅一次） | 100 − 100 + **100** = 100 | 仅 COMPENSATION | **0 − (−30) − 100 = −70** ✓ |
+| **B/C 级报废，无赔偿** | 0 | 0 | 100 − 100 + 100 = 100 | 无 | **−100** |
+| **部分退货 2/10 件**（B 级，每件赔偿 3） | 30 − 30 = 0（退的2件） | −6（2×3，仅一次） | 20 − 20 + 20 = 20（退的2件） | 仅 COMPENSATION | **−14**（2件净损）；未退 8 件 L1 = 8×(150−100) = 400 |
+| **跨期退货**（原期 2026-10，退货 2026-11） | 退款归退货期 | 赔偿归退货期 | 红冲归原 2026-10 并重算 | COMPENSATION 归退货期 | 两期并存，不把原期成本挪到退货期 |
+
+> **★防双计红线（C-2b）**：赔偿 30 只能出现在 `platform_fee` 的 `COMPENSATION` 减项 **或** `RETURN_LOSS` 的抵减中**二选一**，本版统一走 `COMPENSATION`。`RETURN_LOSS` 永远按**原采购层成本全额**计损（100），不得写 `100−30=70`。若双计：L1 会变成 `0−(−30)−70 = −40`（少算 30 损失）。若既不计损也不冲回：COGS 停在 200（多算 100）。**唯一正确答案是 −70**。
+
+**C-5 拆批守恒案例（国内仓 CN01 → FBN 仓 AE-FBN）**
+
+| 时点 | 父批次 BAT-001 (CN01) | 子批次 BAT-001-02 (在途) | 子批次 BAT-001-03 (AE-FBN) | 台账 |
+| --- | --- | --- | --- | --- |
+| 采购到货 100 | qty_remaining=100 | — | — | CN01 available=100 |
+| 发运 40 | qty_remaining=60 | qty_in_transit=40, parent=BAT-001 | — | CN01 avail=60 / transit=40 |
+| 目的仓收 38 | 60 | 关闭，短少 2 记 TRANSFER_SHORT | qty_remaining=38, unit_cost 继承 100 | AE-FBN avail=38；短少 2 不进 COGS |
+| FBN 售 10 | 60 | — | qty_remaining=28 | 销售妥投才写 SALE 消耗 10×100 |
+
+> **`unit_cost` 继承规则**：拆批不改变单位成本，采购价血缘可从任一子批次回溯至父批次 `pur_order_item_id`；短少只减少数量，不重算单价。
 
 ### FR-05 头程与 FBN 入仓 ASN（P0）
 
@@ -355,12 +382,13 @@ md_partner_account (PRJ468049, 1)
 
 | 编号 | 功能 | 输入 | 规则 | 输出 | 验收标准 | 对应表 |
 | --- | --- | --- | --- | --- | --- | --- |
-| FR-06.1 | 订单导入 | Seller Lab / impex CSV、webhook 事件 | `source_channel=API/EXPORT/WEBHOOK/MANUAL`；`order_no + site_code` 唯一；`raw_payload` 不删减；按 `partner_sku` 回查 `sku_id` | `sal_order(_item)` | 重复导入同一订单被拒；映射缺失行进异常清单不丢弃 | `sal_order` `sal_order_item` |
+| FR-06.1 | **订单导入幂等与状态更新**（C-4） | Seller Lab / impex CSV、webhook 事件 | `source_channel=API/EXPORT/WEBHOOK/MANUAL`；`order_no + site_code` 是业务唯一键；按 `raw_payload` 规范化指纹 `SHA256`：**同指纹重复导入 → ACK 不更新、不过账**；**同订单新状态（IMPORTED→DELIVERED→RETURNED/CANCELLED）→ 按状态机更新 `state_version+1`**，不整单拒绝；`platform_item_no` 定义行级粒度；`raw_payload` 不删减；按 `partner_sku` 回查 `sku_id` | `sal_order(_item)` | 同一 CSV 重传 2 次只落 1 单且 COGS 不过账 2 次；先导入后补妥投成功；部分妥投 2/3 件可表达 | `sal_order` `sal_order_item` |
+| FR-06.1b | **过账唯一性**（C-4/C-5） | 妥投 / 退货事件 | 每个 `sal_order_item` 的同一 `move_type` 只产生**一条**消耗流水；红冲必须指向原流水；调拨/ASN 不产生 COGS | `inv_batch_consumption` | 重复投递妥投事件，COGS 不变；ASN 收退货后 COGS 不变 | `inv_batch_consumption` `inv_stock_move` |
 | FR-06.2 | 妥投触发成本 | `delivered_at` | **仅 `DELIVERED` 触发 FIFO 扣减与 COGS 归集**；CANCELLED 不扣 | 出库流水 | 取消订单不产生 `inv_batch_consumption` | `inv_batch_consumption` |
 | FR-06.3 | 周账单归期 | 妥投时间 | 账单按妥投归期，导入订单未填 `delivered_at` 时进「待补」清单 | 待补清单 | 待补订单不参与当期利润快照 | `sal_order` |
 | FR-06.4 | COD 标识 | `payment_type` | `COD` 与 `PAID` 分开统计；COD 未回款不计入现金口径（本版不建资金模块，仅出报表维度） | 报表维度 | COD 订单在回款报表中单列 | `sal_order` |
 | FR-06.5 | 退货登记 | `ListReturnReferences` + 账单退货行 | 记录 `grade A/B/C`、`compensation_amount`；按 `sys_config` 计算 `window_deadline` / `appeal_deadline` | `sal_return` | 窗口/申诉截止日可查询与预警；逾期单项高亮 | `sal_return` |
-| FR-06.6 | 退货处置 | 分级结果 | A 级二次上架（FR-04.6）；B/C 级损耗写 `inv_batch_consumption(move_type=RETURN_LOSS)` | 损耗入 COGS | 退货净损耗进入 L1 计算且可追溯 | `sal_return` `inv_batch_consumption` |
+| FR-06.6 | 退货处置 | 分级结果 | **先红冲原 SALE 消耗层**（FR-04.6 / C-2）；A 级二次上架建新批次；B/C 级按**原采购层成本全额**写 `inv_batch_consumption(move_type=RETURN_LOSS)`，**不得扣减赔偿**；退款冲收入；赔偿只在 `COMPENSATION` 平台费减项确认**一次** | 冲回 + 损耗 + 退款 | 成本100/售价150/全额退款/赔偿30 → L1 = −70（不是 −40、不是 −200）；同一件货 COGS 不重复确认、赔偿不双计 | `sal_return` `inv_batch_consumption` |
 
 ### FR-07 结算账单与对账（P0，★资金安全）
 
@@ -385,21 +413,46 @@ cogs_fifo      = Σ inv_batch_consumption.amount        （按订单行/期间�
 L1 contribution_margin = revenue − platform_fee − cogs_fifo
 
 L2 expense_pool = Σ fin_expense_pool.amount            （按 period / site / asn 归集）
-allocated_expense = 0                                  when allocation_policy = NONE
-                  = Σ(勾选科目 included_in_partial=1)   when PARTIAL
-                  = Σ(全部科目)                         when FULL
-net_profit    = contribution_margin − allocated_expense
+allocated_expense(SITE) = 0                            when NONE
+                        = Σ(勾选科目 included_in_partial=1) when PARTIAL
+                        = Σ(全部科目)                    when FULL
+net_profit(SITE) = contribution_margin(SITE) − allocated_expense(SITE)
+
+-- SKU 行：L1 直接聚合，L2 仅按 basis 分摊，禁止每个 SKU 各扣一次整池
+SKU.contribution_margin = revenue − platform_fee − cogs_fifo
+SKU.allocated_expense   = SITE.allocated_expense × (SKU.basis_value / ΣSKU.basis_value)
+SKU.net_profit          = SKU.contribution_margin − SKU.allocated_expense
+守恒校验：ΣSKU.allocated_expense = SITE.allocated_expense（误差 ≤ 0.01）
+basis 由 sys_config.profit_allocation_basis 决定：REVENUE_SHARE / QTY_SHARE / EQUAL
 ```
 
 | 编号 | 功能 | 规则 | 验收标准 |
 | --- | --- | --- | --- |
-| FR-08.1 | L1 SKU 贡献毛利 | 按 `sku_id × site_code × period` 聚合收入、平台费、FIFO COGS；`revenue` 按 `fx_rate` 归一 | 单 SKU 手算与系统结果一致（误差 ≤ 0.01） |
+| FR-08.1 | L1 SKU 贡献毛利 | 按 `sku_id × site_code × period` 聚合收入、平台费、FIFO COGS（含退货红冲净额）；`revenue` 按 `fx_rate` 归一 | 单 SKU 手算与系统结果一致（误差 ≤ 0.01） |
 | FR-08.2 | L2 费用池 | 独立归集头程/关税/清关/包材/汇兑/通道费/AD_SPEND；**不写入 `inv_batch`** | 登记 L2 费用后 L1 数值不变 |
-| FR-08.3 | 三档合并口径 | `NONE/PARTIAL/FULL` 三套结果**并存互不覆盖**，报表显式标注口径 | 切换口径后历史快照仍可查 |
+| FR-08.3 | 三档合并口径并存（C-3，维度A） | `NONE/PARTIAL/FULL` 三套结果**并存互不覆盖**，各自写独立的 `allocation_policy`；只决定 SITE 行 L2 合并范围（0/勾选/全部），**与是否摊到 SKU 无关**；报表显式标注口径 | 同一期间同一公式版本可同时查到 3 套结果，切换不覆盖历史且不影响维度B |
 | FR-08.4 | 多维查询 | SKU / Partner SKU / 站点 / 品类 / 仓 / 期间 | 双站点对比先归一币种；AED 与 SAR 不直接相加 |
-| FR-08.5 | 公式版本与全量重算 | 每次计算写 `formula_version + recalculated_at`；改费率或公式后可指定期间重算，**保留新旧快照** | 重算前后两套结果可比对，原始单据不变 |
-| FR-08.6 | 净利口径澄清 | `fin_profit_snapshot.net_profit = contribution_margin − allocated_expense`（DDL 注释「L1+L2 合并口径」按此公式解释，勿按加法理解） | 报表口径说明与本公式一致 |
+| FR-08.5 | 公式版本与多次重算（C-3） | 每次计算生成 `calc_batch_no` + `formula_version + recalculated_at`；改费率或公式后指定期间重算，**生成新批次不覆盖旧批次**；`calc_input_snapshot` 保存费率版本/汇率/流水截止/费用池批次 | 同一期间重算 2 次得到 2 个 `calc_batch_no`，旧快照原样可查且输入可复算 |
+| FR-08.6 | 净利口径澄清 | `net_profit = contribution_margin − allocated_expense`（DDL 旧注释「L1+L2」按此公式解释，勿按加法理解） | 报表口径说明与本公式一致 |
 | FR-08.7 | VAT 风险提示 | `vat_mode=IGNORE` 时，报表页固定展示提示：「售价含 VAT（AE 5% / SA 15%）、费率报价不含 VAT，当前 L1 毛利系统性偏高」 | 每张利润报表都带该提示，不可关闭 |
+| FR-08.8 | **站点总利润与 SKU 分配**（C-3，维度B） | `scope_type=SITE, sku_id=0` 行存站点总额（SITE 行按维度A合并的 L2）；SKU 行是否分摊由**独立开关** `sku_allocation_enabled`（默认 0）决定：关闭时 SKU 行 `allocated_expense=0`、净利 = 自身 L1；仅开启时才按 `allocation_basis=REVENUE_SHARE` 分摊 | 开关关闭时 PARTIAL/FULL 仅 SITE 行生效、SKU 行净利 = 自身 L1；开关开启时任一 `period+site+policy+batch` 下 ΣSKU 分摊 = SITE 行金额（误差 ≤0.01） |
+
+**C-3 三档并存与分摊数字案例（期间 2026-11 / 站点 AE / 同一公式版本 FV-2026.11-01；SITE 列三档恒成立，SKU 列仅在维度B `sku_allocation_enabled=1` 启用时成立）**
+
+| 口径 | SITE: L1 | SITE: L2 池 | SITE: 净利 | SKU-A (收入 600, 占比 60%) | SKU-B (收入 400, 占比 40%) |
+| --- | --- | --- | --- | --- | --- |
+| NONE | 78,210 | 7,716.58（仅展示） | **78,210** | L1=46,926，分摊 0，净利 46,926 | L1=31,284，分摊 0，净利 31,284 |
+| PARTIAL（勾选 2,540） | 78,210 | 2,540 | **75,670** | 分摊 1,524，净利 45,402 | 分摊 1,016，净利 30,268 |
+| FULL | 78,210 | 7,716.58 | **70,493.42** | 分摊 4,629.95，净利 42,296.05 | 分摊 3,086.63，净利 28,197.37 |
+
+> 三档各自一个 `calc_batch_no`（如 `CB-20261117-001/002/003`），互不覆盖；重算再生成 `CB-20261117-004`。合计守恒：46,926+31,284=78,210（L1）；4,629.95+3,086.63=7,716.58（L2）。
+
+> **默认口径决议（2026-11-18 用户确认；同日 Codex 复核修正两维度）**：利润口径由**两个相互独立的维度**控制，切换维度A **不会**改变维度B。
+>
+> - **维度A · 站点层费用合并** `sys_config.allocation_policy`（默认 `NONE`）：只决定 **SITE 行**合并多少 L2 —— `NONE`=0（L2 仅单独展示）、`PARTIAL`=勾选科目、`FULL`=全部。三档并存互不覆盖，「部分合并 / 全部合并」需求保留不变，用户可显式切换。
+> - **维度B · SKU 级分摊开关** `sys_config.sku_allocation_enabled`（默认 `0` 关闭）：**独立开关**，才决定是否把 SITE 行的 `allocated_expense` 分摊到 SKU 行。分摊方法固定为收入占比 `profit_allocation_basis=REVENUE_SHARE`（该配置是维度B的**方法参数**，不是开关）。**关闭时** PARTIAL/FULL 仅在 SITE 行生效，SKU 行 `net_profit` = 自身 L1、不承担 L2，无需 ΣSKU=SITE 校验；**启用时** SKU 行按 REVENUE_SHARE 分摊，ΣSKU 分摊额 = SITE 行 `allocated_expense`（误差 ≤0.01），禁止每 SKU 各扣整池。
+>
+> **关键澄清**：维度A 选择 `PARTIAL`/`FULL` **不等于**启用 SKU 分摊；此前把 `allocation_policy` 当作「分摊开关」的表述已作废。SKU 级分摊为可选功能、默认关闭，是否在特定报表默认启用仍属待确认范围，不在本版擅自开启。
 
 > ⚠️ R7：不做 VAT 会让 L1 毛利系统性虚高。这是已接受的口径，字段与科目位已预留，随时可启用不改表。
 
@@ -425,7 +478,7 @@ net_profit    = contribution_margin − allocated_expense
 | FR-10.5 | 全量 API 留痕 | 记录 `X-Request-Id`、http_status、error_code、request/response、latency、时间戳；平台侧 Request Logs 只保留 14 天，**必须本地留痕** | 提 Support Case 可直接从系统拿到 request_id |
 | FR-10.6 | 错误映射 | 错误 envelope `error{status_id, code, message, fields, doc_url}`；`PERMISSION_DENIED` → 提示检查 service account 角色；其他错误码映射为可读告警 | 权限不足时给出明确处置指引而非原始堆栈 |
 | FR-10.7 | Webhook 接收 | ≤5 destination；`event_id` 唯一键幂等；状态 `RECEIVED/ACKNOWLEDGED/PROCESSED/FAILED/KILLED`；原始 `payload_raw` 不删减 | 重复事件不产生重复订单 |
-| FR-10.8 | impex 导出任务 | `GetExportCategoryList → CreateExport → GetExportStatus` 三步；`export_category_code` 需实调确认（R4）；`int_export_job` 记录状态与 `file_url` | 能导出一次并回填 `imported_count` |
+| FR-10.8 | impex 导出任务 | `GetExportCategoryList → CreateExport → GetExportStatus` 三步；`export_category_code` **只能是 `int_export_category` 中已发现的 12 个码**（C-1），且 `is_usable=1` 才可自动创建；当前 **12 个码全部 `is_usable=0`**（O-07/O-09 未验证）→ 界面只可登记不可声称可用；`int_export_job` 记录状态与 `file_url` | 不存在的类别码写入被拒；只读账号下未验证时任务状态为 `BLOCKED` 而非 `SUCCESS` | `int_export_category` `int_export_job` |
 | FR-10.9 | Stock 绝对值语义 | `stock_update_mode=ABSOLUTE`；**禁止增量同步**；reserved 由平台扣，不推送 | 连续两次推同一绝对值不叠加 |
 | FR-10.10 | 字段映射层 | 平台报文 → 内部 DTO 单独一层映射；原始字段全留 `raw_payload`/`raw_json` | 平台加字段不导致导入失败 |
 | FR-10.11 | 官方 MCP 接入 | WorkBuddy / Codex / Claude Code 可直连官方 MCP，OAuth 授权时**只勾 Read**（`execute_api_read`），Revoke 随时可用；**N-25：平台仅 11 个 Read 工具 / 0 个写工具，Offer 与报表不在 MCP** | 核对 MCP 工具清单零写工具；在受控环境验证写端点被拒（§8.2、UAT-01 步 9、O-11），**不在生产盲测** |
@@ -523,7 +576,7 @@ net_profit    = contribution_margin − allocated_expense
 
 ## 6. 数据模型
 
-### 6.1 表分组（共 **44 表 + 4 视图**，与当前开发依据 `schema-v0.3.sql` 一致）
+### 6.1 表分组（共 **45 表 + 4 视图**，与当前开发依据 `schema-v0.4.sql` 一致）
 
 | 组 | 张数 | 表名 | 职责 |
 | --- | --- | --- | --- |
@@ -566,13 +619,17 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 
 ### 6.4 DDL 修订结果（**D-01~D-03 已关闭**，A-02 授权落地）
 
-| 编号 | 原问题 | v0.3 修订内容 | 状态 |
+### 6.4 DDL 修订结果（D-01~D-03 已关闭；C-1~C-5 见 v0.4）
+
+| 编号 | 原问题 | 修订内容 | 状态 |
 | --- | --- | --- | --- |
 | D-01 | `v_ai_sku_overview` 按 `l.site_code = p.site_code` 关联，而 `inv_stock_ledger` 以 `(sku_id, warehouse_id)` 唯一 → **同站点多仓放大库存行** | 改为按 `(sku, site)` **聚合** `COALESCE(SUM(qty_*),0)`，新增 `warehouse_count`，并显式 `GROUP BY s.id, … p.id …`；注释写清「同一 SKU 多条 Partner SKU 时为同一份站点汇总，禁止跨行相加」 | ✅ 已修复 |
 | D-02 | `sal_order` 与 `sal_order_item` 冗余字段缺一致性约束 | DDL 表上方补注粒度口径；**FR-13.2 增加导入事务校验**（主表 qty / 金额 = 行级合计），作为可测验收标准 | ✅ 已明确 |
 | D-03 | 时间口径未在 DDL 声明 | 文件头设计约定第 6 条：所有 `DATETIME` 统一 GMT+8 存储，站点本地时间仅展示层换算，平台原始时间保留在 `raw_payload` | ✅ 已补注 |
 
-> **当前开发依据 = `docs/noon-erp-schema-v0.3.sql`**；`v0.2` 保留为历史基线不覆盖。静态校验：44 表 / 4 视图不变、括号平衡、无重名表、建表语句均带 `ENGINE`、`sys_config` 初始化幂等；v0.2→v0.3 差异仅文件头、D-02 注释、D-01 视图、文件尾 4 处。
+> **当前开发依据 = `docs/noon-erp-schema-v0.4.sql`**；`v0.3` 为 Codex 评审基线、`v0.2` 为历史基线，均不覆盖。v0.4 静态校验：45 表 / 4 视图、括号平衡、无重名表、建表语句均带 `ENGINE`、`sys_config` 与 `int_export_category` 初始化幂等。
+>
+> **Codex 评审 6 项在 v0.4 的落点**：C-1 新增 `int_export_category`（12 个码三层验证）；C-2 `inv_batch_consumption` 加 `sign/reversal_of_id/refund_amount/cross_period`、`sal_return` 加退款与净损；C-3 `fin_profit_snapshot` 加 `allocation_policy/calc_batch_no/scope_type/calc_input_snapshot`；C-4 `sal_order` 加 `import_fingerprint/state_version`、`sal_order_item` 加 `platform_item_no/qty_*`；C-5 `inv_batch` 加 `parent_batch_id/split_seq/transfer_no/asn_no`；C-6 原型模拟边界见 §4 与原型说明。逐条证据见 `docs/noon-erp-codex-review-v1.0.md`。
 
 ---
 
@@ -599,7 +656,7 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 | Offer 健康 / 双站点 | `GetProductOffers` | ✅ MVP 使用；需真实 `partner_sku`（O-08）；**Not on MCP**（N-25） |
 | 退货 | `ListReturnReferences` | ✅ MVP 使用；Not on MCP |
 | 库存 | `GetStock` / `UpdateStock`（绝对值） | ❌ **R3 已关闭**：`ListWarehouses` 实调无 FBN 仓类型 → 不推送；`GetStock` 仅 MCP Read 可用 |
-| 报表导出 | `GetExportCategoryList` / `CreateExport` / `GetExportStatus` | ✅ **R4 已关闭**：12 个类别码实测（N-23）；`CreateExport` 只读权限待验证（O-07）；三步均 Not on MCP |
+| 报表导出 | `GetExportCategoryList` / `CreateExport` / `GetExportStatus` | ✅ **R4 已关闭**：12 个类别码实测（N-23）；**C-1 修正：仅「发现」层已达，12 码全部 `is_usable=0`**；`CreateExport` 权限 O-07 未验证；三步均 Not on MCP |
 | 事件 | `ListEventTypes` / `ListDestinations` / `CreateHttpsDestination` | ✅ **R5 已关闭**：3 种事件、`destinations=[]`（N-24）；前两者 MCP Read 可用 |
 | 定价 / 商品 | Pricing / Catalog / Content 端点 | 公开但本版不用（Q4 / A-04 只读） |
 | **FBN 入仓 ASN** | FBN Inbound API（术语表提及） | ❌ **未公开**，提 Support Case |
@@ -633,7 +690,7 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 | --- | --- | --- | --- |
 | `APILogin` / `whoami` | `int_api_log` / `md_partner_account` | `x-request-id`、`_npsid`/`_nprtnetid`（仅名称）、`user_code`、`username` | ✅ **M0 实测 200** |
 | `ListWarehouses` | `md_warehouse` | `warehouse_code` / `display_name` / `fulfillment_system_code` / `is_active` / `next_token` | ✅ **M0 实测 5 条**（仅自持仓，非 FBN 仓） |
-| `GetExportCategoryList` | `int_export_job` / `sys_config` | `export_category_code` / `params.fields.<name>.required` | ✅ **M0 实测 12 类** |
+| `GetExportCategoryList` | `int_export_category` | `export_category_code` / `params.fields.<name>.required` / `request_id` / 三层验证列 | ✅ **M0 实测 12 类；仅发现层达成**（C-1） |
 | `ListEventTypes` / `ListDestinations` | `int_webhook_event` 字典 | `event_types[]` / `destinations[]` | ✅ **M0 实测 3 种 / 空** |
 | `GetProductOffers` | `md_partner_sku` | `partner_sku` / `sku` / `title` / `brand` / `offers[]`（含 `live_status`/price/stock） | ⚠️ 文档已核、**未实调**（需真实 `partner_sku`，O-08）；Not on MCP |
 | impex 导出**文件** | `int_export_job` → `sal_order(_item)` / `fin_statement(_line)` / `inv_stock_*` | `file_url`、列头、金额口径、行类型 | ⚠️ 类别码已实测，**列头未实调**（O-07 / O-09） |
@@ -738,7 +795,7 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 - [ ] IP 白名单 / key 过期时间已配置；泄漏应急处置人已指定（R10 仍待处理）
 - [ ] ✅ **R2~R5 已关闭**：仓清单、12 个导出类别码、3 种事件类型、`x-request-id` 格式均已实测，`sys_config` 初值按 `docs/noon-erp-api-integration-v1.0.md` 第 12 节的**建议值**落库（未改动 DDL）
 - [ ] 8 类导入模板已就绪、列头映射可配置（**A-01：人工录入 + 账单反推，不等待 Seller Lab 字段核查**）；impex 自动导出前先验证 O-07 权限
-- [ ] 当前数据库脚本为 `schema-v0.3.sql`（D-01~D-03 已修复），非 v0.2
+- [ ] 当前数据库脚本为 `schema-v0.4.sql`（Codex 6 项修订 + D-01~D-03 已修复），非 v0.3/v0.2
 - [ ] 每日备份 + binlog，恢复演练通过
 - [ ] 六类告警（NFR-15）已配置接收人
 - [ ] 回滚方案：单 jar 版本回退 + 数据库备份恢复
@@ -827,7 +884,8 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 | `/docs/getting-started/quick-start` | 2026-11-13 17:00 | N-18：凭据绝不进 Git；JWT→cookie 流程 |
 | `/Users/dream/Downloads/noon_credentials_sensitive.json` | 2026-11-13 17:00 | N-20：6 字段、RSA 2048 PKCS#8、项目码一致性（**私钥内容未输出、未入库**） |
 | `docs/noon-erp-schema-v0.2.sql` | 2026-11-12 23:47 | 历史基线：44 表 + 4 视图，表名口径来源 |
-| `docs/noon-erp-schema-v0.3.sql` | 2026-11-13 20:22 | **当前开发依据**：D-01~D-03 修订、A-03 环境策略；44 表 / 4 视图不变（**v1.0.2 未改动 DDL**） |
+| `docs/noon-erp-schema-v0.3.sql` | 2026-11-13 20:22 | Codex 评审基线：D-01~D-03 修订、A-03 环境策略；44 表 / 4 视图，保持不变 |
+| `docs/noon-erp-schema-v0.4.sql` | 2026-11-17 22:00 | **当前开发依据**：Codex 6 项修订；45 表 / 4 视图，新增 `int_export_category` |
 | 生产网关 7 次只读实调（Login / whoami / ListWarehouses / GetExportCategoryList / ListEventTypes / ListDestinations / 沙箱） | 2026-11-13 21:20 | N-21~N-24；R2~R5 关闭；原始响应与 `x-request-id` 见 `api-integration-v1.0.md` §3 |
 | 54 页 `/docs/api-reference/**` 的 `MCP access` 标注 | 2026-11-13 21:21 | N-25：11 Read / 0 Change / 43 Not on MCP |
 | `/docs/api-reference/authentication/auth-service-api-login.md`、`/docs/overview/sandbox.md` | 2026-11-13 21:19 | 官方 Python/Go/Java JWT 示例；静态沙箱口径与「跳过权限校验」 |
@@ -842,6 +900,7 @@ ai_suggestion ──人工 APPROVED──> 核心系统落单（不直接写业�
 | PRD v1.0 | Q12 确认并双路径落地；凭据字段核对完成、R2 更新；新增权限矩阵、状态机、FR 逐条验收标准、NFR、页面 IA、UAT、里程碑 DoD、DDL 待修订项、开放问题；创建 `.gitignore` 防私钥误提交 |
 | **PRD v1.0.1** | 用户「问题按照推荐的走」→ **A-01/A-02/A-03 三项决议闭环**：O-01 不阻塞开工、授权修订 DDL 产出 `schema-v0.3.sql`（D-01~D-03 关闭）、生产沙箱共用凭据用 `env` 区分；同步更新决议表、FR-10.2/FR-13.2、§6.4、§7.4/§7.5、§8.3、M1/M2 依赖、上线清单、R2/R6/R11、O-01/O-02、编号索引与来源 |
 | **PRD v1.0.2** | 用户「账号权限改成只能读」+「继续完成未完成的任务」→ **A-04 只读权限决议 + M0 生产实调完成**：Node 原生 RS256 JWT 直连生产网关，7 次只读调用全部 200；**R2/R3/R4/R5 关闭**；新增 N-21~N-25、O-07~O-11；修正「Statement 无 API」「MCP 可供 AI 取数」两处口径，明确 MCP 仅 11 Read / 0 Change；同步 §0/§2.2/§2.3/§2.5/§2.6/§7.1/§7.2/§7.4/§7.5/§8.1/§8.2/§9.1/§9.2/§9.4/§10/§11；**DDL 保持 v0.3 不变**；新增配套文档 `docs/noon-erp-api-integration-v1.0.md` |
+| **PRD v1.0.3** | Codex 静态交叉评审 6 项全部核实成立：类别码以实测原始响应重写并三层验证、退货红冲与跨期案例、利润三档/重算/站点分摊与守恒、订单幂等与状态更新、拆批在途与过账唯一责任、原型模拟边界与内存联动；配套 DDL v0.4、原型与设计说明同步修订 |
 
 ### E. 评审决议记录（2026-11-13 20:22 / 21:26，已全部闭环）
 
@@ -856,4 +915,4 @@ O-03~O-06 按 §10.2 默认值执行，不需要逐条再确认。**M0 联调类
 
 ---
 
-**文档结束 · PRD-NOON-ERP-001 v1.0.2**
+**文档结束 · PRD-NOON-ERP-001 v1.0.3**

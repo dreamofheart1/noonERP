@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Noon ERP · 系统原型 v1.0（PRD v1.0.2 基线）</title>
+<title>Noon ERP · 系统原型 v1.1（PRD v1.0.3 / DDL v0.4 基线）</title>
 <style>
 :root{
   --bg:#F5F7FA; --surface:#FFFFFF; --subtle:#F8FAFC; --sidebar:#111A2E;
@@ -265,7 +265,7 @@ details.raw .code-block{border-radius:0;max-height:190px}
       <div class="brand-txt">Noon ERP<span class="brand-sub">FBN · UAE + KSA</span></div>
     </div>
     <nav id="nav"></nav>
-    <div class="side-foot">PRD v1.0.2 · 原型 v1.0<br>GMT+8 · 只读 Service Account</div>
+    <div class="side-foot">PRD v1.0.3 · 原型 v1.1<br>GMT+8 · 只读 Service Account</div>
   </aside>
   <div id="main">
     <header id="topbar">
@@ -286,7 +286,7 @@ details.raw .code-block{border-radius:0;max-height:190px}
         <option value="SERVICE">客服 SERVICE</option>
         <option value="AGENT">AI 外挂 AGENT</option>
       </select>
-      <span class="proto-tag" id="protoTag" style="cursor:pointer">PROTOTYPE v1.0</span>
+      <span class="proto-tag" id="protoTag" style="cursor:pointer">PROTOTYPE v1.1</span>
       <div class="avatar" id="avatar">财</div>
     </header>
     <main id="content"><div class="wrap" id="view"></div></main>
@@ -304,13 +304,61 @@ details.raw .code-block{border-radius:0;max-height:190px}
 
 <script>
 /* ==========================================================================
-   Noon ERP Prototype v1.0 — data-driven, no external dependencies
-   Source of truth: docs/noon-erp-prd-v1.0.md (v1.0.2) / FR-14 IA
+   Noon ERP Prototype v1.1 — 内存数据联动演示，无外部依赖
+   Source of truth: docs/noon-erp-prd-v1.0.md (v1.0.3) / docs/noon-erp-schema-v0.4.sql
+   ★ 模拟边界：本原型全部数据在浏览器内存中模拟，不代表真实落库、真实平台
+   调用或真实财务结果。按钮演示的是「业务规则与状态流转」，不是已完成业务。
    ========================================================================== */
 const S = { page:'P-01', site:'ALL', role:'ADMIN', policy:'NONE', tab:'ai',
             channels:{API:true,CSV:true,WEBHOOK:true,MANUAL:true},
             asnSealed:false, asnSlot:false, poConfirmed:false, sugConfirmed:false,
-            ai:{}, expensePartial:{}, recalcVer:'FV-2026.11-03', convertedPO:null };
+            ai:{}, expensePartial:{}, recalcVer:'FV-2026.11-01', convertedPO:null,
+            filters:{}, calcBatches:[], rowRegistry:{},
+            skuAlloc:false  // 维度B：SKU 分摊开关，默认关（可选功能，需显式启用）；方法固定 REVENUE_SHARE
+          };
+
+/* ---------- DEMO：端到端内存数据模型（Codex C-6） ----------
+   一条真实联动链：采购 100@¥10 → 部分到货 40 → 调拨/ASN 发 40 收 38 →
+   妥投 10 → 退货 2(B级补偿¥6) → 周账单对账 → 利润三档。
+   所有页面表格与详情从这里取数，筛选真实生效。 */
+const DEMO = {
+  step: 0,                       // 0..7 进度指针
+  po:{ no:'PO-DEMO-0001', qty:100, price:10, status:'DRAFT', received:0, unreceived:100 },
+  batches:[],                    // {no, wh, site, qty, unit, parent, state, received}
+  moves:[],                      // 库存流水
+  consumptions:[],               // COGS 消耗/红冲
+  returns:[],
+  statements:[],
+  ledger:{},                     // wh -> {available,in_transit,reserved,unsellable}
+  events:[],                     // 审计链
+  reset(){ this.step=0; this.po={no:'PO-DEMO-0001',qty:100,price:10,status:'DRAFT',received:0,unreceived:100};
+    this.batches=[]; this.moves=[]; this.consumptions=[]; this.returns=[];
+    this.statements=[]; this.ledger={}; this.events=[];
+    S.calcBatches=[]; S.poConfirmed=false; S.asnSealed=false; S.asnSlot=false;
+    S.ai={}; S.expensePartial={}; S.policy='NONE'; S.skuAlloc=false; S.recalcVer='FV-2026.11-01'; },
+  log(act,text){ this.events.unshift({at:'2026-11-17 '+String(22+this.step).padStart(2,'0')+':00:00',act,text}); },
+  // 演示订单级 L1：收入(销售额−退款) − 平台费(赔偿只在 COMPENSATION 减一次) − 净COGS(含红冲与报废全额)
+  orderProfit(){
+    const st=this.statements[0]; if(!st)return null;
+    const revenue=st.gross-st.refund;
+    const platformFee=st.fee-st.comp;
+    const cogs=this.consumptions.reduce((a,c)=>a+c.sign*c.amount,0);
+    return {revenue,platformFee,cogs,comp:st.comp,l1:revenue-platformFee-cogs};
+  }
+};
+// ===== 演示链实算口径（端到端 10 件订单，上面 DEMO 数据流）=====
+// 演示订单级 L2 费用池：按全站静态示例 1/100 缩放，仅用于演示链闭环实算，可追溯到 10 件订单
+const DEMO_L2_ITEMS={FREIGHT:48.2,CUSTOMS_DUTY:12.6,PACKAGING:6.8,FX_LOSS:3.42,CHANNEL_FEE:2.18,AD_SPEND:3.96};
+const DEMO_L2_TOTAL=77.16;
+function demoPartialSum(){return Object.keys(S.expensePartial).reduce((a,k)=>a+(S.expensePartial[k]?(DEMO_L2_ITEMS[k]||0):0),0);}
+// 维度A：allocation_policy 只决定 SITE 行合并多少 L2；是否摊到 SKU 由维度B skuAlloc 独立控制
+function demoAllocFor(policy){return policy==='NONE'?0:(policy==='FULL'?DEMO_L2_TOTAL:demoPartialSum());}
+
+// ===== 全站 SITE 静态示例（PRD C-3 固定基线，非演示链产出，勿与上面相加）=====
+const L2_POOL=7716.58, L1_BASE=78210;
+const PARTIAL_ITEMS={FREIGHT:4820,CUSTOMS_DUTY:1260,PACKAGING:680,FX_LOSS:342.18,CHANNEL_FEE:218.4,AD_SPEND:396};
+function partialSum(){return Object.keys(S.expensePartial).reduce((a,k)=>a+(S.expensePartial[k]?(PARTIAL_ITEMS[k]||0):0),0);}
+function allocFor(policy){return policy==='NONE'?0:(policy==='FULL'?L2_POOL:partialSum());}
 
 const MENU = [
  ['工作台','DA',[['P-01','概览']]],
@@ -369,7 +417,7 @@ const PAGE_CAP={
  'P-31':{a:['立即同步','run','ADMIN OPERATOR','按四通道降级，失败进 int_sync_task 重试'],e:true,f:'flow'},
  'P-32':{a:null,e:true,f:'flow',w:'API 日志为只读审计视图，不可新增'},
  'P-33':{a:null,e:true,f:'flow',w:'Webhook 事件为平台推送，只读；无 FBN 订单事件（N-24）'},
- 'P-34':{a:['新建导出任务','blocked','','O-07：只读 Service Account 下 CreateExport 权限未验证，暂不可用'],e:true,f:'flow'},
+ 'P-34':{a:['新建导出任务','blocked','','O-07/O-09：12 个类别码仅发现层达成，创建与列头均未验证，不可自动创建'],e:true,f:'flow'},
  'P-35':{a:null,e:false,f:'none',w:'通道开关与凭据配置在下方卡片内，按 A-04 只读策略执行'},
  'P-36':{a:null,e:false,f:'none',w:'用户 / 权限 / 审计 / 模板均在下方 Tab 内操作，AI 建议只能复核'}
 };
@@ -436,6 +484,117 @@ function cell(c,r){
   }
 }
 // 页头操作区：按 PAGE_CAP 逐页渲染，无操作页显示只读原因而不是空着或硬塞按钮
+/* ---------- DEMO 联动引擎（C-6：内存演示，不落库） ---------- */
+const DEMO_STEPS=[
+ {k:'po',    t:'① 确认采购单',      d:'PO-DEMO-0001 · 100 件 × ¥10，DRAFT → CONFIRMED'},
+ {k:'in',    t:'② 部分到货 40',     d:'生成实收批 BAT-001(40) 入 CN01；未到货 60 件仍是 PO 未收，不建库存批次、不计可用'},
+ {k:'ship',  t:'③ 调拨/ASN 发运 40',d:'在途段 BAT-001-02(40)；四态 CN01 可用 0 / 在途 40；调拨不写 COGS'},
+ {k:'recv',  t:'④ 目的仓收 38',     d:'在途批 CLOSED 且余额清 0；短少 2 记 TRANSFER_SHORT 可追溯；AE-FBN 可用 38'},
+ {k:'sale',  t:'⑤ 妥投 10 件',      d:'FIFO 扣 BAT-001-03：COGS = 10 × ¥10 = ¥100；可用 38→28'},
+ {k:'ret',   t:'⑥ 退货 2 件(B级报废)',d:'红冲 −¥20 + RETURN_LOSS ¥20(原成本全额) + 赔偿 ¥6 只走 COMPENSATION → 净损 ¥14；退款 ¥30；报废不回可售库存'},
+ {k:'stmt',  t:'⑦ 周账单对账',      d:'10 件 × ¥15 = 毛收入 ¥150（非 1500）；退款 ¥30；COGS ¥100（非 94，不抵赔偿）；赔偿 ¥6 只在 PLATFORM_FEE 减项'},
+ {k:'profit',t:'⑧ 利润三档计算',    d:'三档 L1 从本演示订单流水实算（可追溯账单与 COGS）；维度A 站点费用合并 ONLY，维度B SKU 分摊独立开关默认关'}
+];
+function demoStep(k){
+  switch(k){
+    case 'po': if(DEMO.step!==0)return; DEMO.po.status='CONFIRMED'; DEMO.po.unreceived=100; DEMO.log('CONFIRM_PO','100×¥10，供应商有效、报价在有效期内'); break;
+    case 'in': if(DEMO.step!==1)return;
+      // 只到货 40：生成实收批入 CN01；未到货 60 件仍为 PO 未收，不建批次、不进任何可用台账
+      DEMO.batches=[{no:'BAT-001',wh:'CN01',site:'AE',qty:40,unit:10,parent:null,state:'OPEN',received:'2026-11-14 09:00'}];
+      DEMO.po.received=40; DEMO.po.unreceived=60; DEMO.po.status='PARTIAL_RECEIVED';
+      DEMO.ledger.CN01={available:40,in_transit:0,reserved:0,unsellable:0}; break;
+    case 'ship': if(DEMO.step!==2)return;
+      // 发运 40：从 BAT-001 拆出在途子批；父批留 0（已全数发运），CN01 可用转在途
+      DEMO.batches[0].qty=0;
+      DEMO.batches.push({no:'BAT-001-02',wh:'CN01',site:'AE',qty:40,unit:10,parent:'BAT-001',state:'IN_TRANSIT',received:'2026-11-14 09:00'});
+      DEMO.ledger.CN01.available=0; DEMO.ledger.CN01.in_transit=40;
+      DEMO.log('TRANSFER_OUT','40 件 CN01 → AE-FBN 在途段 BAT-001-02；仅动四态台账，不写消耗流水'); break;
+    case 'recv': if(DEMO.step!==3)return;
+      // 目的仓实收 38：在途批 CLOSED 且余额清 0（不再与目的仓 38 重复统计）；短少 2 单独可追溯
+      DEMO.batches.push({no:'BAT-001-03',wh:'AE-FBN',site:'AE',qty:38,unit:10,parent:'BAT-001',state:'OPEN',received:'2026-11-15 10:00'});
+      DEMO.batches[1].qty=0; DEMO.batches[1].state='CLOSED';
+      DEMO.ledger.CN01.in_transit=0; DEMO.ledger['AE-FBN']={available:38,in_transit:0,reserved:0,unsellable:0};
+      DEMO.moves.push({no:'MV-DEMO-004',type:'TRANSFER_SHORT',qty:-2,ref:'TRF-DEMO-001',note:'发40−收38=短少2；在途批余额清0，短少不进COGS，成本血缘仍指父批 BAT-001'}); break;
+    case 'sale': if(DEMO.step!==4)return;
+      DEMO.consumptions.push({no:'CON-DEMO-005',batch:'BAT-001-03',qty:10,unit:10,amount:100,sign:1,type:'SALE',reversal:null});
+      DEMO.batches[2].qty=28; DEMO.ledger['AE-FBN'].available=28; break;
+    case 'ret': if(DEMO.step!==5)return;
+      DEMO.consumptions.push({no:'CON-DEMO-006',batch:'BAT-001-03',qty:2,unit:10,amount:20,sign:-1,type:'RETURN_REVERSAL',reversal:'CON-DEMO-005'});
+      // C-2b：RETURN_LOSS 按原采购层成本全额 ¥20，赔偿 ¥6 只在 COMPENSATION 确认一次
+      DEMO.consumptions.push({no:'CON-DEMO-007',batch:'BAT-001-03',qty:2,unit:10,amount:20,sign:1,type:'RETURN_LOSS',reversal:'CON-DEMO-005'});
+      DEMO.returns.push({no:'RET-DEMO-006',qty:2,grade:'B',comp:6,refund:30,loss:20,net:14});
+      // B 级报废不回可售：批次与台账保持 28，报废去向单独记 unsellable=2（不可售），不写库存增加
+      DEMO.ledger['AE-FBN'].unsellable=2;
+      DEMO.moves.push({no:'MV-DEMO-006',type:'RETURN_SCRAP',qty:2,ref:'RET-DEMO-006',note:'B 级报废 2 件转不可售，不回可售；成本已在 RETURN_LOSS 全额计损'}); break;
+    case 'stmt': if(DEMO.step!==6)return;
+      // 毛收入 = 10×¥15 = 150；退款 30；平台费 82.5 含赔偿减项 −6（赔偿唯一确认点）；COGS = 净流水 100−20+20 = 100
+      DEMO.statements.push({no:'STMT-DEMO-W47',gross:150,fee:82.5,refund:30,comp:6,cogs:100,status:'MATCHED'}); break;
+    case 'profit': if(DEMO.step!==7)return;
+      // 闭环实算：三档的 L1 来自上方演示订单流水（orderProfit()），L2 用演示订单级费用池；
+      // 每一档都能沿 calc_batch_no → 账单 → COGS 消耗流水追溯，不再用静态全站基线代替演示结果。
+      // 维度A policy 决定 SITE 合并多少 L2；维度B SKU 分摊另由 S.skuAlloc 独立控制（默认关）。
+      const op=DEMO.orderProfit();
+      ['NONE','PARTIAL','FULL'].forEach((p,i)=>{const pool=demoAllocFor(p);
+        S.calcBatches.push({no:'CB-DEMO-00'+(i+1),policy:p,pool,l1:op.l1,net:op.l1-pool,ver:S.recalcVer,
+          src:'DEMO_CHAIN',skuAlloc:S.skuAlloc});}); break;
+  }
+  DEMO.step++; DEMO.log(k,DEMO_STEPS.find(x=>x.k===k).d); renderPage();
+  toast('<b>'+DEMO_STEPS.find(x=>x.k===k).t+'</b> 已执行（内存演示，未落库）','ok');
+}
+function demoPanelHTML(){
+  const done=DEMO.step, pct=Math.round(done/DEMO_STEPS.length*100);
+  const rows=DEMO_STEPS.map((s,i)=>{
+    const cls=i<done?'done':(i===done?'next':'');
+    const btn=i===done?'<button class="btn sm primary" data-act="demoStep" data-k="'+s.k+'">执行</button>'
+      :(i<done?'<span class="tag green">已完成</span>':'<span class="tag gray">待执行</span>');
+    return '<tr><td>'+(i+1)+'</td><td>'+esc(s.t)+'</td><td class="muted">'+esc(s.d)+'</td><td>'+btn+'</td></tr>';
+  }).join('');
+  const chain=DEMO.batches.length?('<div class="grid3 block">'+DEMO.batches.map(b=>
+    '<div class="kpi"><div class="lab">'+esc(b.no)+' · '+esc(b.wh)+'</div><div class="num">'+b.qty+'</div><div class="foot">unit ¥'+b.unit+' · '+esc(b.state)+(b.parent?' · parent '+esc(b.parent):'')+'</div></div>').join('')+'</div>'):'';
+  const conservation=DEMO.step>=2?(()=>{const led=DEMO.ledger, cn=led.CN01||{}, af=led['AE-FBN']||{};
+    // at = 该节点达成后 DEMO.step 的最小值；未达成只显示「待执行（预期）」，不把未来状态当现状
+    const rows=[
+      {at:2,n:'到货 40', a:'已收 40 + 未收 '+DEMO.po.unreceived, e:'到货 40 建批；未收 60 件仅挂 PO，不进库存', b:'BAT-001(40) 入 CN01'},
+      {at:3,n:'发运 40', a:'在途 40 + 目的仓 0', e:'在途 40；父批余额 0，不写 COGS', b:'BAT-001 拆 BAT-001-02(40)'},
+      {at:4,n:'收 38',  a:'在途 0 + 可用 38 + 短少 2', e:'在途批 CLOSED 清 0；短少 2 可追溯', b:'40=38+2；MV-DEMO-004'},
+      {at:5,n:'妥投 10',a:'可用 28 + COGS ¥100', e:'BAT-001-03 38→28，消耗 10×¥10', b:'CON-DEMO-005'},
+      {at:6,n:'报废 2', a:'可用 28 + 不可售 2', e:'B 级报废不回可售，RETURN_LOSS 全额计损', b:'MV-DEMO-006 / unsellable=2'}];
+    return '<div class="note block"><b>数量守恒链（逐行区分已发生 / 待执行）</b><div class="tbl-scroll" style="margin-top:8px"><table><thead><tr><th>节点</th><th>状态</th><th>台账 / 预期</th><th>血缘 / 流水</th></tr></thead><tbody>'
+      +rows.map(r=>{const hit=DEMO.step>=r.at;
+        return '<tr><td class="code">'+r.n+'</td><td>'+(hit?'<span class="tag green">已发生</span>':'<span class="tag gray">待执行</span>')+'</td>'
+          +'<td>'+(hit?r.a:'<span class="muted">预期：'+r.e+'</span>')+'</td><td class="muted">'+(hit?r.b:'—')+'</td></tr>';}).join('')
+      +'</tbody></table></div><div style="margin-top:8px"><b>当前实际</b>：CN01 可用 '+(cn.available||0)+' / 在途 '+(cn.in_transit||0)+' ｜ AE-FBN 可用 '+(af.available||0)+' / 不可售 '+(af.unsellable||0)+'</div></div>';})():'';
+  const fin=DEMO.statements.length?(()=>{const st=DEMO.statements[0],op=DEMO.orderProfit();
+    return '<div class="note"><b>对账结果（演示订单级）</b>：毛收入 10×¥15 = ¥'+st.gross+' − 退款 ¥'+st.refund+' − 平台费 ¥'+st.fee+'（其中赔偿 ¥'+st.comp+' 为减项，<b>唯一确认点</b>）− COGS ¥'+st.cogs+' → 状态 '+st.status
+      +'<br><b>L1 从流水计算</b> = (¥'+st.gross+' − ¥'+st.refund+') − (¥'+st.fee+' − ¥'+st.comp+') − ¥'+st.cogs+' = <b>¥'+op.l1+'</b>。步骤⑧的三档净利已由此 L1 实算（沿 <code>calc_batch_no → STMT-DEMO-W47 → CON-DEMO-005/006/007</code> 可追溯），三档并存不覆盖。'
+      +'<br><span class="muted">口径边界：此 L1 为本演示订单（10 件）实算结果；P-26 另有「¥78,210 全站 SITE 静态示例」用于对照 PRD C-3，属独立固定基线，非本链产出，两者不可相加。</span></div>';})():'';
+  const ret=DEMO.returns.length?('<div class="note"><b>C-2b 防双计验算</b>：退 2 件（单件成本 ¥10 / 售价 ¥15）→ 红冲 ¥20 + RETURN_LOSS <b>¥20（原采购成本全额）</b> + 赔偿 ¥6 <b>只在 COMPENSATION 确认一次</b> + 退款 ¥30 → 该批 L1 = <b>−¥14</b>；<b>报废 2 件转不可售（unsellable=2），不回可售库存</b>。（若赔偿重复抵减 RETURN_LOSS 会错算成 −¥8；若不红冲会错算成 −¥34）</div>'):'';
+  return '<section class="card block"><div class="card-h"><h3>端到端内存联动演示（Codex C-6）</h3><span class="sub">'+done+' / '+DEMO_STEPS.length+' 步 · '+pct+'%</span></div><div class="card-b">'
+   +'<div class="note"><b>模拟边界</b>：以下按钮只改变浏览器内存中的演示数据，<b>不调用 Noon API、不落数据库、不代表真实业务已完成</b>。演示目的仅是验证 PRD 规则（退货红冲、拆批守恒、三档并存、AI 闸门）在界面上可追溯。</div>'
+   +'<div class="bar" style="height:6px;background:var(--subtle);border-radius:3px;margin:12px 0"><div style="height:6px;width:'+pct+'%;background:var(--primary);border-radius:3px"></div></div>'
+   +'<div class="tbl-scroll"><table><thead><tr><th>#</th><th>步骤</th><th>规则与预期</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+   +chain+conservation+fin+ret+'<div class="block" style="margin-top:10px"><button class="btn sm" data-act="demoReset">重置演示</button> <button class="btn sm ghost" data-act="drawer" data-title="演示数据血缘">查看批次血缘与审计链</button></div></div></section>';
+}
+
+function calcBatchPanelHTML(){
+  const rows=S.calcBatches.length?S.calcBatches.map(b=>{
+    const chain=b.src==='DEMO_CHAIN';
+    const srcTag=chain?'<span class="tag green">演示链实算</span>':'<span class="tag">静态基线</span>';
+    return '<tr><td class="code">'+esc(b.no)+'</td><td>'+esc(b.policy)+'</td><td class="money">¥ '+b.l1.toLocaleString()+'</td>'
+     +'<td class="money">¥ '+b.pool.toLocaleString()+'</td><td class="money">¥ '+b.net.toLocaleString()+'</td><td class="code">'+esc(b.ver)+'</td>'
+     +'<td>'+srcTag+' · '+(chain?'可追溯':'重算快照')+' · 不覆盖</td></tr>';}).join('')
+   :'<tr><td colspan="7" style="text-align:center;color:var(--t3);height:60px">尚未生成计算批次：在 P-01 执行联动演示步骤 ⑧，或点「全量重算」</td></tr>';
+  const skuState=S.skuAlloc?'<b class="ok">已启用</b>（SKU 行按收入占比分摊 L2，ΣSKU = SITE）':'<b>未启用</b>（默认；L2 只在 SITE 行合并，SKU 行仅显示自身 L1）';
+  return '<section class="card block"><div class="card-h"><h3>计算批次（三档并存 · 重算不覆盖）</h3><span class="sub">'+S.calcBatches.length+' 批次</span></div>'
+   +'<div class="tbl-scroll"><table><thead><tr><th>calc_batch_no</th><th>维度A 口径</th><th>L1</th><th>L2 池</th><th>净利</th><th>公式版本</th><th>来源 / 状态</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+   +'<div class="note" style="margin:12px 16px 16px">'
+   +'<b>两个独立维度</b>：① <b>维度A <code>allocation_policy</code></b>（NONE/PARTIAL/FULL）只决定 <b>SITE 行</b>合并多少 L2 —— NONE=0、PARTIAL=勾选科目、FULL=全部；三档并存互不覆盖。'
+   +'② <b>维度B SKU 分摊开关</b>（<code>sku_allocation_enabled</code>，默认 <code>0</code>）单独控制是否把 SITE 行的 L2 按 <code>REVENUE_SHARE</code> 分摊到 SKU 行；当前 '+skuState+'。'
+   +'<b>关键</b>：维度A 选 PARTIAL/FULL <b>不等于</b>启用 SKU 分摊；开关关闭时 PARTIAL/FULL 仅在 SITE 行生效，SKU 行净利 = 自身 L1、不承担 L2。'
+   +'<br><b>来源区分</b>：<span class="tag green">演示链实算</span> 的 L1/L2 来自本演示订单流水（L2 演示池合计 ¥'+DEMO_L2_TOTAL.toLocaleString()+'，按全站 1/100 缩放），沿批次号可追溯到账单与 COGS；'
+   +'<span class="tag">静态基线</span>（L1 ¥78,210 / L2 ¥7,716.58）是 PRD C-3 全站固定示例，非本链产出，勿与演示链相加。'
+   +'<br><b>分摊守恒（仅维度B 启用时校验）</b>：启用后 SKU-A 60% / SKU-B 40%，FULL 档 ¥7,716.58 → ¥4,629.95 + ¥3,086.63 = ¥7,716.58（ΣSKU = SITE，误差 ≤0.01）。</div></section>';
+}
 function pageActionsHTML(cap){
   let h='';
   if(cap.e)h+='<button class="btn" data-act="export">导出</button>';
@@ -454,12 +613,26 @@ function pageActionsHTML(cap){
 }
 function tableHTML(b){
   const opt=b.opt||{};
+  const fk=S.page+'|'+b.title;
+  const f=S.filters[fk]||{};
   let rows=b.rows.filter(r=>S.site==='ALL'||!r.site||r.site===S.site||String(r.site).includes(S.site));
+  // C-6：筛选真实生效（关键字对整行生效，状态列按 status 类型列匹配）
+  if(f.kw){const q=String(f.kw).toLowerCase();rows=rows.filter(r=>Object.values(r).some(v=>String(v==null?'':v).toLowerCase().includes(q)));}
+  if(f.status&&f.status!=='全部状态'){
+    const sc=b.cols.find(c=>c.t==='status');
+    if(sc)rows=rows.filter(r=>String(r[sc.k]||'').indexOf(f.status)>=0);
+  }
+  if(f.period&&f.period!=='本月'){
+    // 演示数据没有完整日期维度时，只过滤含日期列的行；保留未标日期的静态字典
+    const dc=b.cols.find(c=>c.t==='date');
+    if(dc&&f.period==='近 7 天')rows=rows.filter(r=>String(r[dc.k]||'').indexOf('2026-11')>=0);
+  }
   if(opt.dangerKey) rows=rows.map(r=>({...r,_danger:!!r[opt.dangerKey]}));
   else if(opt.dangerRow) rows=rows.map(r=>({...r,_danger:/逾期|DEAD|批次不足|断货/.test(Object.values(r).join('|'))}));
   const head='<tr>'+b.cols.map(c=>'<th class="'+(c.t==='num'||c.t==='money'||c.t==='pct'?'num':'')+'" '+(c.w?'style="min-width:'+c.w+'px"':'')+'>'+esc(c.l)+'</th>').join('')+'</tr>';
-  const body=rows.length?rows.map((r,i)=>'<tr class="'+(r._danger?'danger-row':'')+'" data-act="drawer" data-title="'+esc(opt.rowTitle||b.title)+'" data-idx="'+i+'">'+b.cols.map(c=>cell(c,r)).join('')+'</tr>').join('')
+  const body=rows.length?rows.map((r,i)=>'<tr class="'+(r._danger?'danger-row':'')+'" data-act="drawer" data-title="'+esc(opt.rowTitle||b.title)+'" data-table="'+esc(fk)+'" data-idx="'+i+'">'+b.cols.map(c=>cell(c,r)).join('')+'</tr>').join('')
     :'<tr><td colspan="'+b.cols.length+'" style="text-align:center;color:var(--t3);height:90px">当前筛选条件下无数据</td></tr>';
+  S.rowRegistry[fk]=rows;
   const cap=PAGE_CAP[S.page]||{};
   // 表格内只保留本页类型的筛选字段；导出统一由页头按能力提供，避免一张表一个导出按钮
   const preset=FILTER_PRESETS[opt.filters||cap.f||'doc']||FILTER_PRESETS.doc;
@@ -467,10 +640,10 @@ function tableHTML(b){
   if(!opt.noFilter&&preset.fields.length){
     filter='<div class="filterbar">'
       +'<span class="filter-hint">站点：'+(S.site==='ALL'?'全部':S.site)+' · 顶栏切换</span>'
-      +(preset.fields.includes('period')?'<select data-filter="period"><option>本月</option><option>近 7 天</option><option>近 30 天</option><option>自定义期间</option></select>':'')
-      +(preset.fields.includes('status')?'<select data-filter="status"><option>全部状态</option><option>DRAFT</option><option>CONFIRMED</option><option>CLOSED</option></select>':'')
-      +(preset.fields.includes('kw')?'<input placeholder="'+preset.kw+'" data-filter="kw">':'')
-      +'<button class="btn sm" data-act="filter">应用筛选</button><button class="btn sm ghost" data-act="resetFilter">重置</button>'
+      +(preset.fields.includes('period')?'<select data-filter="period" data-fk="'+esc(fk)+'"><option'+(f.period==='本月'||!f.period?' selected':'')+'>本月</option><option'+(f.period==='近 7 天'?' selected':'')+'>近 7 天</option><option'+(f.period==='近 30 天'?' selected':'')+'>近 30 天</option><option'+(f.period==='自定义期间'?' selected':'')+'>自定义期间</option></select>':'')
+      +(preset.fields.includes('status')?'<select data-filter="status" data-fk="'+esc(fk)+'"><option'+(f.status==='全部状态'||!f.status?' selected':'')+'>全部状态</option><option'+(f.status==='DRAFT'?' selected':'')+'>DRAFT</option><option'+(f.status==='CONFIRMED'?' selected':'')+'>CONFIRMED</option><option'+(f.status==='CLOSED'?' selected':'')+'>CLOSED</option></select>':'')
+      +(preset.fields.includes('kw')?'<input placeholder="'+preset.kw+'" data-filter="kw" data-fk="'+esc(fk)+'" value="'+esc(f.kw||'')+'">':'')
+      +'<button class="btn sm" data-act="filter">应用筛选</button><button class="btn sm ghost" data-act="resetFilter" data-fk="'+esc(fk)+'">重置</button>'
       +'<span class="spacer"></span><span style="font-size:11px;color:var(--t3)">共 '+rows.length+' 条</span></div>';
   }
   return '<section class="card block"><div class="card-h"><h3>'+esc(b.title)+'</h3>'
@@ -573,6 +746,8 @@ const AI_ITEMS=[
 /* ---------- page definitions ---------- */
 const P={};
 P['P-01']={t:'工作台 · 概览',c:'工作台 / 概览',fr:'FR-12 / FR-07 / FR-10',d:'一个店铺 · UAE + KSA 双站点 · FBN 单履约模式。所有金额跨站点先归一 CNY，时间统一 GMT+8。',b:[
+ H('<div class="alert info"><span class="ico">i</span><div><b>原型模拟边界</b>：本系统为可点击原型，数据在浏览器内存中模拟；按钮演示规则与状态流转，<b>不代表已真实落库、已调用 Noon API 或已完成财务结算</b>。</div></div>'),
+ H('DEMO_PANEL'),
  kpis(K('本周销售额（CNY 归一）','¥ 286,430','较上周 <span class="delta up">+12.4%</span> · AED+SAR 已按日汇率归一',{info:1,go:'P-26'}),
      K('L1 贡献毛利','¥ 78,210','毛利率 27.3% · <b>不含 L2 期间费用</b>',{info:1,go:'P-26'}),
      K('AI 待复核建议','4','首个场景 STATEMENT_RECON · 复核前账单行不变',{tone:'warn',go:'P-36'}),
@@ -639,11 +814,14 @@ P['P-06']={t:'系统参数',c:'主数据 / 配置',fr:'FR-01.2 / NFR-09',d:'平�
  A('info','改参数后<b>新单据按新值计算、旧利润快照不变</b>。公开资料冲突项（VAT、打款门槛、退货窗口、争议天数）一律参数化，不写死。'),
  T('sys_config 初始值',[C('key','code','config_key',210),C('val','code','config_value',155),C('scope','site','scope_key',100),C('from','date','effective_from',135),C('remark','muted','说明 / 来源',300)],
   [['cost_method','FIFO','ALL','2026-11-12','Q5：FIFO 批次成本'],['vat_mode','IGNORE','ALL','2026-11-12','Q6：不做 VAT；R7 毛利虚高风险'],
-   ['allocation_policy','NONE','ALL','2026-11-12','Q8：默认不合并 L2，可切 PARTIAL / FULL'],['return_window_days','15','ALL','2026-11-12','C-03：14/15 天冲突取宽口径'],
+   ['allocation_policy','NONE','ALL','2026-11-12','维度A：站点层 L2 合并范围 NONE/PARTIAL/FULL；与是否摊到 SKU 无关'],['return_window_days','15','ALL','2026-11-12','C-03：14/15 天冲突取宽口径'],
    ['appeal_window_days','14','ALL','2026-11-12','Directship 7 天需按场景覆盖'],['statement_dispute_days','15','ALL','2026-11-12','F-10：逾期争议不受理'],
    ['payout_threshold','1000','ALL','2026-11-12','C-02：100/1000 冲突，按站点可覆盖'],['return_restock_cost','ORIGINAL','ALL','2026-11-12','退货二次上架批次成本'],
-   ['stock_update_mode','ABSOLUTE','ALL','2026-11-12','N-11：Stock API 绝对值 set'],['api_max_destinations','5','ALL','2026-11-12','N-13：每项目最多 5 个 webhook destination']],
-  {note:'<b>版本化</b>：新增版本不覆盖历史行；利润快照带 <code>formula_version</code>，可按期间全量重算并保留新旧两套结果。'})
+   ['stock_update_mode','ABSOLUTE','ALL','2026-11-12','N-11：Stock API 绝对值 set'],['api_max_destinations','5','ALL','2026-11-12','N-13：每项目最多 5 个 webhook destination'],
+   ['sku_allocation_enabled','0','ALL','2026-11-18','维度B开关(默认0)：0=SKU行不分摊L2、净利=自身L1；1=按方法分摊SITE行L2、ΣSKU=SITE。独立于 allocation_policy'],
+   ['profit_allocation_basis','REVENUE_SHARE','ALL','2026-11-17','维度B方法参数(非开关)：sku_allocation_enabled=1 时按收入占比分摊；REVENUE_SHARE/QTY_SHARE/EQUAL'],
+   ['order_idempotent_mode','FINGERPRINT_ACK','ALL','2026-11-17','C-4：同指纹 ACK；同订单新状态按状态机更新不整单拒绝']],
+  {note:'<b>版本化</b>：新增版本不覆盖历史行；利润快照带 <code>formula_version</code>，可按期间全量重算并保留新旧两套结果。<b>两维度独立</b>：<code>allocation_policy</code>（维度A，默认 NONE）只控 SITE 行 L2 合并范围；<code>sku_allocation_enabled</code>（维度B，默认 0）才是 SKU 分摊开关，<code>profit_allocation_basis</code> 仅是其方法参数。选 PARTIAL/FULL ≠ 启用 SKU 分摊。'})
 ]};
 
 P['P-07']={t:'采购单',c:'采购 / 采购单',fr:'FR-03.2 / §3.3',d:'状态机 DRAFT → CONFIRMED → PARTIAL_RECEIVED → RECEIVED → CLOSED。无审批流（Q11）；source 可为 MANUAL / REPLENISH_SUGGESTION / AI_SUGGESTION。',b:[
@@ -677,8 +855,8 @@ P['P-09']={t:'FIFO 批次流水',c:'采购 / 批次成本',fr:'FR-04.2 / FR-04.3
   +'<span class="k">COGS</span> = 2 × ¥86.00 = <span class="m">¥172.00</span>\n'
   +'<span class="c">// 仅 DELIVERED 触发；CANCELLED 不扣</span></div>'
   +'<div class="note">每扣一批写一条 <code>inv_batch_consumption</code>；删除消耗流水后订单 COGS 归零，利润重算随之变化（FR-04.3 验收）。</div></div></section>'
-  +'<section class="card"><div class="card-h"><h3>退货二次上架规则</h3></div><div class="card-b"><div class="formula"><span class="c">// A 级退货</span>\n生成 <span class="k">新批次</span>，插到队尾\nreceived_at = 上架时间（晚于所有在库批次）\nunit_cost = 原批次成本 (ORIGINAL)\n<span class="m">不回流原批次</span>\n\n<span class="c">// B / C 级</span>\n写 inv_batch_consumption\n(move_type = RETURN_LOSS)\n损耗进入 L1 且可追溯</div>'
-  +'<div class="note">FIFO 顺序由 <code>received_at</code> 决定，退货新批次不会插队，避免成本错配。</div></div></section></div>'),
+  +'<section class="card"><div class="card-h"><h3>退货：红冲 + 分级处置（C-2b）</h3></div><div class="card-b"><div class="formula"><span class="c">// 第一步（所有分级）：红冲原 SALE</span>\nREVERSAL  sign=<span class="k">-1</span>  → 原消耗层\nreversal_of_id = 原 consumption.id\n\n<span class="c">// A 级：资产转移，不产生损益</span>\n生成 <span class="k">新批次</span> 插队尾，unit_cost = 原成本\n\n<span class="c">// B / C 级：按原采购成本全额计损</span>\nRETURN_LOSS = <span class="k">原成本全额</span>（禁止扣赔偿）\n赔偿 30 → 只走 <span class="k">COMPENSATION</span>（platform_fee 减项，1次）\n\n<span class="c">// 验算：成本100/售价150/全退/赔30</span>\nL1 = 0 - (-30) - (100-100+100) = <span class="m">-70</span></div>'
+  +'<div class="note"><b>防双计红线</b>：赔偿不得同时抵减 RETURN_LOSS 和计入 COMPENSATION；双计会把 −70 错算成 −40。</div></div></section></div>'),
  T('批次台账',cBATCH,BATCHES,{note:'<b>守恒校验</b>：Σ 批次 qty_remaining = 四态台账可用量 = 流水累计（按仓）。退货新批次已排在最末。'}),
  T('批次消耗流水（COGS 唯一来源）',cCONSUME,CONSUME,{sub:'点行可查看对应订单与原始报文'})
 ]};
@@ -748,7 +926,8 @@ P['P-16']={t:'头程费用',c:'物流 / 费用登记',fr:'FR-05.3 / Q8',d:'头�
   {note:'<b>Q8「部分合并」</b>：在 P-25 勾选 <code>included_in_partial</code> 的科目才进入 PARTIAL 口径；不写死组合。'})
 ]};
 
-P['P-17']={t:'订单',c:'销售 / 订单',fr:'FR-06.1 ~ FR-06.4',d:'四通道导入；order_no + site_code 唯一；仅 DELIVERED 触发 FIFO 扣减与 COGS 归集；未填 delivered_at 进「待补」清单不参与当期利润。',b:[
+P['P-17']={t:'订单',c:'销售 / 订单',fr:'FR-06.1 ~ FR-06.4 / C-4',d:'四通道导入；order_no + site_code 唯一；同指纹 ACK、同订单新状态按状态机更新（先导入后补妥投）；仅 DELIVERED 触发 FIFO 扣减与 COGS 归集。',b:[
+ A('info','<b>C-4 幂等与状态更新</b>：<code>import_fingerprint</code> 相同 → <b>ACK 不更新、不过账</b>；同订单新状态（IMPORTED → DELIVERED → RETURNED/CANCELLED）→ <code>state_version+1</code>，<b>先导入后补妥投不会被拒绝</b>。行级用 <code>platform_item_no</code> 表达部分妥投 / 部分退货；同一行同一 <code>move_type</code> 只过账一次。'),
  A('info','<b>N-24 事实</b>：webhook 仅 3 种事件且<b>无 FBN 订单事件</b>，订单主通道为 Seller Lab / impex 导出 CSV；列头按 A-01 做成可配置映射，不等待后台字段补核。'),
  T('订单列表',cORDER,ORDERS,{note:'<b>导入事务校验（D-02 / FR-13.2）</b>：主表 <code>qty</code> = Σ 明细 <code>qty</code>、<code>gross_amount</code> = Σ 行金额；不一致<b>整单进异常清单</b>，坏行不丢弃、不导致整批回滚。'}),
  H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>待补妥投时间</h3><span class="sub">不参与当期利润快照</span></div><div class="card-b"><div style="font-size:12px;line-height:26px">'
@@ -836,10 +1015,13 @@ P['P-25']={t:'L2 费用池',c:'财务 / 期间费用',fr:'FR-08.2 / Q8',d:'头�
    ['EP-202611-017','AD_SPEND','2026-11','AE','—','¥ 396.00','EXPORT']],
   {note:'<code>allocation_policy</code> = NONE / PARTIAL / FULL 三套结果<b>并存互不覆盖</b>，切换口径后历史快照仍可查（FR-08.3）。'})
 ]};
-P['P-26']={t:'利润报表与重算',c:'财务 / 利润引擎',fr:'FR-08.1 ~ FR-08.7 · 核心',d:'L1 贡献毛利、L2 费用池、三档合并口径并存；公式版本化，支持按期间全量重算并保留新旧快照。',b:[
+P['P-26']={t:'利润报表与重算',c:'财务 / 利润引擎',fr:'FR-08.1 ~ FR-08.8 / C-3 · 核心',d:'两维度独立：维度A allocation_policy 控 SITE 行 L2 合并(NONE/PARTIAL/FULL 三档并存)；维度B SKU 分摊开关默认关、启用才按 REVENUE_SHARE 分摊且 ΣSKU=SITE。计算批次可复算。',b:[
  A('warning','<b>VAT 风险提示（FR-08.7，不可关闭）</b>：售价含 VAT（AE 5% / SA 15%）、费率报价不含 VAT，当前 <code>vat_mode=IGNORE</code>，<b>L1 毛利系统性偏高</b>。字段与科目位已预留，启用 VAT 不需要改表。'),
- H('<section class="card block"><div class="card-h"><h3>合并口径</h3><div style="display:flex;align-items:center;gap:10px"><span class="sub" id="policyHint">NONE：不摊任何 L2 费用</span><div class="seg plain" id="policySeg">'
-  +['NONE','PARTIAL','FULL'].map(x=>'<button data-act="policy" data-policy="'+x+'" class="'+(x===S.policy?'on':'')+'">'+x+'</button>').join('')+'</div></div></div>'
+ H('CALC_BATCH_PANEL'),
+ H('<section class="card block"><div class="card-h"><h3>合并口径（两个维度独立）</h3><div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><span class="sub" id="policyHint">NONE：不摊任何 L2 费用</span><div class="seg plain" id="policySeg">'
+  +['NONE','PARTIAL','FULL'].map(x=>'<button data-act="policy" data-policy="'+x+'" class="'+(x===S.policy?'on':'')+'">'+x+'</button>').join('')+'</div>'
+  +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;border-left:1px solid var(--border);padding-left:14px" title="维度B：独立于维度A，默认关闭">SKU 分摊 <span id="skuAllocSwitch" class="switch '+(S.skuAlloc?'on':'')+'" data-act="skuAlloc"></span></label>'
+  +'</div></div>'
   +'<div class="card-b"><div class="grid3" id="profitSummary"></div>'
   +'<div class="note" id="policyNote"></div></div></section>'),
  H('<div class="grid2 block"><section class="card"><div class="card-h"><h3>公式定义</h3><span class="sub">写入 formula_version</span></div><div class="card-b"><div class="formula">'
@@ -856,7 +1038,7 @@ P['P-26']={t:'利润报表与重算',c:'财务 / 利润引擎',fr:'FR-08.1 ~ FR-
  H('<div class="block" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn primary" data-act="recalc" data-only="FINANCE ADMIN">全量重算</button>'
   +'<button class="btn" data-act="drawer" data-title="公式版本历史">版本历史</button>'
   +'<span style="font-size:12px;color:var(--t3)">当前公式版本 <code id="fvText">'+S.recalcVer+'</code> · 重算保留新旧两套快照，原始单据不变</span></div>'),
- T('SKU 利润表（RPT-01）',cPROFIT,PROFIT,{sub:'点击行查看收入 / 平台费 / COGS 明细与公式版本',note:'三档口径切换只改变「净利」列展示，<b>不覆盖历史快照</b>；每张利润报表固定带 VAT 风险提示。'})
+ T('SKU 利润表（RPT-01）',cPROFIT,PROFIT,{sub:'点击行查看收入 / 平台费 / COGS 明细与公式版本',note:'本表为 <b>L1 贡献毛利</b>（SKU 直接归属，不含 L2）。L2 是否摊到 SKU 由维度B 开关控制：<b>未启用</b>（默认）时此表即 SKU 净利；启用后 SKU 行另按 REVENUE_SHARE 分摊 SITE 层 L2（ΣSKU=SITE 守恒）。维度A 三档切换<b>不覆盖历史快照</b>，固定带 VAT 风险提示。'})
 ]};
 
 P['P-27']={t:'补货建议',c:'补货 / 建议',fr:'FR-09.1 ~ FR-09.5',d:'suggested_qty = CEIL(日均销量30 × event_factor × (交期 + 安全天数) − 可用 − 在途)，分站点分仓独立出建议；AI 只能写 DRAFT。',b:[
@@ -930,20 +1112,19 @@ P['P-33']={t:'Webhook 事件',c:'集成 / 事件',fr:'FR-10.7 / N-24',d:'≤5 de
    ['EVT-20261114-00037','FBPO::PO_SYNC','SA','—','RECEIVED','2026-11-14 15:31:02']],
   {note:'第一条为重复 <code>event_id</code>：幂等校验直接 ACK，<b>不产生重复业务单据</b>。'})
 ]};
-P['P-34']={t:'导出任务',c:'集成 / impex',fr:'FR-10.8 / N-23',d:'GetExportCategoryList → CreateExport → GetExportStatus 三步；12 个类别码已实测；int_export_job 记录状态与 file_url。',b:[
- A('warning','<b>O-07 未验证</b>：<code>CreateExport</code> 是写语义且 Not on MCP，<b>只读 Service Account 能否调用未验证</b>。未验证前按「不可用」处理，继续用 Seller Lab 人工导出 + 账单反推（A-01）。'),
- T('12 个 export_category_code（M0 实测）',[C('code','code','类别码',330),C('use','muted','ERP 用途',250),C('ch','channel','通道',100),C('st','status','状态',100)],
-  [['noon_noonoms_ordersexport','FBN 订单（is_fulfilled_by_noon 筛选）','EXPORT','可用'],['noon_financeweb_transactionviewreportonitemlevel','item 级交易 / 账单逐行','EXPORT','可用'],
-   ['invoicesandcreditnotes','发票与贷项','EXPORT','可用'],['fbn_inventoryv2_ledgerdetailedview','FBN 库存台账明细','EXPORT','可用'],
-   ['fbn_inventoryv2_agedinventory','FBN 库龄报表','EXPORT','可用'],['fbn_inventoryv2_stockview','FBN 库存视图','EXPORT','可用'],
-   ['noon_catalog_productexport','商品主数据回读','EXPORT','可用'],['noon_returns_returnexport','退货明细','EXPORT','可用'],
-   ['noon_financeweb_statementreport','周 / 月 statement','EXPORT','可用'],['noon_fbn_asn_export','ASN 货件','EXPORT','可用'],
-   ['namshi_catalog_productexport','Namshi 商品（Q9 不使用）','EXPORT','不使用'],['namshi_orders_export','Namshi 订单（Q9 不使用）','EXPORT','不使用']],
-  {note:'<b>R1 口径修正</b>：Statement 无实时 REST 端点，但 impex 报表导出可覆盖 FBN 订单 / 库存台账 / item 级交易 —— CSV 通道存在自动化升级路径，列头与权限仍待验证（O-07 / O-09）。'}),
- T('导出任务',[C('no','code','任务号',165),C('code','code','export_category_code',300),C('st','status','状态',110),C('file','muted','file_url',190),C('cnt','num','导入行数',100),C('at','date','时间',145)],
-  [['EXP-20261115-004','noon_noonoms_ordersexport','SUCCESS','s3://noon-exports/...csv','318','2026-11-15 08:40'],
-   ['EXP-20261114-003','fbn_inventoryv2_ledgerdetailedview','SUCCESS','s3://noon-exports/...csv','1,204','2026-11-14 21:05'],
-   ['EXP-20261115-005','noon_financeweb_statementreport','PENDING','—','—','2026-11-15 11:20']])
+P['P-34']={t:'导出任务',c:'集成 / impex',fr:'FR-10.8 / N-23 / C-1',d:'GetExportCategoryList → CreateExport → GetExportStatus 三步。12 个类别码仅「发现」层已实测；O-07 权限与 O-09 列头未验证，不得标为可用。',b:[
+ A('warning','<b>C-1 三层验证口径</b>：① 类别已发现 = GetExportCategoryList 原始响应有该码（✅ 12/12）　② 创建权限已验证 = 只读账号成功调 <code>CreateExport</code>（⚠️ O-07 未验证）　③ 文件下载与列头已验证（⚠️ O-09 未验证）。<b>仅第①层达成 → 12 个码全部「不可用」，不允许自动创建导出任务</b>。'),
+ T('12 个 export_category_code（INT §3.2 原始响应，字段不删减）',[C('code','code','类别码',330),C('use','muted','ERP 用途',210),C('dis','status','①发现',85),C('perm','status','②权限',85),C('hdr','status','③列头',85),C('ok','status','可用',80)],
+  [['noon_catalog_catalogexport','商品目录基线','已发现','未验证','未验证','不可用'],['noon_catalog_content_contentrejections','内容驳回(Q4不用)','已发现','未验证','未验证','不可用'],
+   ['fbn_inventory_fbninventorydetailreport','FBN 库存日结明细','已发现','未验证','未验证','不可用'],['noon_financeweb_invoicesandcreditnotes','发票与贷项','已发现','未验证','未验证','不可用'],
+   ['noon_catalog_reports_productviewsandsalesdata','销量数据(后期)','已发现','未验证','未验证','不可用'],['noon_catalog_globalcatalogexport','Global目录(本版不用)','已发现','未验证','未验证','不可用'],
+   ['noon_financeweb_transactionviewreportonitemlevel','item 级交易','已发现','未验证','未验证','不可用'],['fbn_inventoryv2_ledgerdetailedview','FBN 库存台账明细','已发现','未验证','未验证','不可用'],
+   ['fbn_inventoryv2_ledgersummaryview','FBN 库存汇总','已发现','未验证','未验证','不可用'],['fbn_inventoryv2_aging','FBN 库龄(后期)','已发现','未验证','未验证','不可用'],
+   ['noon_noonoms_ordersexport','FBN 订单(is_fulfilled_by_noon)','已发现','未验证','未验证','不可用'],['namshi_financestatement','Namshi报表(Q9不用)','已发现','未验证','未验证','不可用']],
+  {note:'<b>与实测原始响应逐字一致</b>：不存在 <code>noon_financeweb_statementreport</code> / <code>noon_fbn_asn_export</code> / <code>noon_returns_returnexport</code> 等码（Codex C-1 已修正）。找到对应需求时保持「人工录入 + 账单反推」（A-01）。'}),
+ T('导出任务（当前只读账号下 none 可自动创建）',[C('no','code','任务号',165),C('code','code','export_category_code',300),C('st','status','状态',110),C('file','muted','file_url',150),C('cnt','num','导入行数',100),C('at','date','时间',145)],
+  [['EXP-DEMO-001','（无）','BLOCKED','—（未创建）','—','2026-11-17 22:00']],
+  {noFilter:true,note:'O-07 未验证前，界面不展示任何 SUCCESS 的 impex 任务；下方「新建导出任务」保持禁用态。'})
 ]};
 P['P-35']={t:'环境配置',c:'集成 / 环境',fr:'FR-10.2 / FR-10.3 / A-03 / A-04',d:'生产与沙箱共用一份 .json 凭据，由 env + 网关 host 区分；四通道统一抽象，任何模块在 API 不可用时可降级到 CSV。',b:[
  A('success','<b>A-04 已生效</b>：Service Account 设为只读，M0 生产 Login / whoami / 仓清单 / 导出类别 / 事件类型 7 次调用全部 200。官方 MCP 平台侧 <b>0 个写工具</b>，AI 只读边界是平台级硬保证。'),
@@ -1042,22 +1223,35 @@ function channelHTML(){
    +'</div></div>';
 }
 function profitSummaryHTML(){
-  const l1=78210, pool=7716.58;
-  const chosen=Object.keys(S.expensePartial).filter(k=>S.expensePartial[k]);
-  const partialSum=chosen.reduce((a,k)=>a+({FREIGHT:4820,CUSTOMS_DUTY:1260,PACKAGING:680,FX_LOSS:342.18,CHANNEL_FEE:218.4,AD_SPEND:396}[k]||0),0);
-  const alloc=S.policy==='NONE'?0:(S.policy==='FULL'?pool:partialSum);
-  const net=l1-alloc;
   const fmt=n=>'¥ '+n.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
-  return [['L1 贡献毛利',fmt(l1),'revenue − platform_fee − cogs_fifo'],
-          ['L2 期间费用池',fmt(pool),'独立归集 · 不写入 inv_batch'],
-          ['净利（'+S.policy+'）',fmt(net),'L1 − allocated_expense = '+fmt(alloc)]]
-    .map(x=>'<div style="background:var(--subtle);border-radius:8px;padding:12px 14px"><div style="font-size:11px;color:var(--t3)">'+x[0]+'</div><div style="font-size:20px;font-weight:650;margin:5px 0 3px;letter-spacing:-.4px">'+x[1]+'</div><div style="font-size:11px;color:var(--t3)">'+x[2]+'</div></div>').join('');
+  const op=DEMO.orderProfit();
+  const st=DEMO.statements[0];
+  const cb=S.calcBatches.find(b=>b.policy===S.policy&&b.src==='DEMO_CHAIN');
+  // 优先展示演示链实算（可追溯）；未跑完演示时用全站静态示例并明确标注
+  let cards,srcNote;
+  if(op&&cb){
+    const pool=demoAllocFor(S.policy), net=op.l1-pool;
+    srcNote='<div style="grid-column:1/-1;background:var(--primary-weak);border-radius:8px;padding:10px 14px;font-size:12px;line-height:1.9"><b>口径：演示链实算（可追溯）</b> · L1 = (¥'+st.gross+' − ¥'+st.refund+') − (平台费 ¥'+st.fee+' − 赔偿 ¥'+op.comp+'，单次确认) − COGS ¥'+op.cogs+' = ¥'+op.l1+'；沿 <code>'+cb.no+' → STMT-DEMO-W47 → CON-DEMO-005/006/007</code> 可追溯。下方 L2 用演示订单级费用池（合计 ¥'+DEMO_L2_TOTAL.toLocaleString()+'）。</div>';
+    cards=[['L1 贡献毛利（演示链 SITE）',fmt(op.l1),'收入 − 平台费(赔偿单次) − FIFO COGS · 实算'],
+      ['L2 期间费用池（演示链 SITE）',fmt(pool),'维度A '+S.policy+'：'+(S.policy==='NONE'?'不合并':(S.policy==='FULL'?'合并全部':'仅勾选科目'))+' · 独立归集不进批次'],
+      ['净利（'+S.policy+' · 演示链 SITE）',fmt(net),'L1 − allocated_expense · 批次 '+cb.no]];
+  }else{
+    const pool=allocFor(S.policy);
+    srcNote='<div style="grid-column:1/-1;background:var(--subtle);border-radius:8px;padding:10px 14px;font-size:12px;line-height:1.9"><b>口径：全站 SITE 静态示例（PRD C-3 固定基线，非演示链产出）</b> · 要在 P-01 跑完端到端演示步骤⑧后，此处将切换为<b>演示链实算</b>结果并标注可追溯批次。</div>';
+    cards=[['L1 贡献毛利（SITE 静态示例）',fmt(L1_BASE),'PRD C-3 全站固定基线 · 非演示链'],
+      ['L2 期间费用池（SITE 静态示例）',fmt(pool),'独立归集 · 不写入 inv_batch'],
+      ['净利（'+S.policy+' · SITE 静态示例）',fmt(L1_BASE-pool),'L1 − allocated_expense = '+fmt(pool)+'（三档并存不覆盖）']];
+  }
+  const skuLine='<div style="grid-column:1/-1;font-size:12px;color:var(--t3)">维度B SKU 分摊：<b>'+(S.skuAlloc?'已启用 · REVENUE_SHARE 收入占比 · ΣSKU=SITE':'未启用（默认） · L2 仅 SITE 行合并，SKU 行净利=自身 L1')+'</b>。切换维度A 的 PARTIAL/FULL <b>不会</b>自动启用 SKU 分摊。</div>';
+  return srcNote+cards.map(x=>'<div style="background:var(--subtle);border-radius:8px;padding:12px 14px"><div style="font-size:11px;color:var(--t3)">'+x[0]+'</div><div style="font-size:20px;font-weight:650;margin:5px 0 3px;letter-spacing:-.4px">'+x[1]+'</div><div style="font-size:11px;color:var(--t3)">'+x[2]+'</div></div>').join('')+skuLine;
 }
 function policyNoteHTML(){
-  const map={NONE:'<b>NONE</b>：allocated_expense = 0，净利 = L1。头程/关税/包材/汇兑/通道费仅单独展示，不摊到 SKU。',
-    PARTIAL:'<b>PARTIAL</b>：只把 P-25 中勾选 <code>included_in_partial=1</code> 的科目计入净利，组合由财务配置，不写死规则。',
-    FULL:'<b>FULL</b>：全部 L2 科目计入净利（忽略勾选）。三档结果<b>并存互不覆盖</b>，切换后历史快照仍可查。'};
-  return map[S.policy]+' 当前公式版本 <code>'+S.recalcVer+'</code>；改费率或公式后可指定期间全量重算，保留新旧两套结果。';
+  const map={NONE:'<b>维度A = NONE</b>：SITE 行 allocated_expense = 0，净利 = L1，L2 仅单独展示。',
+    PARTIAL:'<b>维度A = PARTIAL</b>：SITE 行只把 P-25 勾选 <code>included_in_partial=1</code> 的科目计入合并，组合由财务配置，不写死规则。',
+    FULL:'<b>维度A = FULL</b>：SITE 行合并全部 L2 科目（忽略勾选）。三档结果<b>并存互不覆盖</b>。'};
+  return map[S.policy]+' 当前公式版本 <code>'+S.recalcVer+'</code>；三档各自独立 <code>calc_batch_no</code> 并存，重算生成新批次且旧快照保留。'
+   +'<br><b>两个维度相互独立</b>：<code>allocation_policy</code>（本卡上方 NONE/PARTIAL/FULL）只控制<b>站点层</b>L2 合并范围；SKU 分摊是<b>另一个独立开关</b> <code>sku_allocation_enabled</code>（默认 <code>0</code>），当前 <b>'+(S.skuAlloc?'<span class="tag green">已启用</span>':'<span class="tag gray">未启用</span>')+'</b>。'
+   +'<b>只有显式启用维度B</b> 才把 SITE 行的 allocated_expense 按 <code>REVENUE_SHARE</code> 收入占比分摊到 SKU 行，ΣSKU = SITE、禁止每 SKU 各扣整池；未启用时 PARTIAL/FULL 仅在 SITE 行生效，SKU 行净利 = 自身 L1、不承担 L2。切换维度A <b>不会</b>改变维度B。';
 }
 
 /* ---------- render ---------- */
@@ -1077,6 +1271,8 @@ function renderPage(){
     if(b.type==='kpis')return kpisHTML(b);
     if(b.type==='alert')return alertHTML(b);
     if(b.type==='table')return tableHTML(b);
+    if(b.html==='DEMO_PANEL')return demoPanelHTML();
+    if(b.html==='CALC_BATCH_PANEL')return calcBatchPanelHTML();
     return b.html||'';
   }).join('');
   const v=document.getElementById('view');v.innerHTML=html;
@@ -1089,7 +1285,8 @@ function renderPage(){
   const sn=document.getElementById('sugNote');if(sn&&S.convertedPO)sn.innerHTML='<b>已转单</b>：生成采购单 <code>'+S.convertedPO+'</code>，<code>source_ref_no = SUG-20261115-001</code> 已回写，可在 P-07 反查。状态 CONVERTED。';
   const ps=document.getElementById('profitSummary');if(ps)ps.innerHTML=profitSummaryHTML();
   const pn=document.getElementById('policyNote');if(pn)pn.innerHTML=policyNoteHTML();
-  const ph=document.getElementById('policyHint');if(ph)ph.textContent=S.policy+'：'+({NONE:'不摊任何 L2 费用',PARTIAL:'仅勾选科目计入',FULL:'全部 L2 科目计入'}[S.policy]);
+  const ph=document.getElementById('policyHint');if(ph)ph.textContent=S.policy+'：站点层'+({NONE:'不合并 L2',PARTIAL:'仅勾选科目计入',FULL:'全部 L2 科目计入'}[S.policy]);
+  const sas=document.getElementById('skuAllocSwitch');if(sas)sas.classList.toggle('on',S.skuAlloc);
   const fv=document.getElementById('fvText');if(fv)fv.textContent=S.recalcVer;
   const pbx=document.getElementById('partialBox');if(pbx)pbx.innerHTML=partialHTML();
   const cbx=document.getElementById('channelBox');if(cbx)cbx.innerHTML=channelHTML();
@@ -1123,18 +1320,30 @@ function toast(msg,type){
   document.getElementById('toast').appendChild(t);
   setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .25s';setTimeout(()=>t.remove(),260);},3200);
 }
-function openDrawer(title){
+// C-6：详情取点击行的真实数据（来自渲染时注册的表格行），不再固定字段
+function openDrawer(title,tableKey,idx){
+  const row=tableKey&&S.rowRegistry[tableKey]?S.rowRegistry[tableKey][parseInt(idx,10)]:null;
+  const demo=title&&title.indexOf('演示数据血缘')>=0;
+  const docNo=row?(row.no||row.code||row.order||row.sku||row.consumption_no||'—'):(DEMO.po.no);
+  const status=row?(row.st||row.status||row.type||'—'):(DEMO.po.status);
   document.getElementById('drTitle').textContent=title||'单据详情';
   document.getElementById('drBody').innerHTML=
-   '<div class="dr-sec"><h4>状态机</h4><div class="stepper">'+stepperHTML(['DRAFT','CONFIRMED','PARTIAL_RECEIVED','RECEIVED','CLOSED'],'CONFIRMED')+'</div></div>'
-   +'<div class="dr-sec"><h4>关键字段</h4><dl class="mini-kv">'
-   +[['单据编号',title&&title.indexOf('ASN')>=0?'ASN-20261115-0007':'DOC-20261115-0001'],['site_code','AE · AED'],['source_channel','EXPORT'],['操作人','财务 A'],['创建时间','2026-11-15 09:12:44 (GMT+8)'],['formula_version',S.recalcVer],['raw_payload','保留全部原始字段，未删减']].map(x=>'<dt>'+x[0]+'</dt><dd>'+esc(x[1])+'</dd>').join('')+'</dl></div>'
-   +'<div class="dr-sec"><h4>关联单据</h4><div style="font-size:12px;line-height:24px;color:var(--t2)">'
-   +'采购单 PO-20261114-0008<br>入库单 IN-20261115-002<br>FIFO 批次 BAT-20261108-002<br>ASN ASN-20261113-0006<br>订单 SO-AE-20261113-0841<br>周账单 STMT-W-2026W46-AE</div></div>'
-   +'<div class="dr-sec"><h4>原始报文 raw_payload</h4><details class="raw" open><summary>展开 / 收起（字段不删减）</summary><div class="code-block">{'
-   +'\n  "order_no": "SO-AE-20261113-0841",\n  "site_code": "AE",\n  "partner_sku": "PSKU-AE-RBR01",\n  "qty": 2,\n  "gross_amount": 598.00,\n  "currency": "AED",\n  "payment_type": "PAID",\n  "delivered_at": "2026-11-13T14:22:00+04:00",\n  "is_fulfilled_by_noon": true,\n  "platform_raw": { ... }\n}</div></details></div>'
-   +'<div class="dr-sec"><h4>审计链</h4><div style="font-size:12px;line-height:23px;color:var(--t2)">'
-   +'LOG-000939　系统　 IMPORT　2026-11-15 09:12<br>LOG-000940　财务 A　 MATCH　2026-11-15 09:15<br>LOG-000941　AI 外挂　 READ(v_ai_statement_open)　2026-11-15 22:40<br>LOG-000942　财务 A　 AI_REVIEW　2026-11-15 22:48</div></div>';
+   '<div class="note"><b>模拟边界</b>：以下字段来自原型内存数据，非真实平台/数据库记录。</div>'
+   +'<div class="dr-sec"><h4>状态机</h4><div class="stepper">'+stepperHTML(['DRAFT','CONFIRMED','PARTIAL_RECEIVED','RECEIVED','CLOSED'],
+      status==='CONFIRMED'?'CONFIRMED':(status==='CLOSED'?'RECEIVED':'DRAFT'))+'</div></div>'
+   +'<div class="dr-sec"><h4>该行关键字段</h4><dl class="mini-kv">'
+   +[['详情标题',title||'—'],['单据/编码',docNo],['状态',status],['站点',row&&row.site?row.site:'AE · AED'],
+     ['来源通道',row&&row.ch?row.ch:'MANUAL（演示）'],['公式版本',S.recalcVer],['raw_payload','原始报文保留，字段不删减（演示占位）']]
+     .map(x=>'<dt>'+esc(x[0])+'</dt><dd>'+esc(x[1])+'</dd>').join('')+'</dl></div>'
+   +(row?('<div class="dr-sec"><h4>点击行的完整字段（真实响应）</h4><dl class="mini-kv">'
+     +Object.keys(row).filter(k=>k!=='_danger').map(k=>'<dt>'+esc(k)+'</dt><dd>'+esc(row[k])+'</dd>').join('')
+     +'</dl></div>'):'')
+   +(demo?('<div class="dr-sec"><h4>演示批次血缘（父 → 子）</h4><div class="mini-kv">'
+      +(DEMO.batches.length?DEMO.batches.map(b=>'<dt>'+esc(b.no)+'</dt><dd>'+esc(b.wh)+' · '+b.qty+' 件 · unit ¥'+b.unit+(b.parent?' · parent='+esc(b.parent):'')+'</dd>').join(''):'<dt>尚未执行到货</dt><dd>先在 P-01 执行步骤 ②</dd>')+'</div></div>'):'')
+   +(demo?('<div class="dr-sec"><h4>COGS 消耗与红冲链</h4><div class="mini-kv">'
+      +(DEMO.consumptions.length?DEMO.consumptions.map(c=>'<dt>'+esc(c.no)+'</dt><dd>'+esc(c.type)+' · sign='+c.sign+' · ¥'+c.amount+(c.reversal?' · reversal_of='+esc(c.reversal):'')+'</dd>').join(''):'<dt>尚未妥投</dt><dd>先在 P-01 执行步骤 ⑤</dd>')+'</div></div>'):'')
+   +'<div class="dr-sec"><h4>审计链（内存演示）</h4><div style="font-size:12px;line-height:23px;color:var(--t2)">'
+   +(DEMO.events.length?DEMO.events.map(e=>esc(e.at)+'　'+esc(e.act)+'　'+esc(e.text)).join('<br>'):'LOG-DEMO-000　初始化　2026-11-17 22:00:00')+'</div></div>';
   document.getElementById('mask').classList.add('show');
   document.getElementById('drawer').classList.add('show');
 }
@@ -1152,12 +1361,14 @@ document.addEventListener('click',e=>{
   if(!t)return;
   const a=t.dataset.act;
   if(a==='go'){go(t.dataset.go);return;}
-  if(a==='drawer'){openDrawer(t.dataset.title);return;}
+  if(a==='drawer'){openDrawer(t.dataset.title,t.dataset.table,t.dataset.idx);return;}
   if(a==='closeDrawer'){closeDrawer();return;}
   if(a==='closeModal'){document.getElementById('modal').classList.remove('show');return;}
   if(a==='export'){toast('已创建导出任务：<b>'+esc((P[S.page]||{}).t||'本页')+'</b> 当前筛选结果集（GMT+8 时间戳 + 操作人 + 列头映射版本），写 <code>int_export_job</code>','info');return;}
-  if(a==='filter'){toast('已应用本页筛选条件（站点由顶栏统一控制），结果集已更新','info');return;}
-  if(a==='resetFilter'){toast('筛选条件已重置','info');return;}
+  if(a==='filter'){toast('筛选已应用：结果集按条件真实过滤（演示数据）','info');return;}
+  if(a==='resetFilter'){const fk=t.dataset.fk;if(fk){S.filters[fk]={};renderPage();}toast('筛选条件已重置','info');return;}
+  if(a==='demoStep'){demoStep(t.dataset.k);return;}
+  if(a==='demoReset'){DEMO.reset();renderPage();toast('演示数据已重置','info');return;}
   if(a==='pageAct'){
     const k=t.dataset.kind,l=t.dataset.label,h=t.dataset.hint||'';
     const msg={
@@ -1188,10 +1399,19 @@ document.addEventListener('click',e=>{
     return;
   }
   if(a==='recalc'){
-    confirmModal('利润全量重算','按当前 <code>formula_version</code> 重算指定期间，<b>保留新旧两套快照</b>，原始单据不变。重算结果带 <code>recalculated_at</code> 时间戳。',()=>{
-      const n=parseInt(S.recalcVer.split('-').pop().split('.').pop(),10)||3;
-      S.recalcVer='FV-2026.11-'+String(n+1).padStart(2,'0');renderPage();toast('重算完成 · 新版本 '+S.recalcVer+'，旧快照保留');});
+    confirmModal('利润全量重算（生成新计算批次）','按当前 <code>formula_version</code> 与维度A 口径 <code>'+S.policy+'</code> 重算，<b>生成新 calc_batch_no</b>，三档快照并存、旧批次不覆盖。维度B SKU 分摊当前 <b>'+(S.skuAlloc?'开启':'关闭')+'</b>（独立开关，重算不改变它）。原始单据不变，输入写入 <code>calc_input_snapshot</code>。',()=>{
+      const n=S.calcBatches.length+4;
+      const no='CB-RECALC-'+String(n).padStart(3,'0');
+      const op=DEMO.orderProfit(), chain=!!op;
+      const pool=chain?demoAllocFor(S.policy):allocFor(S.policy);
+      const l1=chain?op.l1:L1_BASE;
+      S.calcBatches.push({no,policy:S.policy,pool,l1,net:l1-pool,ver:S.recalcVer,src:chain?'DEMO_CHAIN':'STATIC',skuAlloc:S.skuAlloc});
+      S.recalcVer='FV-2026.11-'+String(n).padStart(2,'0');renderPage();toast('重算完成 · 新批次 '+no+'（'+S.policy+'，'+(chain?'演示链实算':'静态基线')+'，L2 计入 ¥'+pool.toLocaleString()+'），旧快照保留可比对');});
     return;
+  }
+  if(a==='skuAlloc'){
+    S.skuAlloc=!S.skuAlloc;renderPage();
+    toast('维度B SKU 分摊已'+(S.skuAlloc?'<b>启用</b>：SITE 行 L2 按 REVENUE_SHARE 分摊到 SKU（ΣSKU=SITE）':'<b>关闭</b>（默认）：L2 仅在 SITE 行合并，SKU 行净利=自身 L1'),S.skuAlloc?'ok':'info');return;
   }
   if(a==='exportDiff'){toast('差异清单已导出（含账单号 / 行号 / 金额 / 原始行 / 争议截止日），请在 Seller Lab 人工提交','ok');return;}
   if(a==='aiReview'){
@@ -1212,6 +1432,12 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('change',e=>{
   if(e.target.dataset.act==='partial'){S.expensePartial[e.target.dataset.k]=e.target.checked;renderPage();return;}
+  const f=e.target.dataset.filter,fk=e.target.dataset.fk;
+  if(f&&fk){
+    if(!S.filters[fk])S.filters[fk]={};
+    S.filters[fk][f]=e.target.value;renderPage();
+    toast('筛选已生效：'+f+' = '+esc(e.target.value)+'（内存演示）','info');
+  }
 });
 document.getElementById('siteSeg').addEventListener('click',e=>{
   const b=e.target.closest('[data-site]');if(!b)return;
@@ -1230,9 +1456,10 @@ document.addEventListener('click',e=>{
 document.getElementById('collapseBtn').addEventListener('click',()=>document.getElementById('sidebar').classList.toggle('collapsed'));
 document.getElementById('mask').addEventListener('click',closeDrawer);
 document.getElementById('protoTag').addEventListener('click',()=>{
-  confirmModal('Noon ERP 系统原型 v1.0','按 <b>PRD v1.0.2</b> 制作，覆盖 FR-14 全部 <b>11 组菜单 / 36 个页面</b>。<br>'
+  confirmModal('Noon ERP 系统原型 v1.1','按 <b>PRD v1.0.3 / DDL v0.4</b> 制作，覆盖 FR-14 全部 <b>11 组菜单 / 36 个页面</b>。<br>'
    +'设计系统与 Figma 落地规范见 <code>docs/noon-erp-prototype-design-v1.0.md</code>，token 见 <code>prototype/figma-tokens.json</code>。<br>'
-   +'数据为原型示意值，<b>Seller Lab 真实列头 / 仓编码 / 费率表按 A-01 未用推测补齐</b>。',()=>{});
+   +'<b>模拟边界</b>：全部数据在浏览器内存中演示，不调用 API、不落库、不代表真实业务完成。<br>'
+   +'Seller Lab 真实列头 / 仓编码 / 费率表按 A-01 未用推测补齐。',()=>{});
 });
 const searchInput=document.getElementById('searchInput'),sp=document.getElementById('searchpop');
 function doSearch(q){
