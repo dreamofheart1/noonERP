@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.yx.system.mapper.SysUserSiteMapper">
+    <!-- 无二级缓存；清一级缓存，撤权后后续校验不得依赖登录快照或旧查询。 -->
+    <select id="selectActiveUserId" resultType="java.lang.Long" useCache="false" flushCache="true">
+        select user_id from sys_user where user_id = #{userId} and status = '0' and del_flag = '0'
+    </select>
+    <select id="lockActiveUserId" resultType="java.lang.Long" useCache="false" flushCache="true">
+        select user_id from sys_user where user_id = #{userId} and status = '0' and del_flag = '0' for update
+    </select>
+    <select id="selectSiteCodes" resultType="java.lang.String" useCache="false" flushCache="true">
+        select site_code from sys_user_site where user_id = #{userId} order by site_code
+    </select>
+    <!-- 替换前使用当前读：MySQL RR 下，等待用户行锁后不能拿旧快照作审计 before。 -->
+    <select id="lockSiteCodes" resultType="java.lang.String" useCache="false" flushCache="true">
+        select site_code from sys_user_site where user_id = #{userId} order by site_code for update
+    </select>
+    <delete id="deleteByUserId">
+        delete from sys_user_site where user_id = #{userId}
+    </delete>
+    <insert id="insertGrant">
+        insert into sys_user_site (user_id, site_code, create_by, create_time)
+        values (#{userId}, #{siteCode}, #{actorId}, #{now})
+    </insert>
+    <insert id="insertAudit">
+        insert into sys_user_site_audit (user_id, actor_id, before_codes, after_codes, create_time)
+        values (#{userId}, #{actorId}, #{beforeCodes}, #{afterCodes}, #{now})
+    </insert>
+</mapper>
