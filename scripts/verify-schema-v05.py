@@ -258,6 +258,45 @@ def main():
               q("UPDATE ai_suggestion SET status='CONVERTED',review_note='ok' WHERE suggestion_no='S2'", db).returncode == 0 and
               q("UPDATE ai_suggestion SET status='APPROVED' WHERE suggestion_no='S2'", db).returncode != 0)
 
+        # ---- Codex 四轮复核：NULL 唯一键 + 父子一致性 + AI 审核字段不可变 ----
+        # H1) NULL 站点归一：两条 site_code=NULL 同订单同来源号退货被拦；AE/SA 仍可分
+        hret = "INSERT INTO sal_return(return_no,biz_return_key,source_return_no,order_no,site_code,sku_id,qty) VALUES "
+        check("H1a: NULL站点同订单同来源号退货被拦截(生成列归一)",
+              q(hret + "('H-N1','HB-N1','H-SRC','HORDER',NULL,1,1)", db).returncode == 0 and
+              q(hret + "('H-N2','HB-N2','H-SRC','HORDER',NULL,1,1)", db).returncode != 0)
+        check("H1b: NULL与AE站点同来源号可区分",
+              q(hret + "('H-N3','HB-N3','H-SRC2','HORDER2',NULL,1,1)", db).returncode == 0 and
+              q(hret + "('H-A1','HB-A1','H-SRC2','HORDER2','AE',1,1)", db).returncode == 0)
+        # H2) 父子身份一致性：引用真实父订单时 order_no/站点必须一致；父不存在时兼容裸插
+        hparent = "INSERT INTO sal_order(id,order_no,site_code,store_id,partner_sku,qty,gross_amount,currency) VALUES "
+        check("H2 前置: 父子测试父订单可插入",
+              q(hparent + "(96001,'HP-ORDER','AE',1,'SKU',1,10,'AED'),(96002,'HP-ORDER','SA',1,'SKU',1,10,'SAR')", db).returncode == 0)
+        check("H2a: 订单行 order_no 与父不一致被拦截",
+              q(item + "(96001,'FORGED-H','H-LINE',1,1,0,0,10)", db).returncode != 0)
+        check("H2b: 同号跨站父订单各自行号可插入(父存在且一致)",
+              q(item + "(96001,'HP-ORDER','H-LINE',1,1,0,0,10)", db).returncode == 0 and
+              q(item + "(96002,'HP-ORDER','H-LINE',1,1,0,0,10)", db).returncode == 0)
+        hrow = scalar("SELECT id FROM sal_order_item WHERE sal_order_id=96001 AND order_no='HP-ORDER' AND platform_item_no='H-LINE'")
+        hins = "INSERT INTO sal_return(return_no,biz_return_key,source_return_no,order_no,site_code,sku_id,qty,sal_order_item_id) VALUES "
+        check("H2c: 退货站点与关联订单行父订单不一致被拦截",
+              q(hins + "('H-FR','HBF','H-FS','HP-ORDER','SA',1,1,"+hrow+")", db).returncode != 0)
+        check("H2d: 退货站点与父订单一致可插入",
+              q(hins + "('H-OK','HBO','H-OS','HP-ORDER','AE',1,1,"+hrow+")", db).returncode == 0)
+        # H3) AI 审核字段不可变：审批后改 payload/审核人被拦；review_note 可补
+        check("H3 前置: AI建议建立并人工审批",
+              q(ai + "('H-AI','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),payload_json=JSON_OBJECT('qty',1) WHERE suggestion_no='H-AI'", db).returncode == 0)
+        check("H3a: 审批后 payload_json 同态篡改被拦截",
+              q("UPDATE ai_suggestion SET payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='H-AI'", db).returncode != 0)
+        check("H3b: 审批后 reviewed_by 同态篡改被拦截",
+              q("UPDATE ai_suggestion SET reviewed_by=999 WHERE suggestion_no='H-AI'", db).returncode != 0)
+        check("H3c: 审批后 review_note 可补充说明",
+              q("UPDATE ai_suggestion SET review_note='补充审计说明' WHERE suggestion_no='H-AI'", db).returncode == 0)
+        check("H3d: 审批后合法转正仍允许",
+              q("UPDATE ai_suggestion SET status='CONVERTED',review_note='ok' WHERE suggestion_no='H-AI'", db).returncode == 0)
+        check("H3e: 转正终态 reviewed_by 篡改被拦截",
+              q("UPDATE ai_suggestion SET reviewed_by=998 WHERE suggestion_no='H-AI'", db).returncode != 0)
+
         # 幂等重跑
         r4 = feed(SCHEMA, db)
         check("v0.5 重复执行成功（幂等）", r4.returncode == 0, r4.stderr[-300:])

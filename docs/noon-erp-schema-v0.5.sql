@@ -663,6 +663,12 @@ CREATE TABLE IF NOT EXISTS sal_return (
   source_return_no VARCHAR(128) DEFAULT NULL COMMENT '平台退货单号；可空，多 NULL 不冲突',
   order_no        VARCHAR(64)  NOT NULL COMMENT '平台订单号（冗余展示）；跨站可同号',
   site_code       VARCHAR(16)  DEFAULT NULL COMMENT '★三轮修正：站点身份，与父订单一致；可空兼容历史导入，跨站同号隔离锚点',
+  -- ★四轮修正：NULL 站点在 MySQL 唯一键中不相等（NULL<>NULL），导致"未确定站点"的同订单
+  --   同来源号退货可重复插入。生成列把 NULL 归一为保留值 '_UNSET_'，使唯一键对未确定站点
+  --   同样生效；AE/SA 仍各自区分。'_UNSET_' 非合法站点码，不代表真实站点，落正式表前
+  --   应由应用按父订单回填 site_code 并人工核对（见 delivery 写服务合同）。
+  site_key        VARCHAR(16)  GENERATED ALWAYS AS (COALESCE(site_code,'_UNSET_')) STORED
+                  COMMENT '★四轮:NULL站点归一,进 uk_return_source',
   sku_id          BIGINT       NOT NULL,
   qty             INT          NOT NULL,
   grade           VARCHAR(8)   COMMENT 'A / B / C，关联 Seller Protection Fund 补偿',
@@ -688,9 +694,10 @@ CREATE TABLE IF NOT EXISTS sal_return (
   -- ★ 三轮复核修正（P1 跨站同号）：sal_return 原无 site_code，按 (order_no,source_return_no)
   --   去重会误拒 AE/SA 同号订单的相同平台退货来源号。新增可空 site_code，唯一键取
   --   (site_code, order_no, source_return_no)：同站同号同源拦截、跨站同号可区分。
-  --   site_code 可空兼容历史导入（多 NULL 不冲突）；真实幂等仍以 biz_return_key 为准，
-  --   站点归属一致性由应用层按 requireSite + 父订单校验。待平台样本证实来源号作用域再收紧。
-  UNIQUE KEY uk_return_source (site_code, order_no, source_return_no),
+  -- ★ 四轮修正（NULL 唯一键失效）：改用生成列 site_key（NULL→'_UNSET_'）替代裸 site_code，
+  --   避免两条 site_code=NULL 的相同订单/来源号因 NULL<>NULL 而重复落库。真实幂等仍以
+  --   biz_return_key 为准；站点归属一致性由应用层按 requireSite + 父订单校验。
+  UNIQUE KEY uk_return_source (site_key, order_no, source_return_no),
   KEY idx_order (order_no),
   KEY idx_appeal (appeal_deadline),
   CONSTRAINT chk_return_qty CHECK (qty > 0),
@@ -1066,6 +1073,22 @@ BEGIN
      AND NEW.auto_rule_ref IS NULL AND NEW.review_note IS NULL THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED 必须有 auto_rule_ref 或 review_note 作为审批依据';
   END IF;
+  -- 4) ★ 四轮修正：审核一旦发生（OLD 已非 PENDING），审核对象与证据字段不可再变。
+  --    防止"先正常批 PENDING→APPROVED，再同态改 payload_json qty 1→999、改 reviewed_by，
+  --    随后照常 CONVERTED"的载荷掉包。终态 REJECTED/CONVERTED 同样锁定。
+  --    review_note 允许后续补充审计说明；NULL-safe 比较用 <=>。
+  IF OLD.status <> 'PENDING' THEN
+    IF NOT (NEW.payload_json <=> OLD.payload_json)
+       OR NOT (NEW.reviewed_by  <=> OLD.reviewed_by)
+       OR NOT (NEW.reviewed_at  <=> OLD.reviewed_at)
+       OR NOT (NEW.auto_rule_ref <=> OLD.auto_rule_ref)
+       OR NOT (NEW.site_code    <=> OLD.site_code)
+       OR NOT (NEW.source_agent <=> OLD.source_agent)
+       OR NOT (NEW.scene        <=> OLD.scene) THEN
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT =
+        '审批后 payload_json/reviewed_by/reviewed_at/auto_rule_ref/site_code/source_agent/scene 不可变；载荷掉包须新建建议';
+    END IF;
+  END IF;
 END$$
 DELIMITER ;
 -- 审批闭环边界：上述触发器是数据库层不变量，不等于完整审批服务。服务端审批接口仍须
@@ -1206,6 +1229,33 @@ AS new ON DUPLICATE KEY UPDATE erp_use = new.erp_use, discovered_at = new.discov
 --   * 从若依 sys_user_site 读取授权：超管 userId=1 全站点、空授权默认拒绝，框架侧已实现。
 --   * 数据迁移脚本：旧 sys_config → noon_rule_config、sys_audit_log → noon_audit_log 的
 --     生产迁移需单独评审，本文只给目标结构，不含生产写操作。
+-- ★四轮修正（父子真实身份一致性）：只在父记录真实存在时强制关联一致，兼容历史导入/
+--   隔离测试裸插（父不存在则不校验）。这不证明普通应用能越权（业务 API 未实现）；
+--   站点归属与 requireSite 仍由服务端写服务保证，DDL 只封"引用了真实父记录却声明矛盾身份"。
+--   置于文件末尾是因为触发器依赖 sal_order/sal_order_item/sal_return 三表均已创建。
+DELIMITER $$
+DROP TRIGGER IF EXISTS trg_sal_item_parent_check$$
+CREATE TRIGGER trg_sal_item_parent_check BEFORE INSERT ON sal_order_item
+FOR EACH ROW
+BEGIN
+  DECLARE p_order_no VARCHAR(64);
+  SELECT order_no INTO p_order_no FROM sal_order WHERE id = NEW.sal_order_id;
+  IF p_order_no IS NOT NULL AND NEW.order_no <> p_order_no THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_order_item.order_no 与父订单不一致';
+  END IF;
+END$$
+DROP TRIGGER IF EXISTS trg_sal_return_parent_check$$
+CREATE TRIGGER trg_sal_return_parent_check BEFORE INSERT ON sal_return
+FOR EACH ROW
+BEGIN
+  DECLARE p_site VARCHAR(16);
+  SELECT so.site_code INTO p_site FROM sal_order_item si JOIN sal_order so ON so.id = si.sal_order_id
+   WHERE si.id = NEW.sal_order_item_id;
+  IF p_site IS NOT NULL AND NEW.site_code IS NOT NULL AND NEW.site_code <> p_site THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_return.site_code 与关联订单行的父订单站点不一致';
+  END IF;
+END$$
+DELIMITER ;
 -- =============================================================================
 -- END OF SCHEMA v0.5
 -- =============================================================================

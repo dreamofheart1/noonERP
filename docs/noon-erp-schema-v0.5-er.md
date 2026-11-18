@@ -152,6 +152,7 @@ erDiagram
 - `uk_consume_biz_event(biz_event_key, batch_id)`：幂等键绑定**每次实际过账事件**（非订单行/原消耗 ID）。同一事件跨批次多条、同事件重传同批次被拦、不同部分妥投/退货事件（不同 key）可再次消费同批次——三条同时成立。事件 ID 来源优先平台履约号，缺失时应用按确定规则生成，无法识别进 NEEDS_REVIEW；累计退货≤原消耗由应用层行锁事务校验，DDL 只管单次幂等。
 - 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法）。
 - ★ 三轮修正（跨站同订单号）：主表 `sal_order` 以 `(order_no, site_code)` 唯一，AE/SA 允许同号订单。`uk_platform_item(sal_order_id, platform_item_no)` 锚点由平台 order_no 改为内部可信订单 ID：同一订单内重复行号拦截、跨站同号订单的各自行号可存在。`sal_return` 新增可空 `site_code`，`uk_return_source(site_code, order_no, source_return_no)`：同站同号同源拦截、跨站同号同源可区分。平台行号/来源号的真实唯一作用域未经样本证实，不虚构全局唯一；站点归属一致性由应用层 `requireSite` + 父订单校验，累计退货守恒由行锁事务校验，DDL 只保单次幂等。
+- ★ 四轮修正（NULL 唯一键 / 父子一致性 / 审核不可变）：①`sal_return.site_key` 生成列把 NULL 站点归一为保留值 `_UNSET_` 再进 `uk_return_source(site_key,order_no,source_return_no)`，避免 NULL<>NULL 导致未确定站点的同订单同来源号退货重复落库（`_UNSET_` 非真实站点，落正式表前由应用回填站点并人工核对）；②`trg_sal_item_parent_check`/`trg_sal_return_parent_check` 在父订单/关联行真实存在时强制 order_no、站点与父记录一致，父不存在则放行（兼容历史导入与隔离裸插；不证明应用能越权，业务 API 未实现）；③`trg_ai_suggestion_update_gate` 增审核后字段不可变：OLD 非 PENDING 时 payload_json/reviewed_by/reviewed_at/auto_rule_ref/site_code/source_agent/scene 均不可改，防"审批后载荷掉包再转正"，review_note 允许补充审计说明。
 - `noon_config_snapshot`：`trg_snapshot_immutable` 拒绝原地 UPDATE、`trg_snapshot_no_delete` 拒绝物理 DELETE（归档走受控迁移）；`chk_snap_owner` 禁止跨站解析。
 - ★ 三轮修正（AI 终态）：`trg_ai_suggestion_insert_gate` 强制新建 PENDING/MANUAL；`trg_ai_suggestion_update_gate` 改为显式状态转移白名单——仅允许 `PENDING→APPROVED/REJECTED`、`APPROVED→CONVERTED` 及同态补充审核字段；`REJECTED`/`CONVERTED` 为终态不得改判，进入审批态必须有 reviewed_by/reviewed_at，CONVERTED 须有 auto_rule_ref 或 review_note。`review_mode=AUTO` 必须提供 auto_rule_ref；规则是否真实命中 `ai_auto_review_rules` 由服务端校验（触发器无法查配置表）。触发器为数据库不变量，完整审批闭环仍需服务端鉴权+审计+行锁。
 
@@ -193,7 +194,8 @@ erDiagram
         bigint id PK
         varchar biz_return_key UK "★P2-2"
         varchar site_code "★三轮:可空,跨站同号隔离"
-        varchar source_return_no UK "site+order+source"
+        varchar site_key "★四轮:NULL归一进唯一键"
+        varchar source_return_no UK "site_key+order+source"
         varchar grade "A/B/C"
         decimal return_loss_amount "全额计损"
         datetime appeal_deadline "UTC+8"

@@ -932,3 +932,31 @@ Codex 以 `scripts/reproduce-schema-v05-review.py`（未跟踪）提交 7 条反
 - 全模块 `mvn package` BUILD SUCCESS，默认 **29 tests / 0 failures / 0 errors / 0 skipped**，日志 `/tmp/noon-config-write-package.log`。`python3 scripts/verify-site-auth-runtime.py --config-write --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2` 退出 0；**21 原生 MySQL JUnit tests / 0 failures / 0 errors / 0 skipped**（继承权限/历史读取 17 + 新写事务 4），以及既有 20 条隔离 HTTP 登录/站点授权断言通过。日志 `/tmp/noon-config-write-runtime-final.log`，证据 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-hzcboqc_/`。HTTP 断言不包含参数管理 API；该 API 本包未实现。Python 语法检查及 `git diff --check` 通过。
 
 **后续边界**：请 WorkBuddy 独立审核上述锁行首写、RR 当前读、授权、撤销时钟/精度、审计回滚和上述三项 schema 风险；正式管理 API、参数 key/value 类型和允许表、原子替换/定时生效流程、追溯性更正、部署账号最小权限、业务同事务持久化快照与重算、AI 审批/转正服务、FIFO/退货守恒及真实平台样本尚未实现。用户未授权生产部署，本轮没有执行。
+
+## WorkBuddy 独立复核 Codex 四轮 + 参数写入事务 + schema 五轮加固（2026-11-18，执行者：WorkBuddy）
+
+复核 Codex 提交 `139d920`（四轮审查脚本 + `RuleConfigWriteService` 写事务 + `MySqlRuleConfigWriteIT`）：
+
+**框架侧复核（全部通过）**：
+- `reproduce-schema-v05-fourth-review.py` 独立复跑 **72/72** 一致。
+- `--config-write` 运行时验证独立复跑：**21 项 MySQL 原生测试 + 20 项运行断言全绿**，退出 0；默认 Maven 单元测试 29/0。
+- 写入服务代码审核：`lock()` 用 `INSERT ... ON DUPLICATE KEY` + `SELECT FOR UPDATE` 处理首次写竞争，`create`/`revoke` 同事务写审计并回滚，`revoke` 条件更新防并发重复撤销，`now()` 用 Asia/Shanghai 毫秒精度，仅超管可写且 GLOBAL 不因站点授权放行。IT 用 `performance_schema.data_lock_waits` 实测锁等待、并发首写只一版本提交、审计失败回滚、普通用户有 AE 授权仍拒写——边界正确。**确认这是框架侧可测能力，不是管理 API 或生产集成完成。**
+
+**三项 schema 风险逐条处置**：
+
+| Codex 风险 | 判定 | 修复 |
+|---|---|---|
+| 退货 `site_code=NULL` 唯一键失效 | **认同，真缺陷**（三轮可空引入） | `sal_return` 加生成列 `site_key=COALESCE(site_code,'_UNSET_')`，唯一键改 `(site_key, order_no, source_return_no)`；`_UNSET_` 非真实站点，落正式表前应用回填站点+人工核对 |
+| 父子身份一致性未受 DDL 约束 | **部分认同**：关联不变量可验；但 Codex 实验用隔离库 root，不证明应用越权（API 未实现） | 加 `trg_sal_item_parent_check`/`trg_sal_return_parent_check`：父订单/关联行真实存在时强制 order_no、站点一致，父不存在则放行（兼容历史导入与隔离裸插，不破坏基线）；requireSite 交服务端 |
+| AI 审核载荷/审核人同态篡改 | **认同，真缺陷** | `trg_ai_suggestion_update_gate` 增字段不可变：OLD 非 PENDING 时 payload_json/reviewed_by/reviewed_at/auto_rule_ref/site_code/source_agent/scene 均不可改（`<=>` 比较），review_note 允许补充 |
+
+**未采纳为 DDL 缺陷**：累计红冲超原消耗（应用层行锁 SUM 事务，Codex 已认同）；平台行/退货号作用域无真实样本（只用 schema 允许的假设案例，不宣称 Noon 事实）；受限 AI 账号 UPDATE 1142 只证明该账号权限。维持一贯的"DDL 只管单行不变量、跨行/权限交应用层"边界。
+
+**验证**：
+- `verify-schema-v05.py` → **68/68 PASS**（55 基线 + 13 项四轮正向断言 H1a-b/H2a-d/H3a-e）；DDL 幂等重跑通过。期间一次失败已定位并修正：父子触发器初置于快照段（表未创建）导致 DDL 中断，已移至文件末尾所有表之后。
+- `reproduce-schema-v05-fourth-review.py` 回跑 → PASS=65 FAIL=7：7 条 OBSERVED 风险全部翻转为 FAIL=不再复现。证据 `docs/verification/schema-v05/fourth-review-after-fix-output.txt`。
+- ER/SQL 一致性 `45 表 5 视图` 全覆盖 OK。
+
+**改动文件**：`docs/noon-erp-schema-v0.5.sql`（生成列 + 1 唯一键 + 2 触发器 + AI 不可变规则）、`...er.md`、`...delivery.md`（新增 §2.3.4）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fourth-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**`、v0.4/PRD/原型。按约定一并提交。
+
+**请 Codex 继续**：管理 API（参数写/撤销、AI 审核规则与转正）、真实业务同事务快照写入与重算、站点授权接入业务写服务、累计守恒行锁事务、跨站业务入口与真实平台样本验证。DDL 只提供可验证不变量，不替代服务端。

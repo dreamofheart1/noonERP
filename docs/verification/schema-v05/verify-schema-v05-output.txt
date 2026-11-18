@@ -1,7 +1,7 @@
 # v0.5 schema 隔离 MySQL 实测报告
 # MySQL: /tmp/mysql-8.4.7-macos15-arm64/bin/mysqld  Ver 8.4.7 for macos15 on arm64 (MySQL Community Server - GPL)
 # 命令: python3 scripts/verify-schema-v05.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin
-# 结果: PASS=55 FAIL=0
+# 结果: PASS=68 FAIL=0
 
 PASS | 建库
 PASS | 若依基础 SQL 执行
@@ -55,6 +55,19 @@ PASS | G3c: REJECTED→CONVERTED 改判被拦截
 PASS | G3d: PENDING→CONVERTED 跳过 APPROVED 被拦截
 PASS | G3e: APPROVED→PENDING 回退被拦截
 PASS | G3f: CONVERTED→APPROVED 终态改判被拦截
+PASS | H1a: NULL站点同订单同来源号退货被拦截(生成列归一)
+PASS | H1b: NULL与AE站点同来源号可区分
+PASS | H2 前置: 父子测试父订单可插入
+PASS | H2a: 订单行 order_no 与父不一致被拦截
+PASS | H2b: 同号跨站父订单各自行号可插入(父存在且一致)
+PASS | H2c: 退货站点与关联订单行父订单不一致被拦截
+PASS | H2d: 退货站点与父订单一致可插入
+PASS | H3 前置: AI建议建立并人工审批
+PASS | H3a: 审批后 payload_json 同态篡改被拦截
+PASS | H3b: 审批后 reviewed_by 同态篡改被拦截
+PASS | H3c: 审批后 review_note 可补充说明
+PASS | H3d: 审批后合法转正仍允许
+PASS | H3e: 转正终态 reviewed_by 篡改被拦截
 PASS | v0.5 重复执行成功（幂等）
 PASS | 重跑后锁行仍 45
 PASS | 重跑后配置仍 15
