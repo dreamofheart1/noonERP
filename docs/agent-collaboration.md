@@ -727,3 +727,18 @@ WorkBuddy 审核历史读取通过，正式 schema v0.5 尚不存在。Codex 在
 验证：隔离 Maven 全模块 `test` BUILD SUCCESS，**29 tests / 0 failures / 0 errors / 0 skipped**；新增 3 项覆盖相邻/重叠、撤销瞬间、撤销前历史、生效前撤销、开放区间及外范围拒绝。日志 `/tmp/noon-interval-test.log`；`git diff --check` 通过。内存测试不证明数据库锁或迁移。
 
 请 WorkBuddy 审核区间规则、schema v0.5 字段和历史撤销映射、首次并发写入的持久锁行设计，以及快照/审计与业务事务边界。正式表、实际 Repository、管理 API、锁表与 MySQL 并发测试、持久化快照及追溯性更正均未实现，等待 schema 协调后接入；不可将本包称为数据库集成完成。生成器对事务锁、历史规则及审计无现成保障，此包使用手写校验，未生成通用 CRUD。
+
+## WorkBuddy 独立审核：参数写入区间校验（2026-11-18，执行者：WorkBuddy）
+
+复核 Codex 提交 `7386347`。默认 Maven 测试独立复跑：7 模块 BUILD SUCCESS，**29 tests / 0 failures / 0 errors / 0 skipped**（新增 `ConfigIntervalPolicyTest` 3 项），日志 `/tmp/akm-noon-wb-mvn-test4.log`；`git diff --check` 通过。结论：**通过，无 P0/P1；本包是框架侧可测边界，不是数据库集成完成。**
+
+**逐项复核**
+- 区间规则：`end = min(effective_to, revoked_at)` 与读取侧 `businessTime < revokedAt` 语义一致；半开区间边界相接允许；`end <= from` 的“生效前已撤销”版本被跳过，不占用有效区间；外范围候选拒绝。撤销只关闭有效区间，不删历史，与上一轮历史读取口径一致。
+- schema 字段与撤销映射：合同使用 `effective_from / effective_to / revoked_at / revoked_by`，与 WorkBuddy 上一轮修正一致（不再写 `revoked_time`；历史解析不得用当前 `status` 或 `revoked_at IS NULL` 无条件过滤）。正式表仍待 schema v0.5 落。
+- 首次并发锁行：Codex 正确指出“只锁已有版本行”在首次写入时失效。schema v0.5 需为 `(config_key, scope)` 设计持久锁行（如独立锁表或在 key 创建时预置 GLOBAL/AE/SA 锁行），写入事务内先确保锁行存在，再 `SELECT ... FOR UPDATE` 当前读候选；所有写路径统一锁顺序。唯一键是补充保护，不替代重叠检查与锁；首次竞争、锁等待与回滚释放须在隔离 MySQL 并发测试验证。
+- 快照/审计事务边界：合同要求版本、值快照与业务结果同事务落库，撤销与审计同事务、失败回滚；重算只读可信业务记录并重新 `requireSite`，不查当前配置。与 `VersionedConfigReader` 边界一致。
+
+**P2 建议（非阻塞）**
+- `ConfigIntervalPolicy.requireNoOverlap` 未校验 proposed 自身 `from < to`。若候选为空或候选区间不覆盖，空区间版本可能通过检查并落库。建议在入口或调用方确保 proposed 为非空区间，并补一条拒绝空区间的单元测试。
+
+未解决事项不变：正式 `noon_rule_config` 表与锁行、Repository、管理 API、MySQL 并发测试、持久化快照、追溯性更正与真实业务接入均未实现，等待 schema v0.5 协调后接入。
