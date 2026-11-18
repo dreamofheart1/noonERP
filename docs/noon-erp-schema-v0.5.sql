@@ -272,7 +272,18 @@ FOR EACH ROW
 BEGIN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'noon_config_snapshot 不可原地更新；更正须插新快照并改业务引用';
 END$$
+DROP TRIGGER IF EXISTS trg_snapshot_no_delete$$
+CREATE TRIGGER trg_snapshot_no_delete BEFORE DELETE ON noon_config_snapshot
+FOR EACH ROW
+BEGIN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'noon_config_snapshot 禁止物理删除；快照须保留供历史重算，归档走受控迁移';
+END$$
 DELIMITER ;
+-- 删除边界说明（Codex 二轮第4点）：UPDATE + DELETE 触发器在 DDL 层封死普通应用的
+-- 原地篡改与删除；重算始终能读到快照。归档/迁移例外必须走受控流程：由 DBA 在维护窗口
+-- 先停用触发器、经审批导出归档、再恢复；不得作为应用运行期能力开放。
+-- 权限模型：应用账号只授 SELECT/INSERT，UPDATE/DELETE 仅 DBA  migrations；
+-- 触发器是第二道防线，不替代数据库账号权限。普通用户/AI 主体无删改授权。
 
 -- -----------------------------------------------------------------------------
 -- B. 采购 · FIFO 批次 · 库存
@@ -342,23 +353,29 @@ CREATE TABLE IF NOT EXISTS inv_batch (
   CONSTRAINT chk_batch_status CHECK (status IN ('OPEN','IN_TRANSIT','CLOSED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='★ FIFO 成本批次，Q5 核心表；C-5 支持拆批血缘与在途段';
 
--- ★ P0-1：原 v0.4 注释称 (sal_order_item_id,move_type) 唯一但 DDL 无此键，
---   MySQL 唯一键对 NULL 不相等，直接用该组合无法约束 SALE（reversal_of_id NULL）。
---   v0.5 引入显式非空 biz_event_key 作为业务幂等键，由应用按确定规则生成：
---     SALE            = 'SALE:' + sal_order_item_id
---     RETURN_REVERSAL = 'REV:' + reversal_of_id
---     RETURN_LOSS     = 'LOSS:' + sal_return_id + ':' + grade
---     STOCKTAKE       = 'STK:' + stocktake_item_id
---     TRANSFER_SHORT  = 'TSHORT:' + transfer_item_id
---   重复妥投/重复 redelivery 用同一 biz_event_key → 同一批次唯一键挡住，COGS 不双计。
---   ★ 幂等粒度 = 业务事件 × 批次（Codex REPRO 反例修正）：一次销售按 FIFO 必然
---     跨多个批次消耗，每个批次一条流水，共用同一 biz_event_key。若仅按
---     biz_event_key 全局唯一，第二批次会被误拒、库存无法足额消耗。改为
---     (biz_event_key, batch_id) 复合唯一：同事件同批次仅一条（防重复过账），
---     同事件跨批次允许多行（FIFO 正常形态）。
---   source_event_id 为平台事件/CSV 行指纹，可空；它是「事件级」标识，会随跨批次
---     多行重复，故此处仅建索引供追溯；事件级去重由 int_webhook_event.uk_event_id
---     与 sal_order.import_fingerprint 在上游承担。
+-- ★ P0-1 / 幂等键契约（经两轮 Codex 反例修正后的最终口径）：
+--   MySQL 唯一键对 NULL 不相等，故用显式非空 biz_event_key 作业务幂等键。
+--   ★ 核心原则：幂等键必须绑定「每次实际过账事件」，不是订单行/原消耗对象 ID。
+--     同一订单行可以先后多次部分妥投；同一原 FIFO 消耗可以先后多次部分退货冲回；
+--     若按对象 ID 生成 key，第二次动作会被唯一键误拒。事件键由应用按确定规则生成：
+--       SALE            = 'SALE:' + delivery_event_id（每次妥投/妥投批次一个事件号）
+--       RETURN_REVERSAL = 'REV:'  + return_event_id（每次部分退货一个事件号，非原消耗ID）
+--       RETURN_LOSS     = 'LOSS:' + sal_return_id + ':' + grade
+--       STOCKTAKE       = 'STK:'  + stocktake_item_id + ':' + count_event_id
+--       TRANSFER_SHORT  = 'TSHORT:' + transfer_item_id + ':' + short_event_id
+--   唯一键 (biz_event_key, batch_id) 保证三条同时成立：
+--     (a) 同一次过账事件跨多批次 → 同 key 多行（FIFO 正常形态，不误拒）；
+--     (b) 同一次事件重传/重导入 → 同 key + 同 batch 被拦截，COGS 不双计；
+--     (c) 不同部分妥投/退货事件 → 不同 key，可再次消费同一成本批次。
+--   ★ 事件 ID 来源：优先取平台每次履约/退货动作的幂等号（delivery_no / return line id /
+--     webhook event_id）；平台不提供时，应用按 (单号, 行号, 事件序号) 生成确定性 ID，
+--     并在 int_webhook_event / import_fingerprint 层去重；仍无法可靠识别时进入
+--     NEEDS_REVIEW 人工确认，禁止猜测事件边界自动过账。
+--   ★ 累计数量守恒（退货累计 ≤ 原消耗 qty）无法用单行 CHECK 表达，须应用层事务
+--     用 SELECT ... FOR UPDATE 锁原消耗行、SUM 已冲回数量后校验；DDL 只负责单次幂等，
+--     不承担累计守恒，也不宣称完整审批/过账闭环已实现。
+--   source_event_id 为平台事件/CSV 行指纹，可空；「事件级」标识会随跨批次多行重复，
+--     故仅建索引供追溯；事件级去重在 webhook/sal_order 指纹层承担。
 CREATE TABLE IF NOT EXISTS inv_batch_consumption (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
   consumption_no  VARCHAR(64)  NOT NULL,
@@ -617,9 +634,12 @@ CREATE TABLE IF NOT EXISTS sal_order_item (
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_order (sal_order_id),
   KEY idx_sku (sku_id),
-  -- ★ Codex REPRO 反例修正：平台订单行 ID 必须唯一，重复导入会导致 COGS 双计/数量翻倍。
-  --   可空：手工单无平台行号时多 NULL 不冲突，符合 MySQL 唯一键语义。
-  UNIQUE KEY uk_platform_item (platform_item_no),
+  -- ★ Codex REPRO 反例修正 + 作用域厘清（二轮）：平台行 ID 在同一订单内唯一，防重复导入
+  --   COGS 双计；但不同订单复用同一 platform_item_no 是合法样本（如手工编号/AE与SA各自
+  --   序号），故作用域取 (order_no, platform_item_no)，不用全表唯一。
+  --   可空：手工单无平台行号时多 NULL 不冲突。若后续平台样本证实该值跨站全局唯一，
+  --   可再收紧；未证实前保守取订单粒度。
+  UNIQUE KEY uk_platform_item (order_no, platform_item_no),
   -- ★ Codex REPRO 反例修正：退货是已妥投量的子集（妥投10退货2合法，净在手8），
   --   不是与妥投并列的独立占用，不能与 qty_delivered 相加后再与 qty 比较。
   --   约束语义：妥投与取消共同占用订单量（支持部分取消+部分妥投，如妥投8取消2）；
@@ -662,7 +682,10 @@ CREATE TABLE IF NOT EXISTS sal_return (
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_return_no (return_no),
   UNIQUE KEY uk_return_biz (biz_return_key),
-  UNIQUE KEY uk_return_source (source_return_no),
+  -- ★ 二轮厘清：平台退货单号作用域未获样本证实，不采用全表唯一；与平台行号同口径
+  --   取 (order_no, source_return_no)，可空多 NULL 不冲突。真实幂等以 biz_return_key
+  --   （应用按订单+行+事件生成）为准；待平台样本证实全局唯一后再收紧。
+  UNIQUE KEY uk_return_source (order_no, source_return_no),
   KEY idx_order (order_no),
   KEY idx_appeal (appeal_deadline),
   CONSTRAINT chk_return_qty CHECK (qty > 0),
@@ -1005,7 +1028,38 @@ BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ai_suggestion 新建 review_mode 必须为 MANUAL；AUTO 仅由审核流程置位';
   END IF;
 END$$
+DROP TRIGGER IF EXISTS trg_ai_suggestion_update_gate$$
+CREATE TRIGGER trg_ai_suggestion_update_gate BEFORE UPDATE ON ai_suggestion
+FOR EACH ROW
+BEGIN
+  -- ★ 二轮修正（Codex 第5点）：INSERT 闸门之下仍可直接 UPDATE 转正。
+  --   DDL 层把状态转移规则固化；服务端仍须做主体/站点鉴权与审计，二者叠加。
+  -- 1) 进入已审批态（APPROVED/CONVERTED/REJECTED）必须有审核主体与时间；
+  IF NEW.status IN ('APPROVED','CONVERTED','REJECTED')
+     AND OLD.status = 'PENDING'
+     AND (NEW.reviewed_by IS NULL OR NEW.reviewed_at IS NULL) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '审批态变更必须填写 reviewed_by 与 reviewed_at（UTC+8）';
+  END IF;
+  -- 2) 置 AUTO 必须命中具体规则 auto_rule_ref；规则缺失应转人工，不得静默 AUTO；
+  IF NEW.review_mode = 'AUTO' AND NEW.auto_rule_ref IS NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'review_mode=AUTO 必须提供 auto_rule_ref；无规则应走 MANUAL';
+  END IF;
+  -- 3) 转正（CONVERTED）必须有审批依据：自动规则引用或人工审核意见之一；
+  IF NEW.status = 'CONVERTED' AND OLD.status <> 'CONVERTED'
+     AND NEW.auto_rule_ref IS NULL AND NEW.review_note IS NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED 必须有 auto_rule_ref 或 review_note 作为审批依据';
+  END IF;
+  -- 4) 已转正/驳回为终态，禁止回退到 PENDING（防绕过审批重做）；
+  IF OLD.status IN ('CONVERTED','REJECTED') AND NEW.status = 'PENDING' THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED/REJECTED 为终态，禁止回退 PENDING';
+  END IF;
+END$$
 DELIMITER ;
+-- 审批闭环边界：上述触发器是数据库层不变量，不等于完整审批服务。服务端审批接口仍须
+-- 校验 review_mode=AUTO 时 auto_rule_ref 命中 noon_rule_config 的 ai_auto_review_rules
+-- 且 ai_auto_review_enabled=true，记录独立审核主体 sys_user.user_id 与站点 requireSite，
+-- 写 noon_audit_log，转正才写正式业务表；并发转正需行锁。普通应用/AI 主体无 UPDATE 高权限，
+-- 触发器与账号权限叠加，未经审批不可正式写入。
 
 -- -----------------------------------------------------------------------------
 -- G. AI 外挂只读视图（配合官方 MCP Read 权限，物理隔离写操作）

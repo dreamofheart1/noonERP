@@ -1,0 +1,43 @@
+PASS | 建库
+PASS | 若依基础 SQL 执行
+PASS | WP1 站点授权 SQL 执行
+PASS | schema v0.5 DDL 执行
+PASS | 表数量=72（含若依+WP1+v0.5） | 实际 72
+PASS | 视图数量=5 | 实际 5
+PASS | v0.5 五张新表存在 | noon_audit_log,noon_config_snapshot,noon_rule_config,noon_rule_config_audit,noon_rule_config_lock
+PASS | sys_audit_log 未误建（已更名 noon_audit_log）
+PASS | noon_rule_config 初始化 15 行
+PASS | 锁行 45 行(15键×3scope)
+PASS | 导出类别 12 行
+PASS | 首条消耗流水可插入
+PASS | P0-1 重复 biz_event_key 被唯一键拦截
+PASS | sign=0 被 CHECK 拦截
+PASS | config to<=from 被 CHECK 拦截
+PASS | 非法 scope 被 CHECK 拦截
+PASS | 生成列: 仅一层验证 is_usable=0
+PASS | 生成列: 两层验证 is_usable=1
+PASS | 利润视图拆 SITE/SKU | 实际 2
+PASS | 修复1: 同销售跨批次消耗被允许
+PASS | 修复2a: 妥投10退货2合法状态可插入
+PASS | 修复2b: 退货>妥投被 CHECK 拦截
+PASS | 修复3: 同平台订单行重复插入被拦截
+PASS | 修复4a: 跨站快照(AE→SA)被 CHECK 拦截
+PASS | 修复4b: GLOBAL 回退快照被允许
+PASS | 修复5: 快照原地 UPDATE 被触发器拦截
+PASS | 修复6a: AI 直接 INSERT CONVERTED 被闸门拦截
+PASS | 修复6b: AI 新建 PENDING/MANUAL 被允许
+PASS | FOLLOWUP 部分妥投第一次同批次可插入
+PASS | REPRO 同订单行第二次部分妥投同批次被拒
+PASS | FOLLOWUP 部分退货第一次冲回可插入
+PASS | REPRO 同原消耗第二次部分退货被拒
+PASS | FOLLOWUP 平台行首订单可插入
+FAIL | OBSERVED 另一订单使用相同平台行标识被拒
+PASS | FOLLOWUP 快照新插入
+PASS | FOLLOWUP 快照更新被拒
+FAIL | REPRO 快照可直接删除
+PASS | FOLLOWUP AI PENDING 可新建
+FAIL | REPRO 未审核建议可直接更新为 AUTO CONVERTED
+PASS | v0.5 重复执行成功（幂等）
+PASS | 重跑后锁行仍 45
+PASS | 重跑后配置仍 15
+PASS=39 FAIL=3  报告: /var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-followup-report-2xtbvlmf/verify-schema-v05-output.txt

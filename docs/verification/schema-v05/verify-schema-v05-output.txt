@@ -1,7 +1,7 @@
 # v0.5 schema 隔离 MySQL 实测报告
 # MySQL: /tmp/mysql-8.4.7-macos15-arm64/bin/mysqld  Ver 8.4.7 for macos15 on arm64 (MySQL Community Server - GPL)
 # 命令: python3 scripts/verify-schema-v05.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin
-# 结果: PASS=31 FAIL=0
+# 结果: PASS=45 FAIL=0
 
 PASS | 建库
 PASS | 若依基础 SQL 执行
@@ -31,6 +31,20 @@ PASS | 修复4b: GLOBAL 回退快照被允许
 PASS | 修复5: 快照原地 UPDATE 被触发器拦截
 PASS | 修复6a: AI 直接 INSERT CONVERTED 被闸门拦截
 PASS | 修复6b: AI 新建 PENDING/MANUAL 被允许
+PASS | F1a: 多次部分妥投同批次(不同事件key)被允许
+PASS | F1b: 第二次部分妥投同批次(新事件key)被允许
+PASS | F1c: 同一妥投事件重传同批次被拦截
+PASS | F2a: 首次部分退货冲回被允许
+PASS | F2b: 第二次部分退货冲回同批(新事件key)被允许
+PASS | F2c: 同一退货事件重传被拦截
+PASS | F3a: 不同订单复用平台行号被允许
+PASS | F3b: 同订单重复平台行号仍被拦截
+PASS | F4: 快照物理 DELETE 被触发器拦截
+PASS | F5a: PENDING→CONVERTED 无审核信息被拦截
+PASS | F5b: PENDING→APPROVED 带审核主体/时间被允许
+PASS | F5c: APPROVED→CONVERTED 带审批依据被允许
+PASS | F5d: CONVERTED 终态回退 PENDING 被拦截
+PASS | F5e: AUTO 无 auto_rule_ref 被拦截
 PASS | v0.5 重复执行成功（幂等）
 PASS | 重跑后锁行仍 45
 PASS | 重跑后配置仍 15

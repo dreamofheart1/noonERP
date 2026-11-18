@@ -52,6 +52,17 @@ Codex 用 `scripts/reproduce-schema-v05-review.py` 提交 7 条反例，全部�
 
 第 7 条「同订单平台行首次插入」FAIL 属反例脚本用例耦合：同脚本前一步已用相同 `ITEM1` 主键插入妥投退货行，导致"首次"插入被新唯一键拦截——这是修复生效的旁证，不是新缺陷。反例脚本回跑证据：`docs/verification/schema-v05/reproduce-review-after-fix-output.txt`（PASS=22 FAIL=7，7 条 REPRO 全数无法再复现）。
 
+### 2.3.2 Codex followup 二轮审查后的 5 项补修（2026-11-18 三轮）
+Codex 提交 `scripts/reproduce-schema-v05-followup.py`（42 项，独立键避免 `ITEM1` 耦合），独立复跑 42/42 一致，报告 5 类风险全部真实。修复如下：
+| 风险 | 修复 |
+|---|---|
+| 多次部分妥投/退货冲回同一批次被拒 | 幂等键语义从「订单行/原消耗 ID」改为「每次实际过账事件 ID」：`SALE:`+delivery_event_id、`REV:`+return_event_id；`(biz_event_key,batch_id)` 复合唯一同时保证跨批次多行、重传拦截、不同事件可再消费同批。事件 ID 来源与 NEEDS_REVIEW 降级、累计守恒需应用行锁事务——写入 DDL 注释，明确 DDL 只管单次幂等 |
+| 平台行全表唯一过严 | `uk_platform_item` 改 `(order_no, platform_item_no)`；`uk_return_source` 改 `(order_no, source_return_no)`，均注明待平台样本证实后再收紧 |
+| 快照可物理 DELETE | 加 `trg_snapshot_no_delete` BEFORE DELETE SIGNAL；归档仅走受控迁移，应用账号无 UPDATE/DELETE 权限，触发器为第二道防线 |
+| AI 未审核可直接 UPDATE 转正 | 加 `trg_ai_suggestion_update_gate`：审批态变更须 reviewed_by+reviewed_at、AUTO 须 auto_rule_ref、CONVERTED 须审批依据、终态不可回退 PENDING；完整审批闭环仍需服务端鉴权/审计/行锁（已在注释写明） |
+
+**辨析**：followup 的 `REPRO 第二次部分妥投/退货被拒` 两条在修复后仍显示 PASS，因其脚本构造用了**同一 biz_event_key**（模拟"同事件重传"，按新契约本就该拒）。真正的多次部分动作应生成不同事件 key，已由本脚本 F1b/F2b 正向断言证明可行。回跑证据 `docs/verification/schema-v05/followup-after-fix-output.txt`（PASS=39 FAIL=3：快照删除、AI 越权转正、平台行跨订单复用三条风险已翻转为 FAIL=不再复现）。
+
 ### 2.4 决议固化
 - **时区**：所有业务时刻 UTC+8；`sal_order`/`sal_return`/`fin_statement` 加 `*_raw_text`/`*_raw_tz` 保留平台原始截止瞬间（对应 Codex `BusinessTimestamp` 契约）。
 - **AI 写入治理**：`ai_suggestion` 为唯一 AI 可写暂存层（不进正式表），`status=PENDING/APPROVED/REJECTED/CONVERTED`，`review_mode=MANUAL/AUTO`（默认人工），`ai_auto_review_enabled=false`、`ai_auto_review_rules=[]` 落参数表，审批通过才转正式单据。
@@ -66,9 +77,10 @@ python3 scripts/verify-schema-v05.py \
 ```
 
 实测环境：MySQL 8.4.7（隔离一次性实例，端口随机，结束自动关闭，不碰生产）。
-结果：**31/31 PASS**（22 项原有断言 + 9 项 Codex 反例修复断言：跨批次允许、妥投10退货2合法、退货>妥投拦截、平台行重复拦截、跨站快照拦截、GLOBAL 回退允许、快照 UPDATE 拦截、AI 直接转正拦截、AI 新建 PENDING 允许；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
+结果：**45/45 PASS**（22 项原有 + 9 项一轮反例修复 + 14 项二轮 followup 修复断言：多次部分妥投/退货事件同批次允许、同事件重传拦截、平台行跨订单复用/同订单重复拦截、快照 DELETE 拦截、AI 审批态转移五条；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
 报告：`docs/verification/schema-v05/verify-schema-v05-output.txt`。
-反例回跑：`python3 scripts/reproduce-schema-v05-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → 7 条 REPRO 全部无法再复现（PASS=22 FAIL=7，FAIL 为预期）；证据 `docs/verification/schema-v05/reproduce-review-after-fix-output.txt`。
+反例回跑：`python3 scripts/reproduce-schema-v05-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → 7 条 REPRO 全部无法再复现（PASS=22 FAIL=7）；证据 `docs/verification/schema-v05/reproduce-review-after-fix-output.txt`。
+followup 回跑：`python3 scripts/reproduce-schema-v05-followup.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=39 FAIL=3（快照删除/AI 越权转正/平台行跨订单复用三条不再复现；另两条同 key 场景见 §2.3.2 辨析）；证据 `docs/verification/schema-v05/followup-after-fix-output.txt`。
 
 一致性核对：45 表 + 5 视图全部在 ER 文档映射中出现，`ER_SQL_CONSISTENCY_OK`。
 

@@ -128,7 +128,7 @@ erDiagram
     }
     INV_BATCH_CONSUMPTION {
         bigint id PK
-        varchar biz_event_key UK "★P0-1 非空幂等键(与batch_id复合)"
+        varchar biz_event_key UK "★幂等键=过账事件ID(与batch_id复合)"
         varchar source_event_id "可空,追溯索引(事件级去重在webhook层)"
         bigint batch_id "复合唯一键第二列"
         bigint sal_order_item_id
@@ -149,9 +149,9 @@ erDiagram
 - 部分到货只建已到货数量批次；未收部分挂采购行 `qty_ordered - qty_received`，不建在途批。
 - 在途子批 `status=IN_TRANSIT` 且 `qty_remaining=0`，FIFO 只对已到货 `OPEN` 批扣减，避免双计。
 - 退货先红冲原 `SALE` 消耗（`sign=-1, reversal_of_id`），再按 A/B/C 分级；赔偿只在 `COMPENSATION` 计一次。
-- `uk_consume_biz_event(biz_event_key, batch_id)` 保证同一业务动作在同一批次只过账一次，重复投递 COGS 不变；一次销售跨多批次各记一条，不被误拒（Codex REPRO 反例修正）。
-- 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法），不再与妥投相加占用订单量；`uk_platform_item(platform_item_no)` 阻止重复导入。
-- `noon_config_snapshot` 由 `trg_snapshot_immutable` 拒绝原地 UPDATE，`trg_ai_suggestion_insert_gate` 强制 AI 新建仅 PENDING/MANUAL；`chk_snap_owner` 禁止跨站解析。
+- `uk_consume_biz_event(biz_event_key, batch_id)`：幂等键绑定**每次实际过账事件**（非订单行/原消耗 ID）。同一事件跨批次多条、同事件重传同批次被拦、不同部分妥投/退货事件（不同 key）可再次消费同批次——三条同时成立。事件 ID 来源优先平台履约号，缺失时应用按确定规则生成，无法识别进 NEEDS_REVIEW；累计退货≤原消耗由应用层行锁事务校验，DDL 只管单次幂等。
+- 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法）；`uk_platform_item(order_no, platform_item_no)` 按订单粒度阻止重复导入、允许不同订单复用行号；`uk_return_source(order_no, source_return_no)` 同口径。
+- `noon_config_snapshot`：`trg_snapshot_immutable` 拒绝原地 UPDATE、`trg_snapshot_no_delete` 拒绝物理 DELETE（归档走受控迁移）；`chk_snap_owner` 禁止跨站解析。`ai_suggestion`：`trg_ai_suggestion_insert_gate` 强制新建 PENDING/MANUAL，`trg_ai_suggestion_update_gate` 约束审批态转移（审核主体/时间/AUTO规则引用/终态不可回退）——触发器为数据库不变量，完整审批闭环仍需服务端鉴权+审计+行锁。
 
 ## 3. 头程 · 订单 · 退货 · 结算 · 利润（C/D 组）
 

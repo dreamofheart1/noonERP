@@ -188,6 +188,43 @@ def main():
         check("修复6b: AI 新建 PENDING/MANUAL 被允许",
               q(ai + "('S2','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0)
 
+        # ---- Codex followup 二轮：5 项风险修复验证 ----
+        # 1) 同一订单行多次部分妥投、同批次：不同事件 key 应允许；同事件重传被拦
+        check("F1a: 多次部分妥投同批次(不同事件key)被允许",
+              q(f"{base_ins}('C-PART-A','SALE:EVT-A',77,1,2,10,20,NOW(),'SALE')", db).returncode == 0)
+        check("F1b: 第二次部分妥投同批次(新事件key)被允许",
+              q(f"{base_ins}('C-PART-B','SALE:EVT-B',77,1,3,10,30,NOW(),'SALE')", db).returncode == 0)
+        check("F1c: 同一妥投事件重传同批次被拦截",
+              q(f"{base_ins}('C-PART-A2','SALE:EVT-A',77,1,2,10,20,NOW(),'SALE')", db).returncode != 0)
+        # 2) 同一原消耗多次部分退货：不同退货事件可再次冲回同批；同事件重传被拦
+        check("F2a: 首次部分退货冲回被允许",
+              q(f"{base_ins}('C-REV-A','REV:EVT-RA',77,1,1,10,10,NOW(),'RETURN_REVERSAL')", db).returncode == 0)
+        check("F2b: 第二次部分退货冲回同批(新事件key)被允许",
+              q(f"{base_ins}('C-REV-B','REV:EVT-RB',77,1,1,10,10,NOW(),'RETURN_REVERSAL')", db).returncode == 0)
+        check("F2c: 同一退货事件重传被拦截",
+              q(f"{base_ins}('C-REV-A2','REV:EVT-RA',77,1,1,10,10,NOW(),'RETURN_REVERSAL')", db).returncode != 0)
+        # 3) 平台行唯一作用域：不同订单复用同 platform_item_no 应允许；同订单重复被拦
+        check("F3a: 不同订单复用平台行号被允许",
+              q(item + "(502,'ORDER-B','ITEM1',1,5,0,0,10)", db).returncode == 0)
+        check("F3b: 同订单重复平台行号仍被拦截",
+              q(item + "(501,'ORDER-A','LOCAL-ITEM-1',1,5,0,0,10)", db).returncode == 0 and
+              q(item + "(501,'ORDER-A','LOCAL-ITEM-1',1,5,0,0,10)", db).returncode != 0)
+        # 4) 快照 DELETE 被触发器拦截
+        check("F4: 快照物理 DELETE 被触发器拦截",
+              q("DELETE FROM noon_config_snapshot WHERE snapshot_batch_no='BG'", db).returncode != 0)
+        # 5) AI UPDATE 审批闸门
+        check("F5a: PENDING→CONVERTED 无审核信息被拦截",
+              q("UPDATE ai_suggestion SET status='CONVERTED',review_mode='AUTO' WHERE suggestion_no='S2'", db).returncode != 0)
+        check("F5b: PENDING→APPROVED 带审核主体/时间被允许",
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='S2'", db).returncode == 0)
+        check("F5c: APPROVED→CONVERTED 带审批依据被允许",
+              q("UPDATE ai_suggestion SET status='CONVERTED',review_note='manual ok' WHERE suggestion_no='S2'", db).returncode == 0)
+        check("F5d: CONVERTED 终态回退 PENDING 被拦截",
+              q("UPDATE ai_suggestion SET status='PENDING' WHERE suggestion_no='S2'", db).returncode != 0)
+        check("F5e: AUTO 无 auto_rule_ref 被拦截",
+              q(ai + "('S3','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET review_mode='AUTO' WHERE suggestion_no='S3'", db).returncode != 0)
+
         # 幂等重跑
         r4 = feed(SCHEMA, db)
         check("v0.5 重复执行成功（幂等）", r4.returncode == 0, r4.stderr[-300:])
