@@ -158,6 +158,36 @@ def main():
                     "AND table_name IN ('v_ai_profit_site','v_ai_profit_sku')")
         check("利润视图拆 SITE/SKU", pv == "2", f"实际 {pv}")
 
+        # ---- Codex REPRO 反例修复验证（6 项）----
+        # 修复1 跨批次：同 biz_event_key 不同 batch_id 应允许（FIFO 一次销售跨多批）
+        check("修复1: 同销售跨批次消耗被允许",
+              q(f"{base_ins}('C-V1B','SALE:V1',2,1,1,10,10,NOW(),'SALE')", db).returncode == 0)
+        # 修复2 退货语义：妥投10退货2合法；退货>妥投被拒
+        item = "INSERT INTO sal_order_item(sal_order_id,order_no,platform_item_no,sku_id,qty,qty_delivered,qty_returned,unit_price) VALUES "
+        check("修复2a: 妥投10退货2合法状态可插入",
+              q(item + "(1,'O1','ITEM1',1,10,10,2,15)", db).returncode == 0)
+        check("修复2b: 退货>妥投被 CHECK 拦截",
+              q(item + "(1,'O2','ITEM2',1,10,5,6,15)", db).returncode != 0)
+        # 修复3 平台行唯一：重复 platform_item_no 被拒
+        check("修复3: 同平台订单行重复插入被拦截",
+              q(item + "(1,'O1','ITEM1',1,10,0,0,15)", db).returncode != 0)
+        # 修复4 跨站快照：AE 请求解析出 SA 被拒；GLOBAL 回退允许
+        snap = ("INSERT INTO noon_config_snapshot(snapshot_batch_no,biz_type,config_key,version_id,"
+                "requested_site,resolved_scope,value_snapshot,business_time,resolved_at) VALUES")
+        check("修复4a: 跨站快照(AE→SA)被 CHECK 拦截",
+              q(snap + "('BX','SAL_ORDER','x',1,'AE','SA','v',NOW(),NOW())", db).returncode != 0)
+        check("修复4b: GLOBAL 回退快照被允许",
+              q(snap + "('BG','SAL_ORDER','x',1,'AE','GLOBAL','v',NOW(),NOW())", db).returncode == 0)
+        # 修复5 快照不可变：UPDATE 被触发器拦截
+        check("修复5: 快照原地 UPDATE 被触发器拦截",
+              q("UPDATE noon_config_snapshot SET value_snapshot='changed' WHERE snapshot_batch_no='BG'", db).returncode != 0)
+        # 修复6 AI 闸门：INSERT 直接 CONVERTED 被拒；PENDING 允许
+        ai = "INSERT INTO ai_suggestion(suggestion_no,scene,source_agent,payload_json,status,review_mode) VALUES "
+        check("修复6a: AI 直接 INSERT CONVERTED 被闸门拦截",
+              q(ai + "('S1','REPLENISH','agent','{}','CONVERTED','AUTO')", db).returncode != 0)
+        check("修复6b: AI 新建 PENDING/MANUAL 被允许",
+              q(ai + "('S2','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0)
+
         # 幂等重跑
         r4 = feed(SCHEMA, db)
         check("v0.5 重复执行成功（幂等）", r4.returncode == 0, r4.stderr[-300:])

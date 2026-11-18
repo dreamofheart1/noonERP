@@ -255,8 +255,24 @@ CREATE TABLE IF NOT EXISTS noon_config_snapshot (
   UNIQUE KEY uk_snapshot_batch (snapshot_batch_no, config_key),
   KEY idx_snapshot_biz (biz_type, biz_no),
   CONSTRAINT chk_snap_scope CHECK (resolved_scope IN ('GLOBAL','AE','SA')),
+  -- ★ Codex REPRO 反例修正：站点优先/GLOBAL 回退下，解析结果只能是请求站点本身或
+  --   GLOBAL，禁止 AE 业务解析出 SA 参数（跨站污染）。STORED_REPLAY 同理不得跨站。
+  CONSTRAINT chk_snap_owner CHECK (resolved_scope = 'GLOBAL' OR resolved_scope = requested_site),
   CONSTRAINT chk_snap_source CHECK (snapshot_source IN ('LIVE_RESOLVE','STORED_REPLAY'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='★ 可信配置快照：业务同事务落库，重算只读本表';
+
+-- ★ Codex REPRO 反例修正：快照声称不可变但无强制，UPDATE 可原地篡改 value_snapshot，
+--   破坏「重算只读本表」的可信基础。MySQL 8 无 immutable 约束，用 BEFORE UPDATE
+--   SIGNAL 拒绝一切原地更新；更正只能插新快照（新 batch_no/version_id）并让业务改引用。
+--   DROP IF EXISTS + CREATE 保证幂等重跑不报错。
+DELIMITER $$
+DROP TRIGGER IF EXISTS trg_snapshot_immutable$$
+CREATE TRIGGER trg_snapshot_immutable BEFORE UPDATE ON noon_config_snapshot
+FOR EACH ROW
+BEGIN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'noon_config_snapshot 不可原地更新；更正须插新快照并改业务引用';
+END$$
+DELIMITER ;
 
 -- -----------------------------------------------------------------------------
 -- B. 采购 · FIFO 批次 · 库存
@@ -334,8 +350,15 @@ CREATE TABLE IF NOT EXISTS inv_batch (
 --     RETURN_LOSS     = 'LOSS:' + sal_return_id + ':' + grade
 --     STOCKTAKE       = 'STK:' + stocktake_item_id
 --     TRANSFER_SHORT  = 'TSHORT:' + transfer_item_id
---   重复妥投/重复 redelivery 用同一 biz_event_key → 唯一键挡住，COGS 不双计。
---   source_event_id 为平台事件/CSV 行指纹，可空，用于事件源去重链（int_webhook_event）。
+--   重复妥投/重复 redelivery 用同一 biz_event_key → 同一批次唯一键挡住，COGS 不双计。
+--   ★ 幂等粒度 = 业务事件 × 批次（Codex REPRO 反例修正）：一次销售按 FIFO 必然
+--     跨多个批次消耗，每个批次一条流水，共用同一 biz_event_key。若仅按
+--     biz_event_key 全局唯一，第二批次会被误拒、库存无法足额消耗。改为
+--     (biz_event_key, batch_id) 复合唯一：同事件同批次仅一条（防重复过账），
+--     同事件跨批次允许多行（FIFO 正常形态）。
+--   source_event_id 为平台事件/CSV 行指纹，可空；它是「事件级」标识，会随跨批次
+--     多行重复，故此处仅建索引供追溯；事件级去重由 int_webhook_event.uk_event_id
+--     与 sal_order.import_fingerprint 在上游承担。
 CREATE TABLE IF NOT EXISTS inv_batch_consumption (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
   consumption_no  VARCHAR(64)  NOT NULL,
@@ -358,8 +381,8 @@ CREATE TABLE IF NOT EXISTS inv_batch_consumption (
   raw_payload     JSON,
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_consumption_no (consumption_no),
-  UNIQUE KEY uk_consume_biz_event (biz_event_key),
-  UNIQUE KEY uk_consume_source_event (source_event_id),
+  UNIQUE KEY uk_consume_biz_event (biz_event_key, batch_id),
+  KEY idx_consume_source_event (source_event_id),
   KEY idx_batch (batch_id),
   KEY idx_order_item (sal_order_item_id),
   KEY idx_sku (sku_id),
@@ -594,9 +617,16 @@ CREATE TABLE IF NOT EXISTS sal_order_item (
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_order (sal_order_id),
   KEY idx_sku (sku_id),
-  KEY idx_platform_item (platform_item_no),
+  -- ★ Codex REPRO 反例修正：平台订单行 ID 必须唯一，重复导入会导致 COGS 双计/数量翻倍。
+  --   可空：手工单无平台行号时多 NULL 不冲突，符合 MySQL 唯一键语义。
+  UNIQUE KEY uk_platform_item (platform_item_no),
+  -- ★ Codex REPRO 反例修正：退货是已妥投量的子集（妥投10退货2合法，净在手8），
+  --   不是与妥投并列的独立占用，不能与 qty_delivered 相加后再与 qty 比较。
+  --   约束语义：妥投与取消共同占用订单量（支持部分取消+部分妥投，如妥投8取消2）；
+  --   退货从已妥投量中扣除，不得超过妥投量。
   CONSTRAINT chk_item_qty CHECK (qty > 0 AND qty_delivered >= 0 AND qty_returned >= 0 AND qty_cancelled >= 0
-    AND qty_delivered + qty_returned + qty_cancelled <= qty)
+    AND qty_delivered + qty_cancelled <= qty
+    AND qty_returned <= qty_delivered)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单行，FIFO COGS 归集粒度；C-4 支持部分妥投/退货';
 
 -- P2-2：退货幂等键。平台退货单号（若有）作为 source_return_no；无平台号时用
@@ -958,6 +988,24 @@ CREATE TABLE IF NOT EXISTS ai_suggestion (
   KEY idx_scene_status (scene, status),
   CONSTRAINT chk_ai_review_mode CHECK (review_mode IN ('MANUAL','AUTO'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='★ AI 写入隔离暂存表：正常读、审批转正、自动审核开关';
+
+-- ★ Codex REPRO 反例修正：原表允许 INSERT 直接写 status='CONVERTED'、review_mode='AUTO'，
+--   等于 AI 绕过暂存层与审批直接转正，违背「未审批数据不进正式链路」决议。
+--   BEFORE INSERT 闸门：新建建议一律 PENDING + MANUAL；AUTO 只能由审核流程在
+--   UPDATE 阶段按 noon_rule_config 自动审核规则命中后置位（不拦 UPDATE 转正）。
+DELIMITER $$
+DROP TRIGGER IF EXISTS trg_ai_suggestion_insert_gate$$
+CREATE TRIGGER trg_ai_suggestion_insert_gate BEFORE INSERT ON ai_suggestion
+FOR EACH ROW
+BEGIN
+  IF NEW.status <> 'PENDING' THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ai_suggestion 新建状态必须为 PENDING；转正须经审核 UPDATE';
+  END IF;
+  IF NEW.review_mode <> 'MANUAL' THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ai_suggestion 新建 review_mode 必须为 MANUAL；AUTO 仅由审核流程置位';
+  END IF;
+END$$
+DELIMITER ;
 
 -- -----------------------------------------------------------------------------
 -- G. AI 外挂只读视图（配合官方 MCP Read 权限，物理隔离写操作）

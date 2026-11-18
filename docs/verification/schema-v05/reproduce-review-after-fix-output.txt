@@ -1,0 +1,30 @@
+PASS | 建库
+PASS | 若依基础 SQL 执行
+PASS | WP1 站点授权 SQL 执行
+PASS | schema v0.5 DDL 执行
+PASS | 表数量=72（含若依+WP1+v0.5） | 实际 72
+PASS | 视图数量=5 | 实际 5
+PASS | v0.5 五张新表存在 | noon_audit_log,noon_config_snapshot,noon_rule_config,noon_rule_config_audit,noon_rule_config_lock
+PASS | sys_audit_log 未误建（已更名 noon_audit_log）
+PASS | noon_rule_config 初始化 15 行
+PASS | 锁行 45 行(15键×3scope)
+PASS | 导出类别 12 行
+PASS | 首条消耗流水可插入
+PASS | P0-1 重复 biz_event_key 被唯一键拦截
+PASS | sign=0 被 CHECK 拦截
+PASS | config to<=from 被 CHECK 拦截
+PASS | 非法 scope 被 CHECK 拦截
+PASS | 生成列: 仅一层验证 is_usable=0
+PASS | 生成列: 两层验证 is_usable=1
+PASS | 利润视图拆 SITE/SKU | 实际 2
+FAIL | REPRO 同一次销售跨批次被全局事件唯一键拒绝
+FAIL | REPRO 妥投10退货2的合法状态被拒绝
+FAIL | REPRO 同订单平台行首次插入
+FAIL | REPRO 同订单平台行重复插入被允许
+FAIL | REPRO 跨站快照插入被允许
+FAIL | REPRO 可信快照可原地更新
+FAIL | REPRO 未审批自动转正状态可插入
+PASS | v0.5 重复执行成功（幂等）
+PASS | 重跑后锁行仍 45
+PASS | 重跑后配置仍 15
+PASS=22 FAIL=7  报告: /var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-review-report-0l03t7f9/verify-schema-v05-output.txt

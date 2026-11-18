@@ -1,7 +1,7 @@
 # v0.5 schema 隔离 MySQL 实测报告
 # MySQL: /tmp/mysql-8.4.7-macos15-arm64/bin/mysqld  Ver 8.4.7 for macos15 on arm64 (MySQL Community Server - GPL)
 # 命令: python3 scripts/verify-schema-v05.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin
-# 结果: PASS=22 FAIL=0
+# 结果: PASS=31 FAIL=0
 
 PASS | 建库
 PASS | 若依基础 SQL 执行
@@ -22,6 +22,15 @@ PASS | 非法 scope 被 CHECK 拦截
 PASS | 生成列: 仅一层验证 is_usable=0
 PASS | 生成列: 两层验证 is_usable=1
 PASS | 利润视图拆 SITE/SKU | 实际 2
+PASS | 修复1: 同销售跨批次消耗被允许
+PASS | 修复2a: 妥投10退货2合法状态可插入
+PASS | 修复2b: 退货>妥投被 CHECK 拦截
+PASS | 修复3: 同平台订单行重复插入被拦截
+PASS | 修复4a: 跨站快照(AE→SA)被 CHECK 拦截
+PASS | 修复4b: GLOBAL 回退快照被允许
+PASS | 修复5: 快照原地 UPDATE 被触发器拦截
+PASS | 修复6a: AI 直接 INSERT CONVERTED 被闸门拦截
+PASS | 修复6b: AI 新建 PENDING/MANUAL 被允许
 PASS | v0.5 重复执行成功（幂等）
 PASS | 重跑后锁行仍 45
 PASS | 重跑后配置仍 15

@@ -128,9 +128,9 @@ erDiagram
     }
     INV_BATCH_CONSUMPTION {
         bigint id PK
-        varchar biz_event_key UK "★P0-1 非空幂等键"
-        varchar source_event_id UK "可空"
-        bigint batch_id
+        varchar biz_event_key UK "★P0-1 非空幂等键(与batch_id复合)"
+        varchar source_event_id "可空,追溯索引(事件级去重在webhook层)"
+        bigint batch_id "复合唯一键第二列"
         bigint sal_order_item_id
         int qty
         decimal amount "正值"
@@ -149,7 +149,9 @@ erDiagram
 - 部分到货只建已到货数量批次；未收部分挂采购行 `qty_ordered - qty_received`，不建在途批。
 - 在途子批 `status=IN_TRANSIT` 且 `qty_remaining=0`，FIFO 只对已到货 `OPEN` 批扣减，避免双计。
 - 退货先红冲原 `SALE` 消耗（`sign=-1, reversal_of_id`），再按 A/B/C 分级；赔偿只在 `COMPENSATION` 计一次。
-- `uk_consume_biz_event(biz_event_key)` 保证同一业务动作（如妥投）只过账一次，重复投递 COGS 不变。
+- `uk_consume_biz_event(biz_event_key, batch_id)` 保证同一业务动作在同一批次只过账一次，重复投递 COGS 不变；一次销售跨多批次各记一条，不被误拒（Codex REPRO 反例修正）。
+- 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法），不再与妥投相加占用订单量；`uk_platform_item(platform_item_no)` 阻止重复导入。
+- `noon_config_snapshot` 由 `trg_snapshot_immutable` 拒绝原地 UPDATE，`trg_ai_suggestion_insert_gate` 强制 AI 新建仅 PENDING/MANUAL；`chk_snap_owner` 禁止跨站解析。
 
 ## 3. 头程 · 订单 · 退货 · 结算 · 利润（C/D 组）
 
