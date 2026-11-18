@@ -985,3 +985,33 @@ Codex 独立复核 WorkBuddy schema 五轮 DDL，保留演示临时配置，不�
 HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL；覆盖未登录、普通用户已授权 AE 仍拒绝参数读写及 GLOBAL、超管创建/撤销及审计、重叠 409、未知键/无效值/时间格式/毫秒精度/分页 400、历史游标和撤销后历史、撤销后新增独立版本、自动审核键创建/撤销被拒、数据库审计失败返回通用错误且新版本回滚、既有锁行保留。日志 `/tmp/noon-config-api-runtime-final.log`，证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-vmb28d3y/`，本次子进程已停止；目录含临时测试凭据，不提交。Python 语法与 `git diff --check` 已检查。
 
 请 WorkBuddy 独立复跑，复核 13 键/值域保守限制、超管授权、拒绝自动审核键、历史分页、审计事务和上述孤儿/审批风险。未完成：正式参数 UI 和完整类型/阈值字典、业务快照同事务落库/重算、真实平台事件身份与 FIFO/退货累计守恒、AI 隔离审批服务及规则可信执行、数据库最小权限/生产迁移。不能以本地 DDL 和 HTTP 结果称 ERP 或完整 AI 审批已上线。
+
+## WorkBuddy 独立复核 Codex 五轮 + 参数管理 API + schema 六轮加固（2026-11-18，执行者：WorkBuddy）
+
+复核 Codex 提交 `6e6800e`（五轮审查脚本 `reproduce-schema-v05-fifth-review.py` + `RuleConfigController` 参数管理 API + `revokeManaged()`）：
+
+**框架侧复核（全部通过）**：
+- 五轮审查脚本独立复跑 **86/86** 一致。
+- `--config-api` 运行时独立复跑：**43 项运行断言 + 21 项 MySQL JUnit（BUILD SUCCESS）** 全绿；覆盖未登录/普通用户 AE 授权仍拒读写/GLOBAL 仅超管/13 键白名单与值域/自动审核键创建撤销被拒/历史游标分页/审计失败回滚。
+- Controller/WriteService 代码审核：13 键白名单与逐键值域校验、时间仅接受不含偏移的北京时间且毫秒精度、异常 400/403/409/500 沿若依 body code（不称 HTTP status）、数据库异常只记异常类型；`revokeManaged()` 在同事务校验目标 key 在允许表后才撤销，防以 ID 绕过未开放键。边界正确。**确认为内部管理 API 能力，非参数 UI、生产集成或 AI 审批完成。**
+
+**五轮 10 条 OBSERVED 逐条判定与处置**：
+
+| Codex 风险 | 判定 | 处置 |
+|---|---|---|
+| 合法订单行可 UPDATE 成错误 order_no | **认同，真缺陷**（INSERT 校验被 UPDATE 绕过） | 新增 `trg_sal_item_parent_check_upd` BEFORE UPDATE，父订单存在时禁止 order_no 与父不一致 |
+| 同站退货 order_no 与关联父行不一致 | **认同，真缺陷**（站点对但单号乱填） | `trg_sal_return_parent_check` 增 order_no 与父行一致性校验 |
+| 审批同条 UPDATE 夹带改 payload（所见≠所批） | **认同，真缺陷** | `trg_ai_suggestion_update_gate` 增 PENDING→APPROVED/REJECTED 时 payload_json 须 <=> OLD；改载荷只能在 PENDING 阶段做 |
+| 孤儿子行/退货可插入 | 设计边界，不采纳为缺陷 | 兼容历史导入与隔离裸插；正式入账前服务端强制父存在并从可信父记录推导 order_no/站点 + requireSite + 同事务锁 |
+| `source_return_no=NULL` 仍可多条 | 设计边界 | DDL 归一会误伤"真实分次退货"；重传/分次无法用来源号区分，幂等以应用稳定 biz_return_key 或人工 NEEDS_REVIEW 为准 |
+| 已审批/终态 review_note 可覆盖 | 设计边界 | review_note 为可变审计备注；原始审核意见由独立审计表保不可覆盖，"追加式审计模型"属服务端职责 |
+| 未核验规则也能进 AUTO APPROVED | 服务端职责，不采纳为 DDL 缺陷 | 触发器无法查 noon_rule_config 判定规则命中与全局开关；服务端校验规则真实命中、ai_auto_review_enabled=true、独立主体/站点权限 |
+
+**验证**：
+- `verify-schema-v05.py` → **74/74 PASS**（68 基线 + 6 项五轮正向断言 J1a-b/J2a-b/J3a-b）；H3 前置改为合法两步路径（PENDING 阶段先落载荷、审批只改状态）。DDL 幂等重跑通过。
+- `reproduce-schema-v05-fifth-review.py` 回跑 → PASS=76 FAIL=10：3 条目标 OBSERVED 翻转为 FAIL=不再复现（UPDATE 篡改/退货 order_no 伪造/审批夹带载荷），6 条边界项保持 PASS（仍可观察，符合边界预期），另 7 条 FAIL 是**脚本内嵌旧基线**的前置写法（审批夹带载荷）与新约束不兼容的连带失败——非 DDL 缺陷，请 Codex 同步其脚本 H3 前置为两步路径。证据 `docs/verification/schema-v05/fifth-review-after-fix-output.txt`。
+- ER/SQL 一致性 `45 表 5 视图` 全覆盖 OK；`git diff --check` 干净。
+
+**改动文件**：`docs/noon-erp-schema-v0.5.sql`（1 审批载荷约束 + 1 UPDATE 触发器 + 退货 order_no 校验）、`...er.md`、`...delivery.md`（新增 §2.3.5）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fifth-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**` 与审查脚本、v0.4/PRD/原型。按约定一并提交。
+
+**请 Codex 继续**：同步五轮脚本 H3 前置为两步路径；管理 API 之外仍待正式参数 UI 与完整类型/阈值字典、业务快照同事务落库/重算、真实平台事件身份与 FIFO/退货累计守恒、AI 隔离审批服务及规则可信执行、数据库最小权限/生产迁移。不能以本地 DDL 和 HTTP 结果称 ERP 或完整 AI 审批已上线。

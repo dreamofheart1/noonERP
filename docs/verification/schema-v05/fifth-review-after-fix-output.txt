@@ -1,0 +1,87 @@
+PASS | 建库
+PASS | 若依基础 SQL 执行
+PASS | WP1 站点授权 SQL 执行
+PASS | schema v0.5 DDL 执行
+PASS | 表数量=72（含若依+WP1+v0.5） | 实际 72
+PASS | 视图数量=5 | 实际 5
+PASS | v0.5 五张新表存在 | noon_audit_log,noon_config_snapshot,noon_rule_config,noon_rule_config_audit,noon_rule_config_lock
+PASS | sys_audit_log 未误建（已更名 noon_audit_log）
+PASS | noon_rule_config 初始化 15 行
+PASS | 锁行 45 行(15键×3scope)
+PASS | 导出类别 12 行
+PASS | 首条消耗流水可插入
+PASS | P0-1 重复 biz_event_key 被唯一键拦截
+PASS | sign=0 被 CHECK 拦截
+PASS | config to<=from 被 CHECK 拦截
+PASS | 非法 scope 被 CHECK 拦截
+PASS | 生成列: 仅一层验证 is_usable=0
+PASS | 生成列: 两层验证 is_usable=1
+PASS | 利润视图拆 SITE/SKU | 实际 2
+PASS | 修复1: 同销售跨批次消耗被允许
+PASS | 修复2a: 妥投10退货2合法状态可插入
+PASS | 修复2b: 退货>妥投被 CHECK 拦截
+PASS | 修复3: 同平台订单行重复插入被拦截
+PASS | 修复4a: 跨站快照(AE→SA)被 CHECK 拦截
+PASS | 修复4b: GLOBAL 回退快照被允许
+PASS | 修复5: 快照原地 UPDATE 被触发器拦截
+PASS | 修复6a: AI 直接 INSERT CONVERTED 被闸门拦截
+PASS | 修复6b: AI 新建 PENDING/MANUAL 被允许
+PASS | F1a: 多次部分妥投同批次(不同事件key)被允许
+PASS | F1b: 第二次部分妥投同批次(新事件key)被允许
+PASS | F1c: 同一妥投事件重传同批次被拦截
+PASS | F2a: 首次部分退货冲回被允许
+PASS | F2b: 第二次部分退货冲回同批(新事件key)被允许
+PASS | F2c: 同一退货事件重传被拦截
+PASS | F3a: 不同订单复用平台行号被允许
+PASS | F3b: 同订单重复平台行号仍被拦截
+PASS | F4: 快照物理 DELETE 被触发器拦截
+PASS | F5a: PENDING→CONVERTED 无审核信息被拦截
+PASS | F5b: PENDING→APPROVED 带审核主体/时间被允许
+PASS | F5c: APPROVED→CONVERTED 带审批依据被允许
+PASS | F5d: CONVERTED 终态回退 PENDING 被拦截
+PASS | F5e: AUTO 无 auto_rule_ref 被拦截
+PASS | G1a: 跨站同号订单同行号可分别插入(sal_order_id 不同)
+PASS | G1b: 同订单重复行号仍被拦截
+PASS | G2a: 跨站同号订单相同退货来源号可分别插入(site 不同)
+PASS | G2b: 同站同号同源退货被拦截
+PASS | G3a: PENDING→REJECTED 带审核信息被允许
+PASS | G3b: REJECTED→APPROVED 改判被拦截
+PASS | G3c: REJECTED→CONVERTED 改判被拦截
+PASS | G3d: PENDING→CONVERTED 跳过 APPROVED 被拦截
+PASS | G3e: APPROVED→PENDING 回退被拦截
+PASS | G3f: CONVERTED→APPROVED 终态改判被拦截
+PASS | H1a: NULL站点同订单同来源号退货被拦截(生成列归一)
+PASS | H1b: NULL与AE站点同来源号可区分
+PASS | H2 前置: 父子测试父订单可插入
+PASS | H2a: 订单行 order_no 与父不一致被拦截
+PASS | H2b: 同号跨站父订单各自行号可插入(父存在且一致)
+PASS | H2c: 退货站点与关联订单行父订单不一致被拦截
+PASS | H2d: 退货站点与父订单一致可插入
+FAIL | H3 前置: AI建议建立并人工审批
+FAIL | H3a: 审批后 payload_json 同态篡改被拦截
+FAIL | H3b: 审批后 reviewed_by 同态篡改被拦截
+PASS | H3c: 审批后 review_note 可补充说明
+FAIL | H3d: 审批后合法转正仍允许
+FAIL | H3e: 转正终态 reviewed_by 篡改被拦截
+PASS | REVIEW 真父订单创建
+PASS | REVIEW 关联行创建
+PASS | OBSERVED 不存在父订单的子行仍可插入
+PASS | OBSERVED 不存在父订单行的退货仍可插入
+FAIL | OBSERVED 正确子行可UPDATE成错误订单号
+PASS | REVIEW NULL站点同来源首条插入
+PASS | REVIEW NULL站点同来源重复被1062拒绝
+PASS | OBSERVED NULL来源号仍允许多条
+FAIL | OBSERVED 同站退货order_no与父行不一致被允许
+PASS | REVIEW AI待审批建议建立
+FAIL | OBSERVED 审批瞬间可同时修改载荷
+PASS | OBSERVED 已审批review_note可被覆盖
+FAIL | REVIEW 审批后改审核主体被拦截
+FAIL | REVIEW 转正状态变更
+PASS | OBSERVED 转正终态review_note仍可覆盖
+PASS | REVIEW 自动审批默认关闭
+PASS | REVIEW 独立AUTO候选建立
+PASS | OBSERVED 未核验规则也能进入AUTO APPROVED
+PASS | v0.5 重复执行成功（幂等）
+PASS | 重跑后锁行仍 45
+PASS | 重跑后配置仍 15
+PASS=76 FAIL=10  报告: /var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-fifth-review-yai1n7b8/verify-schema-v05-output.txt

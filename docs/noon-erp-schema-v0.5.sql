@@ -1073,7 +1073,16 @@ BEGIN
      AND NEW.auto_rule_ref IS NULL AND NEW.review_note IS NULL THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED 必须有 auto_rule_ref 或 review_note 作为审批依据';
   END IF;
-  -- 4) ★ 四轮修正：审核一旦发生（OLD 已非 PENDING），审核对象与证据字段不可再变。
+  -- 4) ★ 五轮修正：审批转换的同一条 UPDATE 不得夹带修改载荷。
+  --    审核所见即 OLD.payload_json；PENDING→APPROVED/REJECTED 时 payload 必须保持原值。
+  --    要改载荷只能在 PENDING 阶段由提案方改，审批方只改状态/审核字段；
+  --    "审核所见 qty=1、审批瞬间改 qty=999"在 DDL 层直接拒绝，所见即所批。
+  IF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED','REJECTED')
+     AND NOT (NEW.payload_json <=> OLD.payload_json) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT =
+      '审批转换不得夹带修改 payload_json；审核所见载荷须与审批载荷一致，改载荷须新建建议';
+  END IF;
+  -- 5) ★ 四轮修正：审核一旦发生（OLD 已非 PENDING），审核对象与证据字段不可再变。
   --    防止"先正常批 PENDING→APPROVED，再同态改 payload_json qty 1→999、改 reviewed_by，
   --    随后照常 CONVERTED"的载荷掉包。终态 REJECTED/CONVERTED 同样锁定。
   --    review_note 允许后续补充审计说明；NULL-safe 比较用 <=>。
@@ -1244,15 +1253,34 @@ BEGIN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_order_item.order_no 与父订单不一致';
   END IF;
 END$$
+-- ★ 五轮修正：INSERT 校验可被随后 UPDATE 绕过（合法行改成错误 order_no）。
+--   同口径补 BEFORE UPDATE：父订单存在时 order_no 不得改成与父不一致；父不存在放行。
+DROP TRIGGER IF EXISTS trg_sal_item_parent_check_upd$$
+CREATE TRIGGER trg_sal_item_parent_check_upd BEFORE UPDATE ON sal_order_item
+FOR EACH ROW
+BEGIN
+  DECLARE p_order_no VARCHAR(64);
+  SELECT order_no INTO p_order_no FROM sal_order WHERE id = NEW.sal_order_id;
+  IF p_order_no IS NOT NULL AND NEW.order_no <> p_order_no THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_order_item.order_no 与父订单不一致（UPDATE 篡改）';
+  END IF;
+END$$
 DROP TRIGGER IF EXISTS trg_sal_return_parent_check$$
 CREATE TRIGGER trg_sal_return_parent_check BEFORE INSERT ON sal_return
 FOR EACH ROW
 BEGIN
   DECLARE p_site VARCHAR(16);
-  SELECT so.site_code INTO p_site FROM sal_order_item si JOIN sal_order so ON so.id = si.sal_order_id
+  DECLARE p_order_no VARCHAR(64);
+  SELECT so.site_code, so.order_no INTO p_site, p_order_no
+    FROM sal_order_item si JOIN sal_order so ON so.id = si.sal_order_id
    WHERE si.id = NEW.sal_order_item_id;
+  -- ★ 五轮修正：关联订单行真实存在时，除站点外 order_no 也须与父订单一致，
+  --   防"站点对但 order_no 乱填"的伪造关联。行不存在则放行（兼容历史导入/隔离裸插）。
   IF p_site IS NOT NULL AND NEW.site_code IS NOT NULL AND NEW.site_code <> p_site THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_return.site_code 与关联订单行的父订单站点不一致';
+  END IF;
+  IF p_order_no IS NOT NULL AND NEW.order_no <> p_order_no THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'sal_return.order_no 与关联订单行的父订单不一致';
   END IF;
 END$$
 DELIMITER ;

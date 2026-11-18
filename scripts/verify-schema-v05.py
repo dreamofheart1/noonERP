@@ -283,9 +283,10 @@ def main():
         check("H2d: 退货站点与父订单一致可插入",
               q(hins + "('H-OK','HBO','H-OS','HP-ORDER','AE',1,1,"+hrow+")", db).returncode == 0)
         # H3) AI 审核字段不可变：审批后改 payload/审核人被拦；review_note 可补
+        # 五轮修正：审批转换不得夹带改载荷，故载荷在 PENDING 阶段先落定，审批改状态与审核字段。
         check("H3 前置: AI建议建立并人工审批",
-              q(ai + "('H-AI','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
-              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),payload_json=JSON_OBJECT('qty',1) WHERE suggestion_no='H-AI'", db).returncode == 0)
+              q(ai + "('H-AI','REPLENISH','agent',JSON_OBJECT('qty',1),'PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='H-AI'", db).returncode == 0)
         check("H3a: 审批后 payload_json 同态篡改被拦截",
               q("UPDATE ai_suggestion SET payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='H-AI'", db).returncode != 0)
         check("H3b: 审批后 reviewed_by 同态篡改被拦截",
@@ -296,6 +297,22 @@ def main():
               q("UPDATE ai_suggestion SET status='CONVERTED',review_note='ok' WHERE suggestion_no='H-AI'", db).returncode == 0)
         check("H3e: 转正终态 reviewed_by 篡改被拦截",
               q("UPDATE ai_suggestion SET reviewed_by=998 WHERE suggestion_no='H-AI'", db).returncode != 0)
+
+        # J) 五轮正向断言：审批夹带载荷 / 订单行 UPDATE 篡改 / 退货 order_no 伪造 三项修复
+        check("J1a: 审批同条夹带改 payload 被拦截",
+              q(ai + "('J-AI','REPLENISH','agent',JSON_OBJECT('qty',1),'PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='J-AI'", db).returncode != 0)
+        check("J1b: PENDING 先改载荷再审批的合法路径仍通",
+              q("UPDATE ai_suggestion SET payload_json=JSON_OBJECT('qty',2) WHERE suggestion_no='J-AI'", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='J-AI'", db).returncode == 0)
+        check("J2a: 合法订单行 UPDATE 成错误 order_no 被拦截",
+              q("UPDATE sal_order_item SET order_no='FORGED-J' WHERE id="+hrow, db).returncode != 0)
+        check("J2b: 合法订单行更新数量字段仍允许",
+              q("UPDATE sal_order_item SET qty_delivered=1 WHERE id="+hrow, db).returncode == 0)
+        check("J3a: 退货 order_no 与关联父行不一致被拦截",
+              q(hins + "('J-RF','JBF','J-RS','OTHER-ORDER','AE',1,1,"+hrow+")", db).returncode != 0)
+        check("J3b: 退货 order_no 与关联父行一致可插入",
+              q(hins + "('J-OK','JBO','J-OS','HP-ORDER','AE',1,1,"+hrow+")", db).returncode == 0)
 
         # 幂等重跑
         r4 = feed(SCHEMA, db)
