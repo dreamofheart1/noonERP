@@ -134,3 +134,10 @@ export function deptTreeSelect() {
     method: 'get'
   })
 }
+
+export function getUserSites(userId) {
+  return request({ url: '/noon/site-grants/' + userId, method: 'get' })
+}
+export function replaceUserSites(userId, sites) {
+  return request({ url: '/noon/site-grants/' + userId, method: 'put', data: sites })
+}

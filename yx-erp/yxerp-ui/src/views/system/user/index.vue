@@ -78,7 +78,7 @@
                   <span>{{ parseTime(scope.row.createTime) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" align="center" width="150" class-name="small-padding fixed-width">
+              <el-table-column label="操作" align="center" width="200" class-name="small-padding fixed-width">
                 <template #default="scope">
                   <el-tooltip content="修改" placement="top" v-if="scope.row.userId !== 1">
                     <el-button link type="primary" icon="Edit" @click="handleUpdate(scope.row)" v-hasPermi="['system:user:edit']"></el-button>
@@ -88,6 +88,9 @@
                   </el-tooltip>
                   <el-tooltip content="重置密码" placement="top" v-if="scope.row.userId !== 1">
                     <el-button link type="primary" icon="Key" @click="handleResetPwd(scope.row)" v-hasPermi="['system:user:resetPwd']"></el-button>
+                  </el-tooltip>
+                  <el-tooltip content="站点授权" placement="top" v-if="userStore.id === 1 && scope.row.userId !== 1 && scope.row.status === '0'">
+                    <el-button link type="primary" @click="openSiteGrant(scope.row)">站点授权</el-button>
                   </el-tooltip>
                   <el-tooltip content="分配角色" placement="top" v-if="scope.row.userId !== 1">
                     <el-button link type="primary" icon="CircleCheck" @click="handleAuthRole(scope.row)" v-hasPermi="['system:user:edit']"></el-button>
@@ -100,6 +103,19 @@
         </pane>
       </splitpanes>
     </el-row>
+
+    <el-dialog v-model="siteDialog.open" title="站点授权" width="460px" append-to-body :close-on-click-modal="false">
+      <p>用户：{{ siteDialog.userName }}</p>
+      <p>请选择可访问的站点。全部取消并保存将撤销该用户的所有站点授权。</p>
+      <el-checkbox-group v-model="siteDialog.sites" :disabled="siteDialog.loading || siteDialog.saving">
+        <el-checkbox value="AE">AE（阿联酋）</el-checkbox>
+        <el-checkbox value="SA">SA（沙特）</el-checkbox>
+      </el-checkbox-group>
+      <template #footer>
+        <el-button @click="siteDialog.open = false" :disabled="siteDialog.saving">取消</el-button>
+        <el-button type="primary" :loading="siteDialog.saving" :disabled="siteDialog.loading" @click="saveSiteGrant">保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 添加或修改用户配置对话框 -->
     <el-dialog :title="title" v-model="open" width="600px" append-to-body>
@@ -216,12 +232,43 @@
 <script setup name="User">
 import { getToken } from "@/utils/auth"
 import useAppStore from '@/store/modules/app'
+import useUserStore from '@/store/modules/user'
+import { getUserSites, replaceUserSites } from '@/api/system/user'
 import { changeUserStatus, listUser, resetUserPwd, delUser, getUser, updateUser, addUser, deptTreeSelect } from "@/api/system/user"
 import { Splitpanes, Pane } from "splitpanes"
 import "splitpanes/dist/splitpanes.css"
 
 const router = useRouter()
 const appStore = useAppStore()
+const userStore = useUserStore()
+const siteDialog = reactive({ open: false, userId: null, userName: '', sites: [], loading: false, saving: false })
+
+async function openSiteGrant(row) {
+  siteDialog.userId = row.userId
+  siteDialog.userName = row.userName
+  siteDialog.sites = []
+  siteDialog.loading = true
+  siteDialog.open = true
+  try {
+    const response = await getUserSites(row.userId)
+    siteDialog.sites = response.data
+  } catch (error) {
+    siteDialog.open = false
+  } finally {
+    siteDialog.loading = false
+  }
+}
+
+async function saveSiteGrant() {
+  siteDialog.saving = true
+  try {
+    await replaceUserSites(siteDialog.userId, siteDialog.sites)
+    proxy.$modal.msgSuccess(siteDialog.sites.length ? '站点授权已保存' : '已撤销全部站点授权')
+    siteDialog.open = false
+  } finally {
+    siteDialog.saving = false
+  }
+}
 const { proxy } = getCurrentInstance()
 const { sys_normal_disable, sys_user_sex } = proxy.useDict("sys_normal_disable", "sys_user_sex")
 
