@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--maven-settings", type=Path)
     parser.add_argument("--maven-repo", type=Path)
     parser.add_argument("--java", default=shutil.which("java"))
+    parser.add_argument("--config-history", action="store_true", help="额外验证真实参数历史 Mapper")
     args = parser.parse_args()
     jar = ROOT / "yx-erp/yxerp-admin/target/yxerp-admin.jar"
     if not jar.is_file():
@@ -135,16 +136,18 @@ def main():
             command += ["-s", str(args.maven_settings)]
         if args.maven_repo:
             command += ["-Dmaven.repo.local=" + str(args.maven_repo)]
-        command += ["-Dtest=MySqlSiteAuthorizationIT", "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
+        test_class = "MySqlConfigHistoryIT" if args.config_history else "MySqlSiteAuthorizationIT"
+        test_count = "17" if args.config_history else "16"
+        command += ["-Dtest=" + test_class, "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
         # 原生套件：继承 14 项 + RR/确定性锁等待 2 项，各用独立数据库。
-        report = ROOT / "yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site.MySqlSiteAuthorizationIT.xml"
+        report = ROOT / ("yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site." + test_class + ".xml")
         report.unlink(missing_ok=True)  # 不允许复用上一次成功报告
         with (work / "mysql-maven.log").open("w") as log:
             result = subprocess.run(command, cwd=ROOT / "yx-erp", env=runtime_env, stdout=log, stderr=subprocess.STDOUT)
-        report = ROOT / "yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site.MySqlSiteAuthorizationIT.xml"
+        report = ROOT / ("yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site." + test_class + ".xml")
         suite = ET.parse(report).getroot()
-        check("原生 MySQL 16 项权限、回滚与 RR 锁等待测试",
-              result.returncode == 0 and suite.get("tests") == "16" and suite.get("failures") == "0"
+        check("原生 MySQL " + test_count + " 项隔离测试",
+              result.returncode == 0 and suite.get("tests") == test_count and suite.get("failures") == "0"
               and suite.get("errors") == "0" and suite.get("skipped") == "0")
         sql("CREATE DATABASE noon_runtime character set utf8mb4;")
         sql((ROOT / "yx-erp/sql/ry_20260320.sql").read_text(), "noon_runtime")

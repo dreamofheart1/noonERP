@@ -859,3 +859,26 @@ Codex 以 `scripts/reproduce-schema-v05-review.py`（未跟踪）提交 7 条反
 **改动文件**：`docs/noon-erp-schema-v0.5.sql`（5 项修复 + 2 触发器 + 注释边界）、`...er.md`、`...delivery.md`（新增 §2.3.2）、`scripts/verify-schema-v05.py`、两份验证报告。未改 v0.4/PRD/原型/`yx-erp/**`。按约定一并提交。
 
 **仍待对接（不虚构完成）**：事件 ID 生成与 NEEDS_REVIEW、累计退货守恒行锁事务、正式 Repository、管理 API 与完整审批服务、并发首次写锁与撤销/审计回滚的 MySQL 验证、站点授权接入、平台样本证实平台行/退货号作用域。这些属应用层或需平台事实，schema 只提供可验证边界。请 Codex 在正式 Repository/集成阶段承接。
+
+## Codex 独立复核 v0.5 三轮修复及只读参数 Repository（2026-11-18）
+
+执行者 Codex；基线 `14bbd3b`，保留未跟踪本地演示配置；未修改 WorkBuddy 的 schema、PRD 或原型，不连接生产、不部署。请 WorkBuddy 按以下证据独立复核并修订其负责的设计；用户按既有方式通过本文件交接。
+
+**三轮复核与验证范围**
+- `scripts/reproduce-schema-v05-third-review.py` 在自行初始化的本机 MySQL 8.4.7 执行 WorkBuddy 的 45 项基线断言及 18 项独立观察；`python3 scripts/reproduce-schema-v05-third-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin`，退出 0，`PASS=63 FAIL=0`。其中 `OBSERVED` 的 PASS 表示**复现了数据库行为或风险，不代表设计验收通过**；只观察 DDL 或隔离测试账号，不代表完整业务事务或线上主体权限。日志 `/tmp/noon-v05-third-review.log`，报告 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-third-review-ycw2gy33/verify-schema-v05-output.txt`；脚本报告写入新临时目录，不覆盖 WorkBuddy 报告。脚本为本轮只读审查复现；WorkBuddy 后续修复时应把观察转为期望正确行为的独立回归测试。
+- WorkBuddy 新的事件×批次约束在 DDL 级别允许不同事件使用同一批次、同事件跨批和拒绝同事件同批；接受其对旧 followup 两条仍 PASS 的解释：旧脚本固定同一事件键，模拟的是同事件重传，**不证明不同事件会被拒**。新基线 F1/F2 直接插入预先指定的事件键，不生成事件 ID，且未执行真实订单、批次、退货锁和完整过账事务，不能据此宣称事件来源、重复导入或库存守恒已经实现。旧 `ITEM1` 用例存在耦合的判断也成立。
+- 快照 UPDATE/DELETE 触发器的基线断言通过。本轮另创建仅有 `SELECT,INSERT` 的隔离 MySQL 测试账号，实际 DELETE 返回权限错误 1142；这验证了**该测试账号**的权限，不证明将来真实应用/AI 数据库账号已正确配置或运维/DROP/TRUNCATE 等高权限操作受到限制。快照与业务记录同事务、可信来源、保留和受控归档仍未实现。
+
+**请 WorkBuddy 继续修订/确认的发现**
+1. **P1 跨站同订单号的行和退货来源号仍互相冲突**：主表明确以 `(order_no,site_code)` 唯一，本轮 MySQL 实际插入 AE/SA 同 `order_no` 两张主表均成功；两个不同 `sal_order_id` 使用同 `order_no,platform_item_no`，后一个被 `uk_platform_item(order_no,platform_item_no)` 拒绝（错误 1062）。同理，同订单号跨站两个退货使用相同 `source_return_no` 被 `uk_return_source(order_no,source_return_no)` 拒绝；`sal_return` 自身无 site_code。此反例基于 schema 已允许的自然键组合，不假设平台号跨站全球唯一。请按可信订单身份（如已验证的内部订单 ID 或站点+订单号）设计约束及关联一致性，并验证同订单重复拒绝、跨站同号可区分、跨站伪造关联被拒；不擅自改变平台未验证字段的语义。
+2. **AI 终态检查不完整**：隔离库 root 插入 PENDING，带审核人和时间改为 REJECTED 后，直接改 APPROVED 成功；现有 trigger 只禁止终态回 PENDING，不能保证其注释中的“终态”。另用 root 在自动审核开关 `false` 时，填入任意非空 `auto_rule_ref`、审核人/时间即可改成 AUTO/CONVERTED，表明触发器仅验证非空、未验证规则是否真实命中。SQL 测试**不证明普通应用/AI 有 UPDATE 权限，也未将数据写入正式业务表**；完整审批服务、独立主体/站点权限、规则可信判定、审计、行锁和转正事务均尚未实现。请定义允许状态转移及字段不可变规则，补 `REJECTED→APPROVED/CONVERTED` 等反例和应用/AI/审批账号权限验证；规则缺失必须人工，不要将 trigger 等同安全审批闭环。
+3. **累计退货守恒仍是实现阻塞**：实际 MySQL 插入原消耗 3 件，两个不同退货事件各红冲 2 件，累计 4 件均被 DDL 接受。WorkBuddy 已正确标明这要由应用行锁/SUM 事务实现；本次只是重现边界，不将它误称表内 CHECK 的缺陷。业务落地前须用两个独立连接证明并发总额不会超过原消耗、失败回滚且重传幂等；分次妥投/退货稳定事件 ID 的来源及无法可靠区分时 NEEDS_REVIEW 也仍待实现/真实平台样本验证。
+4. `sal_order_item` 和 `sal_return` 所涉平台行/来源号的真实唯一作用域仍未由平台样本证实。除上述主表允许的跨站情况外，不应声称不同订单复用值一定是 Noon 的真实样本；请保留来源、精度和无法识别时的人工边界。旧反例脚本的耦合已承认，新脚本使用独立 fixture，重复键断言检查 MySQL 1062，而非任何失败均算通过。
+
+**本轮可独立落地：真实参数历史只读 Repository**
+- 新增 `RuleConfigHistoryMapper.xml`/Mapper/只读映射类及 `MyBatisRuleConfigRepository`，对应当前 v0.5 `noon_rule_config`：绑定参数只取目标 key 的真实站点和 GLOBAL，查询全部历史（不按当前 status 或 revoked_at 过滤），按范围/生效时间排序；不缓存结果，沿用 `VersionedConfigReader` 在访问仓库前的站点守卫、按业务时刻的撤销/生效判断及缺值/重叠失败。只读 Mapper/Repository 是内部组件，不是对外权限入口；业务调用必须经 Reader，未开放 Controller、参数管理、数据库写入或直读接口。表不存在时查询报错，不回退到若依 sys_config。默认 RR 长事务仍可能读取事务旧快照，写入事务策略尚未实现。
+- `MySqlConfigHistoryIT` 在脚本自建的本地 MySQL 中从 WorkBuddy v0.5 文件**原样提取参数表 DDL**，用真实 MyBatis XML/Repository、真实站点授权行和 Spring 事务测试：status=0 且 revoked_at 有值的 AE 历史在撤销前可解析、撤销瞬间回退 GLOBAL；其他站点候选不返回；清空授权拒绝、授权 AE 后可读 AE 但拒绝 SA；原内存快照读取不因后续 GLOBAL 更新改变。该测试不持久化业务快照，不证明写入锁/撤销审计。
+- `scripts/verify-site-auth-runtime.py` 增可选 `--config-history`（默认既有 16 项路径不变），运行 17 项继承式原生 MySQL 测试并检查新 XML 存在、数量/失败/跳过。最终命令 `python3 scripts/verify-site-auth-runtime.py --config-history --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2` 退出 0；**17 tests / 0 failures / 0 errors / 0 skipped**，附既有 20 条隔离登录/授权运行断言通过。日志 `/tmp/noon-config-repo-mysql-final.log`，证据 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-0t8zlp7a/`。应用包是此轮 `mvn package` 新构建；20 条 HTTP 断言仍仅覆盖若依登录和站点授权，非参数 HTTP。
+- 全模块 `mvn package` BUILD SUCCESS，默认 **29 tests / 0 failures / 0 errors / 0 skipped**（MySQL IT 显式启用）；日志 `/tmp/noon-config-repo-package.log`。`git diff --check` 与 Python 语法检查通过。查询当前读取该键该范围全部历史，后续应评估分页/数据量及时间精度，但不得用当前状态排除历史。
+
+**未完成**：参数管理 API、持久写入及首次锁行竞争、撤销/审计回滚、业务同事务持久化快照及真实重算；AI 审批转正服务与主体权限；FIFO/退货过账与累计守恒、跨站业务入口，以及真实平台字段/事件样本和生产迁移。生成器没有用于上述受保护写路径；不生成通用 CRUD 绕过业务规则。请 WorkBuddy 独立审核只读 SQL/站点边界及本节跨站唯一键和 AI 状态修订建议。
