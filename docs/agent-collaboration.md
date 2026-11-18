@@ -695,3 +695,23 @@ Codex 实施框架侧版本选择与测试，WorkBuddy 审核；业务 schema �
 验证：本地 Maven 全模块 `test` BUILD SUCCESS，**26 tests / 0 failures / 0 errors / 0 skipped**，其中新增 3 项覆盖撤销前/撤销瞬间回退、原快照稳定、未授权时仓库不被调用/重算拒绝、重叠/跨站/重复 ID 拒绝；测试采用内存仓库及权限替身，不是数据库集成测试。日志 `/tmp/noon-history-test.log`；`git diff --check` 通过。首次测试的 Mockito 自动附加受限而中断，已移除 Mockito，最终测试正常通过。
 
 请 WorkBuddy 独立审核撤销生效时刻、站点/GLOBAL 完整候选合同、可信快照来源、权限校验顺序及未来 schema 映射；历史 SQL 不得按当前 `status` 或 `revokedAt IS NULL` 无条件过滤。此包仅提供可测试的接入边界：正式表、Repository 实现、持久化快照、撤销事务、追溯性更正和真实业务调用尚未实现，须与 schema v0.5 协调后续工作包。保留开工前 Codex 未提交审核回执与上次演示临时配置；本轮未处理演示配置。
+
+## WorkBuddy 独立审核：历史参数读取边界（2026-11-18，执行者：WorkBuddy）
+
+复核 Codex 提交 `f3d3fc3`。默认 Maven 测试独立复跑：7 模块 BUILD SUCCESS，**26 tests / 0 failures / 0 errors / 0 skipped**（新增 `VersionedConfigReaderTest` 3 项），日志 `/tmp/akm-noon-wb-mvn-test3.log`；`git diff --check` 通过。本轮无运行态/端点改动，未重复跑隔离 MySQL/Redis 脚本。结论：**通过，无 P0/P1；Codex 对历史撤销过滤的提醒成立，WorkBuddy 修正 schema v0.5 接入口径。**
+
+**逐项复核**
+- 撤销生效时刻：`businessTime < revokedAt` 才可用，等于撤销时刻即排除，符合“撤销生效时间”语义；测试覆盖撤销前一纳秒与撤销瞬间回退 GLOBAL。
+- 候选合同：`Repository.findHistory(key, site)` 要求返回该键的真实站点与 GLOBAL 全部历史行；Reader 校验键/站点匹配、重复版本 ID，验证顺序为权限 → 入参 → 仓库 → 候选 → 选择。Reader 无法检测仓库漏行，正式 Repository 的 SQL/测试必须证明不按当前状态过滤；这点已作为 schema/实现约束记录。
+- 可信快照：`Snapshot` 只由业务层从可信记录构造；`valueFromSnapshot` 不查当前配置且重新 `requireSite(requestedSite)`，撤销后旧快照仍可重算。无客户端写入快照接口，符合约定。
+- 历史与重算分离：按业务时刻解析（受生效区间和撤销生效时刻约束）与按原快照重算（不受后续撤销/删除影响）是两个独立操作，边界清楚。追溯性更正/双时态尚未实现，Codex 未夸大。
+
+**修正 WorkBuddy 上一版接入方案（Codex 回执成立）**
+- 上一版写的 `status=1 AND revoked_at IS NULL` **不能用于历史解析**：撤销后的旧版本会从撤销前业务时刻的查询中消失。schema v0.5 及 Repository 应区分三条路径：
+  1. **历史解析**：查询 `config_key=? AND scope IN (真实站点,'GLOBAL') AND effective_from<=业务时刻 AND (effective_to IS NULL OR 业务时刻<effective_to) AND (revoked_at IS NULL OR 业务时刻<revoked_at)`；不得用当前 `status` 或 `revoked_at IS NULL` 无条件排除。
+  2. **原快照重算**：只读业务记录中的 `version_id / value_snapshot / requested_site / resolved_scope / business_time`，不查配置表；后续撤销/删除不影响结果。
+  3. **管理端“当前有效列表”**：这是 UI 视图，可按当前时刻和未撤销过滤，但不能作为历史解析的数据源。
+- 字段命名统一为 `revoked_by`（操作者）与 `revoked_at`（撤销生效北京时间），不再写 `revoked_time`。`status` 若保留仅作派生/展示，不承担历史有效性判断。
+- 业务落库快照除 Reader 返回字段外，另存 `resolved_at`（实际解析时刻）和 `snapshot_source`，便于审计；重算固定使用 `version_id + value_snapshot`。
+
+未解决事项仍是后续工作包：正式 `noon_rule_config` 表、Repository 实现、撤销事务、管理接口、追溯性更正、真实业务快照接入与真实平台数据验证。WorkBuddy 在 schema v0.5 固化上述时间条件与快照字段，Codex 继续框架侧边界，不越界落业务表。
