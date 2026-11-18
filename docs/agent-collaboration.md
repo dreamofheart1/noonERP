@@ -548,3 +548,47 @@ Codex 初步只读核对：项目位于 `yx-erp/`，提交说明为若依前后�
 - 尚未测试真实 Redis/JWT 登录到 HTTP 全链路、原生 MySQL、前端授权管理、生产或部署；本次只证明全模块编译和本地集成测试。基础编译有既有 source17/JDK21 模块路径警告，不影响通过，不据此宣称运行期全部兼容。
 - 普通 Web 请求后续校验重新查库；不追溯取消已开始操作，长事务旧快照/并发撤权写操作需后续业务事务设计。本包实时停用校验只作用于 SiteAuthGuard，不改变若依其他模块全局旧 token 语义。
 - 机器主体认证及任务/AI 显式授权、配置历史/站点优先回退/中国时区、平台原始时区与截止瞬间保留、AI 隔离审批（无明确自动规则走人工）、生成器适用适配、完整业务迁移与入口测试矩阵留待后续工作包。按既定 WP1/WP2/WP3 分工推进，不默认扩大本包验收范围。
+
+## Codex 开工登记：WP1 隔离运行验证与基础集成续做（2026-11-18）
+
+用户明确要求继续，执行者 Codex、独立审核方 WorkBuddy，仍由用户通过本文件交接。基线 `8c1acee`，开工时工作区干净。先补 MySQL 原生迁移/授权事务、Redis/JWT HTTP 路径；本机 PATH 无 MySQL、Redis、Docker/Podman，拟使用官方包在 `/tmp` 建独立实例、仅监听本机且不自动启动任何现有连接配置。应用仓库默认数据源包含外部地址，本阶段必须以隔离配置完整覆盖，不能原样启动。之后推进 WP1 内下一项可验证基础能力；不并发修改 WorkBuddy 的业务 schema/PRD/原型，不部署、不连接生产。具体依赖或运行限制据实记录，不猜测先前未知权限弹框。
+
+### WP1 续做范围补充（2026-11-18，Codex）
+
+隔离实例已可运行，原生 MySQL 14 项授权测试通过（最终结果以完成记录为准）。在运行验证之外，本包下一项基础准备限定为公共时间值对象与边界测试：保留平台原始 ISO 时间文本、来源时区/偏移和 Instant，派生统一中国时间；缺少时区、DST 不存在/歧义时刻明确拒绝。不改系统 JVM 默认时区，不替平台重定义截止瞬间，不冒充配置历史表/账单周期已实现；不修改 WorkBuddy 的业务 schema、PRD 或原型。
+
+## Codex 完成记录：WP1 原生运行验证与时间基础（2026-11-18）
+
+**执行者**：Codex。本阶段基于 `8c1acee` 继续；开工工作区干净，无他人新增改动。未连接生产、未部署、未修改 WorkBuddy 的业务 schema/PRD/原型。**状态：本地实现与验证完成，等待 WorkBuddy 独立审核。**
+
+**修改与实际执行**
+- 新增 `scripts/verify-site-auth-runtime.py`：自建全新临时 MySQL/Redis/应用进程，随机本机端口、临时数据目录/随机凭据；显式覆盖应用配置且不启用仓库 druid profile，移除可能覆盖连接的相关环境变量、HTTP 禁用代理，任务自动运行关闭。无系统服务安装；成功或异常退出时只停止脚本自行创建的进程，保留证据目录。验证不是 mock Redis/JWT、不是注入 LoginUser 代替登录。
+- 通过官方包取得 MySQL 8.4.7 ARM64，并将 Redis 7.4.2 官方源码编译到临时目录。已有 JDK 21.0.13 / Maven 3.9.11；不写用户全局依赖配置。此前未知权限弹框未推测归因；本轮实际执行的下载/本机进程/网络能力均按工具给出具体操作和理由申请。
+- 新增 `MySqlSiteAuthorizationIT`，复用原 14 项权限/事务测试，执行**未经 H2 替换的原始 MySQL DDL**；增加检查实际 RR 隔离级别及确定性锁等待回归（观察 performance_schema.data_lock_waits 后再提交阻塞方，验证审计读最新 SA→AE 而非旧快照 AE）。调整原测试 fixture 以支持两种数据库，共用同一断言。framework 增测试范围 MySQL 驱动；原生 IT 不会由日常 `mvn test` 自动触发。
+- 补原始若依完整初始化 + 站点增量迁移、保留已有初始化用户、重复迁移明确失败的运行断言。真实应用 JAR 启动，HTTP `/captchaImage` + 本次 Redis 验证码 → `/login` 密码验证 → JWT 签发 → Redis 会话 → JWT filter → Controller/Service/Mapper/MySQL 全路径已实际执行。
+- 新增公共 `BusinessTimestamp` 供后续平台导入/配置集成：保留原始 ISO 文本、来源时区/偏移与 Instant，准确派生中国时间；缺少时区或 DST 歧义/缺口拒绝猜测，保留纳秒。不改变全局 JVM 时区、不重定义平台截止瞬间、不声称业务落库已接入。新增 6 项时间边界测试。
+- 新增 `docs/noon-wp1-runtime-and-time.md`（复现方式/边界），更新 `docs/noon-wp1-site-auth.md` 当前验证状态；保留本文旧阶段记录，不回写历史结论。
+
+**最终验证结果**
+1. `mvn package`（具体使用临时 Maven/settings/repo，命令详见说明）：7 模块全部 SUCCESS；默认 **20 tests / 0 failures / 0 errors / 0 skipped**（14 H2 授权 + 6 时间边界）。日志 `/tmp/noon-wp1b-package-final.log`。
+2. 最终脚本：`python3 scripts/verify-site-auth-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2`，退出码 0。
+3. 原生 MySQL JUnit **16 tests / 0 failures / 0 errors / 0 skipped**；实际 MySQL=8.4.7、Redis=7.4.2。原生 suite 的 XML 数量/失败/错误/跳过也由脚本检查，未把无测试空跑当通过。
+4. 最终 **20 项运行断言全部 PASS**（其中含原生套件汇总断言，不与 JUnit 数量当作互不重复总数相加）：初始化/增量/重跑、真实登录和会话、超管双站、普通空范围、越权自授权拒绝、同 JWT 授权/撤权、非法输入不破坏旧值、超管不可覆盖、审计前后值、停用旧 JWT 拒绝、签名篡改拒绝、退出删会话、Redis TTL 到期拒绝。均通过 HTTP 和本次实例验证。
+5. 最终完整证据目录：`/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-iruev6_h/`，含 `result.json`（无凭据/令牌）、`mysql-maven.log`、`application.log`、`mysql.log`、`redis.log`。目录内隔离配置及数据含随机测试凭据/会话，不提交仓库。最终运行结束后全部本次进程已停止。
+6. `git diff --check` 通过；Python 使用 `PYTHONPYCACHEPREFIX=/tmp/noon-pycache python3 -m py_compile scripts/verify-site-auth-runtime.py` 通过。原生/HTTP 套件与默认快速测试分开保留，后续改动可按影响复跑。
+
+**发现及修正的运行问题**
+- 初次 HTTP 启动在 Spring 配置生效前，原始 logback 尝试写固定 `/home/ruoyi/logs` 而失败；测试启动现用 JVM 早期 `logback.configurationFile` 指向临时控制台配置，Spring `logging.config` 同步指向它，没有申请系统日志目录写权限，也没改变默认部署日志配置。
+- 独立 profile 不加载 druid 默认文件后，框架强制 Druid @Value 参数原先缺失；隔离配置已补齐完整池参数，而非回头加载含外部数据源的 profile。最终完整启动通过。
+
+**给 WorkBuddy 的交叉审核提示（用户按既有方式让 WorkBuddy 读本文；未直接发消息）**
+- 请独立复跑默认 `mvn package` 与运行脚本，确认 20 默认/16 MySQL/20 运行断言，并审查隔离启动是否可能回落默认外部数据源。原生 IT 的临时数据库名/清理范围必须只限本次创建的数据。
+- 重点复核 MySQL 外键/二进制站点比较、RR 旧快照与 `FOR UPDATE` 当前读、并发审计、失败回滚；检查 HTTP 经过实际 JWT filter/Redis serializer，不因获取空范围误称单条业务已完成隔离。
+- 时间类请挑战 AE/SA 跨中国日期边界、保留原始偏移/Instant、DST 歧义拒绝、精度；向后续 schema/导入实现提出具体接入建议。只按真实平台字段确认其原时区，不能凭国家替缺失字段猜时区。
+- 请记录定位、复现、预期/实际与结论；执行者 Codex 根据审核修复，避免双方同时修改本包代码。不把本阶段本地证据当成生产验收。
+
+**未覆盖/后续**
+- 当前 JDK21/macOS ARM64/MySQL8.4.7/Redis7.4.2 的隔离验证通过；JDK17 运行和目标部署环境未验收。默认库/生产 API/生产数据完全未操作。
+- 仍无 Noon 正式采购/库存/订单/财务业务接口，业务列表/详情/跨表/导入导出全覆盖矩阵尚未实现；前端授权管理、机器主体/任务授权、AI 暂存审批、配置历史站点优先/全局回退、生成器业务适配留后续工作包。
+- 时间对象只是公共基础，尚未用于实际订单/账单落库；DATETIME(3) 与原始更高精度须显式设计保留方式。平台原始时区和实际截止瞬间必须继续保留。
+- 旧请求/长事务的并发撤权不追溯取消；后续业务写事务需单独设计授权边界与锁定。

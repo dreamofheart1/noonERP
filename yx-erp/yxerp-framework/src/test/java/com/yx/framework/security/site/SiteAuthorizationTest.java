@@ -36,20 +36,19 @@ import static org.junit.jupiter.api.Assertions.*;
 /** 真 MyBatis XML + H2 MySQL 模式 + Spring 事务；不启动 Redis 或生产连接。 */
 class SiteAuthorizationTest
 {
-    private AnnotationConfigApplicationContext context;
-    private JdbcTemplate jdbc;
+    protected AnnotationConfigApplicationContext context;
+    protected JdbcTemplate jdbc;
     private SiteAuthGuard guard;
-    private SysUserSiteService service;
+    protected SysUserSiteService service;
 
     @BeforeEach
     void setUp() throws Exception
     {
-        context = new AnnotationConfigApplicationContext(Config.class);
+        context = new AnnotationConfigApplicationContext(configClass());
         jdbc = new JdbcTemplate(context.getBean(DataSource.class));
         jdbc.execute("create table sys_user (user_id bigint primary key, status char(1), del_flag char(1))");
         // 运行生产迁移，仅移除 H2 不支持的 MySQL 字符集/排序规则声明。
-        String migration = Files.readString(Path.of("../sql/noon_wp1_site_auth.sql"))
-                .replace("CHARACTER SET ascii COLLATE ascii_bin", "");
+        String migration = migrationSql(Files.readString(Path.of("../sql/noon_wp1_site_auth.sql")));
         for (String statement : migration.split(";"))
         {
             if (!statement.isBlank()) jdbc.execute(statement);
@@ -60,11 +59,21 @@ class SiteAuthorizationTest
         login(1L);
     }
 
+    protected Class<?> configClass() { return Config.class; }
+
+    protected String migrationSql(String original)
+    {
+        return original.replace("CHARACTER SET ascii COLLATE ascii_bin", "");
+    }
+
+    protected void cleanDatabase() { }
+
     @AfterEach
     void tearDown()
     {
         SecurityContextHolder.clearContext();
-        context.close();
+        if (context != null) context.close();
+        cleanDatabase();
     }
 
     @Test
@@ -244,7 +253,7 @@ class SiteAuthorizationTest
         return jdbc.queryForObject("select count(*) from " + table, Integer.class);
     }
 
-    private static void login(Long id)
+    protected static void login(Long id)
     {
         SysUser user = new SysUser();
         user.setUserId(id);
