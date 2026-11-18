@@ -592,3 +592,32 @@ Codex 初步只读核对：项目位于 `yx-erp/`，提交说明为若依前后�
 - 仍无 Noon 正式采购/库存/订单/财务业务接口，业务列表/详情/跨表/导入导出全覆盖矩阵尚未实现；前端授权管理、机器主体/任务授权、AI 暂存审批、配置历史站点优先/全局回退、生成器业务适配留后续工作包。
 - 时间对象只是公共基础，尚未用于实际订单/账单落库；DATETIME(3) 与原始更高精度须显式设计保留方式。平台原始时区和实际截止瞬间必须继续保留。
 - 旧请求/长事务的并发撤权不追溯取消；后续业务写事务需单独设计授权边界与锁定。
+
+## WorkBuddy 独立审核：Codex WP1 身份与站点权限（2026-11-18，执行者：WorkBuddy）
+
+按用户“看一下 Codex 做得怎么样”的要求，对 Codex 两个提交 `8c1acee`、`a84ca1b` 做独立审核。审核前工作区干净、基线 `a84ca1b`；未修改 Codex 负责的 `yx-erp/**` 代码或脚本，按“一方开发、另一方审核”只出书面结论。
+
+**结论：整体做得好，达到本阶段交付标准。** 方案收敛后能按工作包边界落地，未越界改业务 schema/PRD/原型；已实现的站点授权闸门、用户-站点关联、审计事务、原生 MySQL/RR 当前读、真实 Redis/JWT HTTP 链均有代码、测试和可复现实证。本阶段未发现 P0/P1 缺陷。发现 1 项 P2（验证脚本报告新鲜度），建议 Codex 后续修；不影响本次功能通过的判断。
+
+**独立复跑（实际执行）**
+- `git status --short --branch`：审核前后均为 `## main...origin/main [ahead 7]`，工作区干净；`git diff --check` 通过。
+- `/tmp/apache-maven-3.9.11/bin/mvn -o -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -B -ntp test`（在 `yx-erp/`）：7 模块 SUCCESS；本次日志显示 **20 tests / 0 failures / 0 errors / 0 skipped**（`SiteAuthorizationTest` 14 + `BusinessTimestampTest` 6）。日志 `/tmp/akm-noon-wb-mvn-test.log`。
+- 同参数 `mvn package`：7 模块 SUCCESS，生成 `yxerp-admin.jar`。日志 `/tmp/akm-noon-wb-mvn-package.log`。
+- `PYTHONPYCACHEPREFIX=/tmp/noon-wb-pycache python3 -m py_compile scripts/verify-site-auth-runtime.py`：通过。
+- `python3 scripts/verify-site-auth-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2`：退出码 0，**20 项运行断言全 PASS**；原生 MySQL JUnit **16 tests / 0 failures / 0 errors / 0 skipped**，报告 `yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site.MySqlSiteAuthorizationIT.xml` 已刷新为 16 项。日志 `/tmp/akm-noon-wb-runtime.log`；证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-uxci6ic3/`，`result.json` 未含密码/令牌，隔离配置 0600、目录 0700，本次进程已全部停止。
+- 构建中出现既有 `source 17` 与 JDK 21 模块路径警告，不影响通过；不据此宣称 JDK 17 运行环境已验收。
+
+**逐项复核要点**
+- 主体来源：`SiteAuthGuard` 只取认证上下文中的 `LoginUser`，校验主体/用户 ID 一致、账号未停用未删除，并复核 `sys_user`；测试覆盖匿名、未认证、ID 篡改、停用/删除/不存在。符合约定。
+- 超管与普通用户：`userId==1` 全 AE/SA 且不可被授权接口覆盖；普通用户仅 `sys_user_site` 显式授权，空授权拒绝；菜单 `*:*:*` 不替代站点授权。与用户决议和若依源码一致。
+- 撤权即时性：不缓存站点范围，撤权后同一旧 `LoginUser`/JWT 再校验即失效；HTTP 脚本也验证了旧 JWT 场景。已开始的长事务不追溯取消，Codex 已如实列为边界。
+- 事务与并发：目标用户行锁 + `FOR UPDATE` 当前读；H2 双线程替换不混集，MySQL 原生套件在 RR 下观察真实 `data_lock_waits` 后确认审计 `before` 取已提交的 SA 而非旧快照；审计失败回滚。测试设计严谨，非固定睡眠碰运气。
+- 迁移与隔离：原生 DDL 执行若依初始化 + 站点增量，重复迁移明确失败；脚本只连 127.0.0.1、显式覆盖数据源/Redis/日志/token，真实登录经验证码、JWT filter、Redis 会话、MyBatis、MySQL 全链。未见回落默认外部数据源的证据。
+- 时间基础：`BusinessTimestamp` 保留原始文本/偏移/Instant，按 Asia/Shanghai 派生中国时间；6 项边界覆盖跨日、缺时区、DST 缺口/重叠、纳秒、主机时区无关。符合“保留平台原始截止瞬间、统一 UTC+8 展示处理”的决议；尚未接入业务落库，边界声明清楚。
+
+**发现的问题**
+- **P2-1 验证脚本可能读取过期 Surefire 报告（定位：`scripts/verify-site-auth-runtime.py` L138-146）**：脚本为兼容多模块使用 `-Dsurefire.failIfNoSpecifiedTests=false`，随后只判断 `MySqlSiteAuthorizationIT.xml` 的 `tests/failures/errors/skipped`，未清理旧报告也未检查报告是否本次生成。实际观察到：默认 `mvn test` 于 16:45:07 只重写 2 个 XML，`MySqlSiteAuthorizationIT.xml` 仍是 16:36:53 的旧文件。若将来原生套件因配置问题 0 执行但 Maven 返回 0，脚本可能误判通过。影响仅在验证可信度，不是产品运行时缺陷。建议 Codex 下次修：运行原生套件前删除目标 XML，或断言报告 mtime 不早于本次脚本启动，或解析 Maven 日志确认 `Tests run: 16`；修复后只需复跑脚本，无需改业务实现。
+
+**未解决事项（均为既定后续工作包，不是本阶段缺陷）**：Noon 正式业务表/接口尚未接入，列表/详情/跨表/导入导出全量站点隔离未验收；机器主体（quartz/AI）与 AI 暂存审批未实现；配置历史、站点优先回退、生成器业务适配、前端授权管理、生产/部署/目标环境未覆盖。Codex 在文档和完成记录中已明确这些边界，未夸大验收范围。
+
+请 Codex 按 P2-1 修复验证脚本并自行提交；WorkBuddy 不并发修改 `yx-erp/**`。
