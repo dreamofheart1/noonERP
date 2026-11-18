@@ -645,3 +645,35 @@ Codex 实施框架侧版本选择与测试，WorkBuddy 审核；业务 schema �
 验证：隔离 Maven 全模块 `test` SUCCESS，23 tests（含新规则 3 项）零失败，覆盖站点优先、过期回退、边界及版本重叠/缺值；日志 `/tmp/noon-config-test.log`。修复后完整隔离脚本退出 0，原生 MySQL 16 tests、20 项运行断言通过；日志 `/tmp/noon-report-fix.log`，证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-xmm2x634/`。`git diff --check` 通过。
 
 请 WorkBuddy 独立审查：站点和 GLOBAL 候选完整性、重叠失败策略、半开边界、历史快照与撤销历史；核对脚本新报告防空跑，并基于业务 schema 给出读取/写入/审计和并发约束的接入方案。此阶段尚未实现参数持久化、管理接口、历史撤销或业务调用，也未验证真实平台数据，不能称为完整参数模块。
+
+## WorkBuddy 独立审核：站点授权界面 + 版本选择基础 + P2 修复（2026-11-18，执行者：WorkBuddy）
+
+按用户继续要求复核 Codex 提交 `9977296`、`eb4112c`，并补做浏览器操作。审核基线 `08795c6`；未修改 Codex 负责的 `yx-erp/**` 业务代码。结论：**整体通过，P2-1 已关闭，未发现新增 P0/P1**。验证码已在隔离演示层面关闭（库/缓存 `sys.account.captchaEnabled=false`，登录页确认不再显示），未改仓库默认配置。
+
+**独立复跑**
+- `/tmp/apache-maven-3.9.11/bin/mvn -o -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -B -ntp test`：7 模块 BUILD SUCCESS，**23 tests / 0 failures / 0 errors / 0 skipped**（`EffectiveConfigResolverTest` 3 + `SiteAuthorizationTest` 14 + `BusinessTimestampTest` 6）。日志 `/tmp/akm-noon-wb-mvn-test2.log`。
+- `npm run build:prod`（Node 22.22.2 / npm 10.9.7）：成功，约 9.74s。日志 `/tmp/akm-noon-wb-ui-build.log`。
+- 为验证 P2 修复，先把 `TEST-...MySqlSiteAuthorizationIT.xml` 写成 `STALE_REPORT_SENTINEL`，再跑完整隔离脚本：脚本删除旧报告并重新生成，退出码 0，**20 项运行断言全 PASS**，原生 MySQL **16 tests / 0 failures / 0 errors / 0 skipped**；哨兵消失。日志 `/tmp/akm-noon-wb-runtime2.log`，证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-z_ifjmkd/`。`git diff --check` 通过。
+
+**P2-1 复核**：`scripts/verify-site-auth-runtime.py` 在 Maven 前新增 `report.unlink(missing_ok=True)`，之后 `ET.parse(report)`；旧报告被删除、未生成新报告即报错，防空跑成立。P2-1 关闭。工作区仍只有 Codex 明示保留的未跟踪 `yx-erp/yxerp-ui/.noon-preview-vite.config.js`，不是提交内容；建议演示停止后删除或纳入忽略，不提交本地临时配置。
+
+**EffectiveConfigResolver 复核**
+- 候选完整性：解析器本身不读库，正确把责任留给调用方。接入时必须按键读取 `scope IN (真实站点, 'GLOBAL')` 的完整候选，且先 `SiteAuthGuard.requireSite(realSiteCode)`；不能把菜单权限、请求体站点或整个配置表直接传入。
+- 重叠策略：同 scope 多于 1 个有效版本直接失败，站点与 GLOBAL 同时有效时站点优先；没有版本大小兜底，失败关闭，符合约定。测试覆盖重复 GLOBAL、缺值、非法 site=`GLOBAL`。
+- 半开边界：`[from,to)`、`to=null` 表示长期有效；`to<=from` 在构造时拒绝；相邻区间与纳秒边界测试通过。
+- 历史/撤销：返回完整 `Version`，可供业务落版本快照；当前无持久化、管理接口、撤销历史，Codex 已明确边界，不能称为完整参数模块。
+
+**前端浏览器补测（隔离演示）**
+- 超管 `admin` 登录：用户管理页仅对启用的普通用户 `ry` 显示“站点授权”，`admin` 行无入口；打开弹窗只有 AE/SA。
+- 勾选 AE 保存后重开弹窗仍为 AE；取消勾选保存出现“已撤销全部站点授权”，重开弹窗 AE/SA 均未勾选。
+- 普通用户 `ry` 登录：用户管理页无“站点授权”按钮；带浏览器令牌请求 `/noon/sites` 返回 `data: []`。截图：`docs/verification/WP1_site_grant_admin.png`、`docs/verification/WP1_site_grant_ry.png`。
+- UI 失败反馈路径未单独构造；服务端 400/403 已由运行脚本覆盖，前端沿用若依全局错误提示。小建议：`openSiteGrant` 的 catch 静默关闭弹窗、`saveSiteGrant` 无显式 catch，若后续要求明确反馈可补 `proxy.$modal.msgError`。不影响本轮通过。
+
+**基于业务 schema 的接入方案（供 WP2 落 `noon_rule_config`）**
+1. 表结构：append-only `noon_rule_config(id, config_key, scope, config_value, effective_from, effective_to null, status, version_no, created_by, created_time, revoked_by, revoked_time, remark)`；`scope` 为 `GLOBAL|AE|SA`；唯一键至少 `(config_key, scope, effective_from)` 与 `(config_key, scope, version_no)`；不做物理删除，撤销只写 `revoked_by/revoked_time/status`。
+2. 读取：业务服务先取记录真实站点并 `requireSite(realSiteCode)`，再以绑定参数查询 `config_key=? AND scope IN (?, 'GLOBAL') AND status=1 AND revoked_at IS NULL AND from<=业务时刻 AND (to IS NULL OR 业务时刻<to)`；业务时刻来自 `BusinessTimestamp.chinaTime()` 或调用方明确北京时间。候选不足或重叠均失败关闭；空站点列表的列表/统计必须使用 `WHERE 1=0`。
+3. 写入：仅超管或显式授权角色；事务内按 `(config_key, scope)` 用锁表行 `SELECT ... FOR UPDATE` 或 MySQL `GET_LOCK` 串行化，先查重叠再追加新版本，禁止原地改仍生效版本；审计行与版本行同事务，记录 actor、前后版本 ID、北京时间。GLOBAL 新版本不覆盖仍有效的站点值。
+4. 快照：订单、采购、账单、利润等正式数据保存 `config_key / resolved_scope / version_id / value_snapshot / business_time / resolved_at`；重算按快照版本，不随当前配置漂移。撤销历史只影响新读取，不篡改历史快照。
+5. 缓存与并发：读路径只读已提交版本；Redis 可选缓存但 key 必须含 `config_key+scope+version`，写入提交后失效，禁止跨站点复用空值；同 key+scope 并发写由锁/唯一键双重约束，半开边界重叠必须在写入前拒绝。
+
+请 Codex 继续框架侧接入准备但不要越界落业务表；WorkBuddy 下一轮在 schema v0.5 固化上述约束，并按采购→库存→订单→账单→利润顺序接入业务。
