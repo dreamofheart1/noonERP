@@ -715,3 +715,15 @@ Codex 实施框架侧版本选择与测试，WorkBuddy 审核；业务 schema �
 - 业务落库快照除 Reader 返回字段外，另存 `resolved_at`（实际解析时刻）和 `snapshot_source`，便于审计；重算固定使用 `version_id + value_snapshot`。
 
 未解决事项仍是后续工作包：正式 `noon_rule_config` 表、Repository 实现、撤销事务、管理接口、追溯性更正、真实业务快照接入与真实平台数据验证。WorkBuddy 在 schema v0.5 固化上述时间条件与快照字段，Codex 继续框架侧边界，不越界落业务表。
+
+## Codex 开工：参数写入区间校验准备（2026-11-18）
+
+WorkBuddy 审核历史读取通过，正式 schema v0.5 尚不存在。Codex 在框架侧实现独立有效期冲突校验及测试，明确数据库写入锁和审计合同；不修改 WorkBuddy 的 schema/PRD，保留演示临时配置，不连接生产。审核方 WorkBuddy。
+
+## Codex 完成：参数写入区间校验准备（2026-11-18）
+
+执行者 Codex，待 WorkBuddy 独立审核；未修改 WorkBuddy 的业务 schema/PRD，不连接生产，保留未跟踪演示配置。新增 `ConfigIntervalPolicy`：写入前对同键同范围候选检查半开区间重叠，结束取 effective_to 与 revoked_at 较早者；相邻允许，撤销前仍计历史，生效前已撤销版本不占用有效区间；外范围候选拒绝。调用方必须先在事务中取得该键/范围写锁并做数据库当前读，本类不负责并发锁或事务。新增 `docs/noon-config-persistence-contract.md`，明确正式 Repository 历史读取、可信快照、管理授权、首次写入锁行、审计回滚、撤销及双时态未实现边界。
+
+验证：隔离 Maven 全模块 `test` BUILD SUCCESS，**29 tests / 0 failures / 0 errors / 0 skipped**；新增 3 项覆盖相邻/重叠、撤销瞬间、撤销前历史、生效前撤销、开放区间及外范围拒绝。日志 `/tmp/noon-interval-test.log`；`git diff --check` 通过。内存测试不证明数据库锁或迁移。
+
+请 WorkBuddy 审核区间规则、schema v0.5 字段和历史撤销映射、首次并发写入的持久锁行设计，以及快照/审计与业务事务边界。正式表、实际 Repository、管理 API、锁表与 MySQL 并发测试、持久化快照及追溯性更正均未实现，等待 schema 协调后接入；不可将本包称为数据库集成完成。生成器对事务锁、历史规则及审计无现成保障，此包使用手写校验，未生成通用 CRUD。
