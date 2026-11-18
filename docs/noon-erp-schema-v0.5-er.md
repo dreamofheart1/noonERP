@@ -150,8 +150,10 @@ erDiagram
 - 在途子批 `status=IN_TRANSIT` 且 `qty_remaining=0`，FIFO 只对已到货 `OPEN` 批扣减，避免双计。
 - 退货先红冲原 `SALE` 消耗（`sign=-1, reversal_of_id`），再按 A/B/C 分级；赔偿只在 `COMPENSATION` 计一次。
 - `uk_consume_biz_event(biz_event_key, batch_id)`：幂等键绑定**每次实际过账事件**（非订单行/原消耗 ID）。同一事件跨批次多条、同事件重传同批次被拦、不同部分妥投/退货事件（不同 key）可再次消费同批次——三条同时成立。事件 ID 来源优先平台履约号，缺失时应用按确定规则生成，无法识别进 NEEDS_REVIEW；累计退货≤原消耗由应用层行锁事务校验，DDL 只管单次幂等。
-- 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法）；`uk_platform_item(order_no, platform_item_no)` 按订单粒度阻止重复导入、允许不同订单复用行号；`uk_return_source(order_no, source_return_no)` 同口径。
-- `noon_config_snapshot`：`trg_snapshot_immutable` 拒绝原地 UPDATE、`trg_snapshot_no_delete` 拒绝物理 DELETE（归档走受控迁移）；`chk_snap_owner` 禁止跨站解析。`ai_suggestion`：`trg_ai_suggestion_insert_gate` 强制新建 PENDING/MANUAL，`trg_ai_suggestion_update_gate` 约束审批态转移（审核主体/时间/AUTO规则引用/终态不可回退）——触发器为数据库不变量，完整审批闭环仍需服务端鉴权+审计+行锁。
+- 订单行 `qty_delivered + qty_cancelled <= qty` 且 `qty_returned <= qty_delivered`：退货是妥投子集（妥投10退货2合法）。
+- ★ 三轮修正（跨站同订单号）：主表 `sal_order` 以 `(order_no, site_code)` 唯一，AE/SA 允许同号订单。`uk_platform_item(sal_order_id, platform_item_no)` 锚点由平台 order_no 改为内部可信订单 ID：同一订单内重复行号拦截、跨站同号订单的各自行号可存在。`sal_return` 新增可空 `site_code`，`uk_return_source(site_code, order_no, source_return_no)`：同站同号同源拦截、跨站同号同源可区分。平台行号/来源号的真实唯一作用域未经样本证实，不虚构全局唯一；站点归属一致性由应用层 `requireSite` + 父订单校验，累计退货守恒由行锁事务校验，DDL 只保单次幂等。
+- `noon_config_snapshot`：`trg_snapshot_immutable` 拒绝原地 UPDATE、`trg_snapshot_no_delete` 拒绝物理 DELETE（归档走受控迁移）；`chk_snap_owner` 禁止跨站解析。
+- ★ 三轮修正（AI 终态）：`trg_ai_suggestion_insert_gate` 强制新建 PENDING/MANUAL；`trg_ai_suggestion_update_gate` 改为显式状态转移白名单——仅允许 `PENDING→APPROVED/REJECTED`、`APPROVED→CONVERTED` 及同态补充审核字段；`REJECTED`/`CONVERTED` 为终态不得改判，进入审批态必须有 reviewed_by/reviewed_at，CONVERTED 须有 auto_rule_ref 或 review_note。`review_mode=AUTO` 必须提供 auto_rule_ref；规则是否真实命中 `ai_auto_review_rules` 由服务端校验（触发器无法查配置表）。触发器为数据库不变量，完整审批闭环仍需服务端鉴权+审计+行锁。
 
 ## 3. 头程 · 订单 · 退货 · 结算 · 利润（C/D 组）
 
@@ -190,7 +192,8 @@ erDiagram
     SAL_RETURN {
         bigint id PK
         varchar biz_return_key UK "★P2-2"
-        varchar source_return_no UK "可空"
+        varchar site_code "★三轮:可空,跨站同号隔离"
+        varchar source_return_no UK "site+order+source"
         varchar grade "A/B/C"
         decimal return_loss_amount "全额计损"
         datetime appeal_deadline "UTC+8"

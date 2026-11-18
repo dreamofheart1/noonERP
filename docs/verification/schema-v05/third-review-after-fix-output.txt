@@ -1,0 +1,64 @@
+PASS | 建库
+PASS | 若依基础 SQL 执行
+PASS | WP1 站点授权 SQL 执行
+PASS | schema v0.5 DDL 执行
+PASS | 表数量=72（含若依+WP1+v0.5） | 实际 72
+PASS | 视图数量=5 | 实际 5
+PASS | v0.5 五张新表存在 | noon_audit_log,noon_config_snapshot,noon_rule_config,noon_rule_config_audit,noon_rule_config_lock
+PASS | sys_audit_log 未误建（已更名 noon_audit_log）
+PASS | noon_rule_config 初始化 15 行
+PASS | 锁行 45 行(15键×3scope)
+PASS | 导出类别 12 行
+PASS | 首条消耗流水可插入
+PASS | P0-1 重复 biz_event_key 被唯一键拦截
+PASS | sign=0 被 CHECK 拦截
+PASS | config to<=from 被 CHECK 拦截
+PASS | 非法 scope 被 CHECK 拦截
+PASS | 生成列: 仅一层验证 is_usable=0
+PASS | 生成列: 两层验证 is_usable=1
+PASS | 利润视图拆 SITE/SKU | 实际 2
+PASS | 修复1: 同销售跨批次消耗被允许
+PASS | 修复2a: 妥投10退货2合法状态可插入
+PASS | 修复2b: 退货>妥投被 CHECK 拦截
+PASS | 修复3: 同平台订单行重复插入被拦截
+PASS | 修复4a: 跨站快照(AE→SA)被 CHECK 拦截
+PASS | 修复4b: GLOBAL 回退快照被允许
+PASS | 修复5: 快照原地 UPDATE 被触发器拦截
+PASS | 修复6a: AI 直接 INSERT CONVERTED 被闸门拦截
+PASS | 修复6b: AI 新建 PENDING/MANUAL 被允许
+PASS | F1a: 多次部分妥投同批次(不同事件key)被允许
+PASS | F1b: 第二次部分妥投同批次(新事件key)被允许
+PASS | F1c: 同一妥投事件重传同批次被拦截
+PASS | F2a: 首次部分退货冲回被允许
+PASS | F2b: 第二次部分退货冲回同批(新事件key)被允许
+PASS | F2c: 同一退货事件重传被拦截
+PASS | F3a: 不同订单复用平台行号被允许
+PASS | F3b: 同订单重复平台行号仍被拦截
+PASS | F4: 快照物理 DELETE 被触发器拦截
+PASS | F5a: PENDING→CONVERTED 无审核信息被拦截
+PASS | F5b: PENDING→APPROVED 带审核主体/时间被允许
+PASS | F5c: APPROVED→CONVERTED 带审批依据被允许
+PASS | F5d: CONVERTED 终态回退 PENDING 被拦截
+PASS | F5e: AUTO 无 auto_rule_ref 被拦截
+PASS | REVIEW 同号订单 AE/SA 主表都可插入
+PASS | REVIEW AE 订单行可插入
+FAIL | OBSERVED 同订单号跨站同平台行号被拒(1062)
+PASS | REVIEW SA 另一行号可插入
+PASS | REVIEW AE 退货来源号可插入
+FAIL | OBSERVED 同订单号跨站同退货来源号被拒(1062)
+PASS | REVIEW 原消耗数量3可插入
+PASS | REVIEW 两次不同事件冲回均可插入
+PASS | OBSERVED DDL允许累计红冲4大于原消耗3
+PASS | REVIEW 独立 PENDING 建议可插入
+PASS | REVIEW 按要求记录驳回信息可写入
+FAIL | OBSERVED 驳回终态可被改为 APPROVED
+PASS | REVIEW 独立建议初态可插入
+FAIL | OBSERVED 未校验规则引用可直接转 AUTO CONVERTED
+PASS | REVIEW 规则默认开关仍为 false
+PASS | REVIEW 应用受限账号创建
+PASS | REVIEW 快照账号仅授 SELECT/INSERT
+PASS | REVIEW 受限账号快照 DELETE 被权限拒绝(1142)
+PASS | v0.5 重复执行成功（幂等）
+PASS | 重跑后锁行仍 45
+PASS | 重跑后配置仍 15
+PASS=59 FAIL=4  报告: /var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-third-review-86h02v83/verify-schema-v05-output.txt

@@ -225,6 +225,39 @@ def main():
               q(ai + "('S3','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
               q("UPDATE ai_suggestion SET review_mode='AUTO' WHERE suggestion_no='S3'", db).returncode != 0)
 
+        # ---- Codex 三轮复核：跨站同号 + AI 终态白名单（正向期望正确行为）----
+        # 1) sal_order_item 唯一键锚点 sal_order_id：跨站同 order_no/同行号可各自存在
+        check("G1a: 跨站同号订单同行号可分别插入(sal_order_id 不同)",
+              q(item + "(9001,'XORDER','LINE-X',1,1,0,0,10)", db).returncode == 0 and
+              q(item + "(9002,'XORDER','LINE-X',1,1,0,0,10)", db).returncode == 0)
+        check("G1b: 同订单重复行号仍被拦截",
+              q(item + "(9001,'XORDER','LINE-X',1,1,0,0,10)", db).returncode != 0)
+        # 2) sal_return 加 site_code：跨站同 order_no/同源号可区分；同站同源被拦
+        ret = ("INSERT INTO sal_return(return_no,biz_return_key,source_return_no,order_no,site_code,sku_id,qty) VALUES ")
+        check("G2a: 跨站同号订单相同退货来源号可分别插入(site 不同)",
+              q(ret + "('GRET-A','GBR-A','GSRC','XORDER','AE',1,1)", db).returncode == 0 and
+              q(ret + "('GRET-B','GBR-B','GSRC','XORDER','SA',1,1)", db).returncode == 0)
+        check("G2b: 同站同号同源退货被拦截",
+              q(ret + "('GRET-C','GBR-C','GSRC','XORDER','AE',1,1)", db).returncode != 0)
+        # 3) AI 状态转移白名单：REJECTED/CONVERTED 为终态，不得改判；非法跳转拦截
+        check("G3a: PENDING→REJECTED 带审核信息被允许",
+              q(ai + "('G-R1','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='REJECTED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='G-R1'", db).returncode == 0)
+        check("G3b: REJECTED→APPROVED 改判被拦截",
+              q("UPDATE ai_suggestion SET status='APPROVED' WHERE suggestion_no='G-R1'", db).returncode != 0)
+        check("G3c: REJECTED→CONVERTED 改判被拦截",
+              q("UPDATE ai_suggestion SET status='CONVERTED',review_note='x' WHERE suggestion_no='G-R1'", db).returncode != 0)
+        check("G3d: PENDING→CONVERTED 跳过 APPROVED 被拦截",
+              q(ai + "('G-R2','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='CONVERTED',reviewed_by=1,reviewed_at=NOW(),review_note='x' WHERE suggestion_no='G-R2'", db).returncode != 0)
+        check("G3e: APPROVED→PENDING 回退被拦截",
+              q(ai + "('G-R3','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='G-R3'", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='PENDING' WHERE suggestion_no='G-R3'", db).returncode != 0)
+        check("G3f: CONVERTED→APPROVED 终态改判被拦截",
+              q("UPDATE ai_suggestion SET status='CONVERTED',review_note='ok' WHERE suggestion_no='S2'", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED' WHERE suggestion_no='S2'", db).returncode != 0)
+
         # 幂等重跑
         r4 = feed(SCHEMA, db)
         check("v0.5 重复执行成功（幂等）", r4.returncode == 0, r4.stderr[-300:])

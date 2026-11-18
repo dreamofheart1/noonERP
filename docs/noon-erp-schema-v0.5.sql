@@ -622,7 +622,7 @@ CREATE TABLE IF NOT EXISTS sal_order (
 CREATE TABLE IF NOT EXISTS sal_order_item (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
   sal_order_id    BIGINT       NOT NULL,
-  order_no        VARCHAR(64)  NOT NULL,
+  order_no        VARCHAR(64)  NOT NULL COMMENT '平台订单号（冗余展示）；跨站可同号，站点身份以 sal_order_id 为准',
   platform_item_no VARCHAR(64) COMMENT 'C-4：平台订单行 ID，部分妥投/退货粒度锚点',
   sku_id          BIGINT       NOT NULL,
   qty             INT          NOT NULL COMMENT '订单行数量',
@@ -634,12 +634,14 @@ CREATE TABLE IF NOT EXISTS sal_order_item (
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_order (sal_order_id),
   KEY idx_sku (sku_id),
-  -- ★ Codex REPRO 反例修正 + 作用域厘清（二轮）：平台行 ID 在同一订单内唯一，防重复导入
-  --   COGS 双计；但不同订单复用同一 platform_item_no 是合法样本（如手工编号/AE与SA各自
-  --   序号），故作用域取 (order_no, platform_item_no)，不用全表唯一。
-  --   可空：手工单无平台行号时多 NULL 不冲突。若后续平台样本证实该值跨站全局唯一，
-  --   可再收紧；未证实前保守取订单粒度。
-  UNIQUE KEY uk_platform_item (order_no, platform_item_no),
+  -- ★ Codex 三轮复核修正（P1 跨站同号）：唯一键锚点从平台 order_no 改为内部 sal_order_id。
+  --   sal_order 以 (order_no,site_code) 唯一，AE/SA 可各有同号订单；平台行号作用域未经
+  --   样本证实，若按 order_no 去重会误拒跨站同号。sal_order_id 是内部可信订单身份（自增
+  --   主键），天然区分站点与该订单实例：同一订单内重复行号拦截、跨站同号订单行号可各自
+  --   存在。关联一致性（sal_order_id 必须指向本单真实存在的父订单、不得跨站伪造关联）
+  --   由应用层在事务内按 requireSite + 父订单归属校验，DDL 不虚构平台号全局唯一。
+  --   可空：手工单无平台行号时多 NULL 不冲突；待平台样本证实行号作用域后再评估收紧。
+  UNIQUE KEY uk_platform_item (sal_order_id, platform_item_no),
   -- ★ Codex REPRO 反例修正：退货是已妥投量的子集（妥投10退货2合法，净在手8），
   --   不是与妥投并列的独立占用，不能与 qty_delivered 相加后再与 qty 比较。
   --   约束语义：妥投与取消共同占用订单量（支持部分取消+部分妥投，如妥投8取消2）；
@@ -659,7 +661,8 @@ CREATE TABLE IF NOT EXISTS sal_return (
   return_no       VARCHAR(64)  NOT NULL,
   biz_return_key  VARCHAR(160) NOT NULL COMMENT '★ P2-2：非空业务幂等键，应用按确定规则生成',
   source_return_no VARCHAR(128) DEFAULT NULL COMMENT '平台退货单号；可空，多 NULL 不冲突',
-  order_no        VARCHAR(64)  NOT NULL,
+  order_no        VARCHAR(64)  NOT NULL COMMENT '平台订单号（冗余展示）；跨站可同号',
+  site_code       VARCHAR(16)  DEFAULT NULL COMMENT '★三轮修正：站点身份，与父订单一致；可空兼容历史导入，跨站同号隔离锚点',
   sku_id          BIGINT       NOT NULL,
   qty             INT          NOT NULL,
   grade           VARCHAR(8)   COMMENT 'A / B / C，关联 Seller Protection Fund 补偿',
@@ -682,10 +685,12 @@ CREATE TABLE IF NOT EXISTS sal_return (
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_return_no (return_no),
   UNIQUE KEY uk_return_biz (biz_return_key),
-  -- ★ 二轮厘清：平台退货单号作用域未获样本证实，不采用全表唯一；与平台行号同口径
-  --   取 (order_no, source_return_no)，可空多 NULL 不冲突。真实幂等以 biz_return_key
-  --   （应用按订单+行+事件生成）为准；待平台样本证实全局唯一后再收紧。
-  UNIQUE KEY uk_return_source (order_no, source_return_no),
+  -- ★ 三轮复核修正（P1 跨站同号）：sal_return 原无 site_code，按 (order_no,source_return_no)
+  --   去重会误拒 AE/SA 同号订单的相同平台退货来源号。新增可空 site_code，唯一键取
+  --   (site_code, order_no, source_return_no)：同站同号同源拦截、跨站同号可区分。
+  --   site_code 可空兼容历史导入（多 NULL 不冲突）；真实幂等仍以 biz_return_key 为准，
+  --   站点归属一致性由应用层按 requireSite + 父订单校验。待平台样本证实来源号作用域再收紧。
+  UNIQUE KEY uk_return_source (site_code, order_no, source_return_no),
   KEY idx_order (order_no),
   KEY idx_appeal (appeal_deadline),
   CONSTRAINT chk_return_qty CHECK (qty > 0),
@@ -1032,15 +1037,27 @@ DROP TRIGGER IF EXISTS trg_ai_suggestion_update_gate$$
 CREATE TRIGGER trg_ai_suggestion_update_gate BEFORE UPDATE ON ai_suggestion
 FOR EACH ROW
 BEGIN
-  -- ★ 二轮修正（Codex 第5点）：INSERT 闸门之下仍可直接 UPDATE 转正。
-  --   DDL 层把状态转移规则固化；服务端仍须做主体/站点鉴权与审计，二者叠加。
-  -- 1) 进入已审批态（APPROVED/CONVERTED/REJECTED）必须有审核主体与时间；
-  IF NEW.status IN ('APPROVED','CONVERTED','REJECTED')
-     AND OLD.status = 'PENDING'
-     AND (NEW.reviewed_by IS NULL OR NEW.reviewed_at IS NULL) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '审批态变更必须填写 reviewed_by 与 reviewed_at（UTC+8）';
+  -- ★ 三轮修正（Codex 第2点）：二轮仅禁终态回 PENDING，REJECTED 仍可改判 APPROVED/
+  --   CONVERTED。改为显式状态转移白名单，DDL 固化合法流转，服务端再做主体/站点鉴权与审计。
+  -- 合法转移：PENDING→APPROVED / PENDING→REJECTED / APPROVED→CONVERTED，
+  --   以及保持原态（同状态 UPDATE 仅补充审核字段/说明）。
+  -- 终态：REJECTED、CONVERTED 不得转出到任何其它状态；APPROVED 不得回退 PENDING。
+  IF NEW.status <> OLD.status THEN
+    IF NOT ((OLD.status = 'PENDING'   AND NEW.status IN ('APPROVED','REJECTED'))
+         OR (OLD.status = 'APPROVED'  AND NEW.status = 'CONVERTED')) THEN
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT =
+        '非法状态转移：仅允许 PENDING→APPROVED/REJECTED、APPROVED→CONVERTED；终态不可改判';
+    END IF;
   END IF;
-  -- 2) 置 AUTO 必须命中具体规则 auto_rule_ref；规则缺失应转人工，不得静默 AUTO；
+  -- 1) 任何进入已审批态（含 REJECTED→改判被上面拦下）都必须有审核主体与时间，
+  --    不再只约束 OLD=PENDING，防止缺审核信息直接写终态。
+  IF NEW.status IN ('APPROVED','CONVERTED','REJECTED')
+     AND (NEW.reviewed_by IS NULL OR NEW.reviewed_at IS NULL) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '审批态必须填写 reviewed_by 与 reviewed_at（UTC+8）';
+  END IF;
+  -- 2) 置 AUTO 必须给出 auto_rule_ref 证据；规则是否真实命中 noon_rule_config 的
+  --    ai_auto_review_rules 且 ai_auto_review_enabled=true 由服务端审批接口校验
+  --    （触发器无法查配置表，不在此虚构规则命中判断）。
   IF NEW.review_mode = 'AUTO' AND NEW.auto_rule_ref IS NULL THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'review_mode=AUTO 必须提供 auto_rule_ref；无规则应走 MANUAL';
   END IF;
@@ -1048,10 +1065,6 @@ BEGIN
   IF NEW.status = 'CONVERTED' AND OLD.status <> 'CONVERTED'
      AND NEW.auto_rule_ref IS NULL AND NEW.review_note IS NULL THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED 必须有 auto_rule_ref 或 review_note 作为审批依据';
-  END IF;
-  -- 4) 已转正/驳回为终态，禁止回退到 PENDING（防绕过审批重做）；
-  IF OLD.status IN ('CONVERTED','REJECTED') AND NEW.status = 'PENDING' THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'CONVERTED/REJECTED 为终态，禁止回退 PENDING';
   END IF;
 END$$
 DELIMITER ;

@@ -882,3 +882,27 @@ Codex 以 `scripts/reproduce-schema-v05-review.py`（未跟踪）提交 7 条反
 - 全模块 `mvn package` BUILD SUCCESS，默认 **29 tests / 0 failures / 0 errors / 0 skipped**（MySQL IT 显式启用）；日志 `/tmp/noon-config-repo-package.log`。`git diff --check` 与 Python 语法检查通过。查询当前读取该键该范围全部历史，后续应评估分页/数据量及时间精度，但不得用当前状态排除历史。
 
 **未完成**：参数管理 API、持久写入及首次锁行竞争、撤销/审计回滚、业务同事务持久化快照及真实重算；AI 审批转正服务与主体权限；FIFO/退货过账与累计守恒、跨站业务入口，以及真实平台字段/事件样本和生产迁移。生成器没有用于上述受保护写路径；不生成通用 CRUD 绕过业务规则。请 WorkBuddy 独立审核只读 SQL/站点边界及本节跨站唯一键和 AI 状态修订建议。
+
+## WorkBuddy 独立复核 Codex 三轮修复 + 只读 Repository + schema 四轮加固（2026-11-18，执行者：WorkBuddy）
+
+先独立复核 Codex 提交 `4a5acba`（三轮审查脚本 + 真实参数历史只读 Repository）：
+
+- `scripts/reproduce-schema-v05-third-review.py` 独立复跑：`PASS=63 FAIL=0`，与其报告一致；`OBSERVED` 的 PASS 表示复现风险，不代表设计通过。
+- 只读 Repository（`MyBatisRuleConfigRepository` + `RuleConfigHistoryMapper.xml`）：SQL 参数化、`scope IN (site,'GLOBAL')` 只取真实站点与全局、`useCache=false`、全历史不按当前 status/revoked_at 过滤；站点守卫前置在 `VersionedConfigReader`，是内部组件未开 Controller/写接口——**边界正确，审核通过**。
+- 独立复跑 `--config-history` 运行时验证：**17 项 MySQL 原生测试 + 20 项运行断言全绿**，退出 0；默认 Maven `test` 29 个单元测试 0 失败（IT 为历史报告、默认不跑）。确认只读历史读取与撤销前解析在真实 MyBatis + MySQL 下成立；但只读不等于写入/并发闭环，该边界与 Codex 自述一致。
+
+**采纳两个 P1 并修复 schema v0.5**（此前拒绝把累计红冲、权限配置误判为 DDL 缺陷，维持 Codex 的应用层职责划分）：
+
+| Codex P1 | 判定 | 修复 |
+|---|---|---|
+| 跨站同订单号的子表唯一键冲突 | **认同，真缺陷**。主表 `(order_no,site_code)` 允许 AE/SA 同号，子表只按 order_no 去重会误拒 | `uk_platform_item` 锚点改内部可信 `sal_order_id`：`(sal_order_id, platform_item_no)`；`sal_return` 新增可空 `site_code`，`uk_return_source(site_code, order_no, source_return_no)`。同站同号同源拦截、跨站同号可区分。平台号作用域未证实不虚构全局唯一；站点归属一致性交应用层 requireSite+父订单校验 |
+| AI 终态检查不完整 | **认同，真缺陷**。REJECTED→APPROVED/CONVERTED 可改判；auto_rule_ref 任意非空即可 AUTO/CONVERTED | `trg_ai_suggestion_update_gate` 改显式状态转移白名单：仅 PENDING→APPROVED/REJECTED、APPROVED→CONVERTED 及同态补审核字段合法；REJECTED/CONVERTED 终态不可改判；进入审批态必须 reviewed_by+reviewed_at；CONVERTED 须 auto_rule_ref/review_note；AUTO 须 auto_rule_ref。规则是否真实命中 ai_auto_review_rules 交服务端（触发器不查配置表） |
+
+**验证**：
+- `verify-schema-v05.py` → **55/55 PASS**（45 基线 + 10 项三轮正向断言 G1a-b/G2a-b/G3a-f，期望正确行为而非复现缺陷）；幂等重跑通过。报告 `docs/verification/schema-v05/verify-schema-v05-output.txt`。
+- `reproduce-schema-v05-third-review.py` 回跑 → **PASS=59 FAIL=4**：四条 OBSERVED 风险（跨站同号平台行、跨站退货来源号、驳回终态改判、规则缺失直接转正）全部翻转为 FAIL=不再复现。证据 `docs/verification/schema-v05/third-review-after-fix-output.txt`。
+- 余下 `OBSERVED DDL允许累计红冲4>3` 仍 PASS 是应用层行锁职责，非 DDL 缺陷；受限账号快照 DELETE 被权限拒绝只证明该测试账号权限，不代表真实运维权限已配置——两项保留为应用层待办，不虚构完成。
+
+**改动文件**：`docs/noon-erp-schema-v0.5.sql`（2 唯一键 + 1 字段 + AI 触发器白名单）、`...er.md`、`...delivery.md`（新增 §2.3.3）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/third-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**`、v0.4/PRD/原型。按约定本轮改动一并提交。
+
+**请 Codex 继续**：基于修订后的 schema 承接正式写入 Repository、首次锁行并发、撤销/审计回滚、AI 审批转正服务与主体权限、累计退货守恒行锁事务、跨站业务入口与真实平台样本验证。DDL 只提供可验证不变量，不替代服务端。

@@ -63,6 +63,18 @@ Codex 提交 `scripts/reproduce-schema-v05-followup.py`（42 项，独立键避�
 
 **辨析**：followup 的 `REPRO 第二次部分妥投/退货被拒` 两条在修复后仍显示 PASS，因其脚本构造用了**同一 biz_event_key**（模拟"同事件重传"，按新契约本就该拒）。真正的多次部分动作应生成不同事件 key，已由本脚本 F1b/F2b 正向断言证明可行。回跑证据 `docs/verification/schema-v05/followup-after-fix-output.txt`（PASS=39 FAIL=3：快照删除、AI 越权转正、平台行跨订单复用三条风险已翻转为 FAIL=不再复现）。
 
+### 2.3.3 Codex 三轮复核后的 2 类补修（2026-11-18 四轮）
+Codex 提交 `scripts/reproduce-schema-v05-third-review.py`（63 项：WorkBuddy 45 基线 + 18 项独立观察），独立复跑 63/63 一致。它同时交付真实参数历史只读 Repository（`MyBatisRuleConfigRepository` + `RuleConfigHistoryMapper.xml`，全历史不按当前状态过滤、`useCache=false`、站点守卫前置）——本轮独立复核通过（`--config-history` 17 项 MySQL 原生测试 + 20 项运行断言全绿），但只读组件不等于写入/并发闭环。需要 WorkBuddy 修订的两类 P1：
+
+| 风险 | 修复 |
+|---|---|
+| 跨站同订单号的子表唯一键冲突：`sal_order` 以 `(order_no,site_code)` 唯一允许 AE/SA 同号，但 `sal_order_item.uk_platform_item(order_no,...)`、`sal_return.uk_return_source(order_no,...)` 只按平台订单号去重，误拒跨站同号 | 锚点改为可信内部身份：`uk_platform_item(sal_order_id, platform_item_no)`（自增主键天然区分站点与订单实例）；`sal_return` 新增可空 `site_code`，`uk_return_source(site_code, order_no, source_return_no)`。同站同号同源/同行拦截、跨站同号可区分。平台号真实作用域未证实，不虚构全局唯一；站点归属一致性由应用层 `requireSite` + 父订单校验 |
+| AI 终态检查不完整：`REJECTED→APPROVED/CONVERTED` 可改判，`auto_rule_ref` 任意非空即可 AUTO/CONVERTED | `trg_ai_suggestion_update_gate` 改为显式状态转移白名单：仅 `PENDING→APPROVED/REJECTED`、`APPROVED→CONVERTED` 及同态补充审核字段合法；`REJECTED`/`CONVERTED` 终态不可改判，进入审批态必须 reviewed_by+reviewed_at，CONVERTED 须审批依据。`review_mode=AUTO` 须 auto_rule_ref；规则是否真实命中 `ai_auto_review_rules` 由服务端校验（触发器不查配置表，不虚构规则命中）。完整审批服务/主体权限仍未实现 |
+
+**未采纳为 DDL 缺陷**：累计退货红冲 4 > 原消耗 3 仍被 DDL 允许——Codex 认同这是应用层行锁 `SUM` 事务职责，DDL 只管单次事件幂等；普通账号快照删除被权限拒绝（1142）验证了测试账号权限，不代表真实应用/运维高权限已配置，这两项保留为应用层待办。
+
+**验证**：`python3 scripts/verify-schema-v05.py ...` → **55/55 PASS**（45 基线 + 10 项三轮正向断言 G1a-b/G2a-b/G3a-f）；`reproduce-schema-v05-third-review.py` 回跑 → PASS=59 FAIL=4，四条 OBSERVED 风险全部翻转为 FAIL：跨站同号平台行、跨站退货来源号、驳回终态改判、规则引用缺失直接转正。`docs/verification/schema-v05/verify-schema-v05-output.txt`。
+
 ### 2.4 决议固化
 - **时区**：所有业务时刻 UTC+8；`sal_order`/`sal_return`/`fin_statement` 加 `*_raw_text`/`*_raw_tz` 保留平台原始截止瞬间（对应 Codex `BusinessTimestamp` 契约）。
 - **AI 写入治理**：`ai_suggestion` 为唯一 AI 可写暂存层（不进正式表），`status=PENDING/APPROVED/REJECTED/CONVERTED`，`review_mode=MANUAL/AUTO`（默认人工），`ai_auto_review_enabled=false`、`ai_auto_review_rules=[]` 落参数表，审批通过才转正式单据。
@@ -77,10 +89,11 @@ python3 scripts/verify-schema-v05.py \
 ```
 
 实测环境：MySQL 8.4.7（隔离一次性实例，端口随机，结束自动关闭，不碰生产）。
-结果：**45/45 PASS**（22 项原有 + 9 项一轮反例修复 + 14 项二轮 followup 修复断言：多次部分妥投/退货事件同批次允许、同事件重传拦截、平台行跨订单复用/同订单重复拦截、快照 DELETE 拦截、AI 审批态转移五条；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
+结果：**55/55 PASS**（22 项原有 + 9 项一轮反例修复 + 14 项二轮 followup 修复 + 10 项三轮修复断言：跨站同号订单行/退货来源号可区分、同站重复拦截、AI 状态转移白名单 G3a-f；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
 报告：`docs/verification/schema-v05/verify-schema-v05-output.txt`。
 反例回跑：`python3 scripts/reproduce-schema-v05-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → 7 条 REPRO 全部无法再复现（PASS=22 FAIL=7）；证据 `docs/verification/schema-v05/reproduce-review-after-fix-output.txt`。
 followup 回跑：`python3 scripts/reproduce-schema-v05-followup.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=39 FAIL=3（快照删除/AI 越权转正/平台行跨订单复用三条不再复现；另两条同 key 场景见 §2.3.2 辨析）；证据 `docs/verification/schema-v05/followup-after-fix-output.txt`。
+三轮回跑：`python3 scripts/reproduce-schema-v05-third-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=59 FAIL=4（跨站同号平台行/退货来源号、驳回终态改判、规则缺失直接转正四条 OBSERVED 全部不再复现）；证据见本报告同目录 `third-review-after-fix` 说明。
 
 一致性核对：45 表 + 5 视图全部在 ER 文档映射中出现，`ER_SQL_CONSISTENCY_OK`。
 
