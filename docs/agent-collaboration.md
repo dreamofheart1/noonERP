@@ -754,3 +754,39 @@ WorkBuddy 审核历史读取通过，正式 schema v0.5 尚不存在。Codex 在
 **保留为接入期验证项（非零缺陷）**：正式 Repository 从数据库行构造 `Version` 时必须走该构造器；管理 API、JSON 反序列化等所有外部输入路径均须证明不可绕过；数据库层独立保护（如 `effective_to > effective_from` 检查约束）在 schema v0.5 设计时仍需考虑，因为 `ConfigIntervalPolicy` 只在同键同范围写锁后调用，不替代存储层约束。测试侧建议由 Codex 补一条 `to < from` 的构造器断言（现仅覆盖相等），属加强项非阻塞。
 
 本轮无代码改动，未重复跑测试，测试基线仍为上一轮 `29 tests / 0/0/0`。提交时一并带上 Codex 本条未提交段落，已按协作约定告知。正式 schema v0.5 尚未落盘，WorkBuddy 落盘后会在本记录回写。
+
+## 用户 → WorkBuddy：完成新版数据库设计（2026-11-18）
+
+用户希望你继续完成本系统新版数据库设计，包含表结构、字段、约束、索引、表间关系和可读的 ER 图，并把结果写回本记录供 Codex 对接审查。请在已有 v0.4、原始需求、若依基础系统和双方已确认决议的基础上制定 v0.5，保留历史版本，不覆盖现有成果；具体范围应覆盖整个系统设计，同时优先完成阻塞当前对接的版本化参数表与锁行、历史撤销和可信快照契约。
+
+请特别处理若依用户/角色/参数表冲突、站点授权、参数站点优先与全局回退、撤销前历史查询、并发首次写锁、业务数据与配置快照的事务边界、库存/FIFO 和订单幂等；遵循用户确认的超管全站点、AI 隔离写入及审核、中国时区并保留平台原始截止瞬间。根据此前审查结果核查约束和汇率缺失，不把未经确认的平台字段当事实。ER 图与 SQL 应一致；如果尚有业务规则或表未定，请标明待定而非虚构完成。
+
+在隔离环境验证 MySQL DDL 或明确说明未实测；给出可复现命令、验证结果及未解决问题，不触碰生产数据库、不部署。之前空区间判断已撤回，上游构造器有校验，数据库与外部输入路径仍需独立保护。完成后列出交付文件、关键变更、测试及需要 Codex 处理的对接事项。
+
+## WorkBuddy 完成：新版数据库设计 schema v0.5（2026-11-18，执行者：WorkBuddy）
+
+按用户「完成新版数据库设计」指令，基于 v0.4（45 表 + 4 视图，保留未覆盖）、需求 v0.2、PRD v1.0.3、若依基础 SQL、审查报告与双方全部决议，产出 v0.5。执行者 WorkBuddy，审查方 Codex。
+
+**交付文件**
+- `docs/noon-erp-schema-v0.5.sql`：45 表 + 5 视图 + 初始化；隔离 MySQL 8.4.7 共存库实测 72 表（若依 23 + WP1 2 + v0.5 45）。
+- `docs/noon-erp-schema-v0.5-er.md`：Mermaid ER 图（5 组关系）+ 45 表/5 视图完整映射；与 DDL 一致性核对 `ER_SQL_CONSISTENCY_OK`。
+- `docs/noon-erp-schema-v0.5-delivery.md`：交付说明（关键变更、验证、需 Codex 对接项、边界）。
+- `scripts/verify-schema-v05.py` + `docs/verification/schema-v05/verify-schema-v05-output.txt`：可复现验证脚本与报告。
+
+**关键变更（对接阻塞项优先）**
+1. 若依冲突（P1-3）：v0.5 不建 sys_user/sys_role/sys_user_role/sys_config；`sys_config`→`noon_rule_config`、`sys_audit_log`→`noon_audit_log`；站点授权沿用 WP1 的 sys_user_site，超管 userId=1 全站点、空授权拒绝由框架侧负责。三方 DDL 顺序执行无冲突（实测）。
+2. 版本化参数契约：新增 `noon_rule_config`（append-only、scope=GLOBAL|AE|SA、revoked_at 撤销生效、status 仅展示）、`noon_rule_config_lock`（(config_key,scope) 持久锁行，15 键×3=45 行，解决首次写空锁）、`noon_rule_config_audit`（写/撤销审计同事务）、`noon_config_snapshot`（可信快照，version_id+value_snapshot+resolved_scope+business_time+resolved_at+snapshot_source；重算只读快照）。历史解析按业务时刻 `[from,to)` 且 `<revoked_at`，不用当前 status/revoked_at IS NULL 无条件过滤；与 Codex 的 VersionedConfigReader/ConfigIntervalPolicy 契约对齐。7 张业务表加 `config_snapshot_batch_no`。
+3. 审查项修复：P0-1 消耗流水非空 `biz_event_key` 唯一键（重复妥投被拦截）；P1-1 外币 fx_rate 去 DEFAULT 1；P1-2 利润视图拆 v_ai_profit_site/v_ai_profit_sku 并补 sku_allocation_enabled；P1-4 ON DUPLICATE KEY 行别名语法；P2-1 20+ CHECK；P2-2 退货 biz_return_key 唯一键；P2-5 is_usable 生成列。
+4. 决议固化：所有业务时刻 UTC+8 且 sal_order/sal_return/fin_statement 加 `*_raw_text`/`*_raw_tz` 保留平台原始截止瞬间；AI 只写 ai_suggestion 暂存层（PENDING 不进正式数据），review_mode 默认 MANUAL、ai_auto_review_enabled=false/ai_auto_review_rules=[]；利润维度A/B 独立落地于 fin_profit_snapshot 唯一键。
+
+**验证**：`python3 scripts/verify-schema-v05.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → **22/22 PASS**（一次性 MySQL 8.4.7 实例，结束销毁，不碰生产、不部署）。覆盖三方共存、45 表 5 视图、初始化行数、P0-1 幂等拦截、CHECK 拦截、生成列派生、视图拆分、重复执行幂等。
+
+**请 Codex 对接审查（不越界改你的框架代码）**
+- 核对 noon_rule_config 字段/时间语义与 VersionedConfigReader.Row/Snapshot、ConfigIntervalPolicy 是否逐项对齐；实现正式 Repository（findHistory 不按当前状态过滤、锁行 FOR UPDATE、审计同事务）。
+- 实现参数管理 API、AI 自动审核规则配置与审核转正接口、业务落快照的事务时机（WP2）。
+- 隔离 MySQL 并发测试：首次写入竞争、锁等待、回滚释放（schema 已备锁行表）。
+- 站点授权读取 sys_user_site + userId=1 超管，接入 SiteAuthGuard。
+
+**待定（未虚构完成）**：正式 Repository/管理 API/并发测试、追溯性更正与双时态、生产迁移脚本（旧 sys_config→noon_rule_config）、真实平台数据验证、PRD C-5 案例数字与 AI 闸门章节同步（文档层另开工包）。
+
+工作区含上述新文件；未改 v0.4、PRD、原型、`yx-erp/**`。按约定本条连同 v0.5 交付物一并提交。
