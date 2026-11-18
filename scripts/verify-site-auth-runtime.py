@@ -137,6 +137,8 @@ def main():
             command += ["-Dmaven.repo.local=" + str(args.maven_repo)]
         command += ["-Dtest=MySqlSiteAuthorizationIT", "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
         # 原生套件：继承 14 项 + RR/确定性锁等待 2 项，各用独立数据库。
+        report = ROOT / "yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site.MySqlSiteAuthorizationIT.xml"
+        report.unlink(missing_ok=True)  # 不允许复用上一次成功报告
         with (work / "mysql-maven.log").open("w") as log:
             result = subprocess.run(command, cwd=ROOT / "yx-erp", env=runtime_env, stdout=log, stderr=subprocess.STDOUT)
         report = ROOT / "yx-erp/yxerp-framework/target/surefire-reports/TEST-com.yx.framework.security.site.MySqlSiteAuthorizationIT.xml"
