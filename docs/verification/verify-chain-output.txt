@@ -1,0 +1,26 @@
+=== 语法/加载 ===
+script blocks: 1 | core chars: 93039 | OK
+
+=== 1. 八步演示链（预期 vs 实际）===
+ step1 po     | CN01 可用0/在途0 | AE-FBN 可用0/不可售0 | PO未收100 | 
+ step2 in     | CN01 可用40/在途0 | AE-FBN 可用0/不可售0 | PO未收60 | BAT-001=40/OPEN
+ step3 ship   | CN01 可用0/在途40 | AE-FBN 可用0/不可售0 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=40/IN_TRANSIT
+ step4 recv   | CN01 可用0/在途0 | AE-FBN 可用38/不可售0 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=0/CLOSED, BAT-001-03=38/OPEN
+ step5 sale   | CN01 可用0/在途0 | AE-FBN 可用28/不可售0 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=0/CLOSED, BAT-001-03=28/OPEN
+ step6 ret    | CN01 可用0/在途0 | AE-FBN 可用28/不可售2 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=0/CLOSED, BAT-001-03=28/OPEN
+ step7 stmt   | CN01 可用0/在途0 | AE-FBN 可用28/不可售2 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=0/CLOSED, BAT-001-03=28/OPEN
+ step8 profit | CN01 可用0/在途0 | AE-FBN 可用28/不可售2 | PO未收60 | BAT-001=0/OPEN, BAT-001-02=0/CLOSED, BAT-001-03=28/OPEN
+
+=== 2. 三档利润（演示链实算，赔偿单次）===
+ 演示订单 L1 = {"revenue":120,"platformFee":76.5,"cogs":100,"comp":6,"l1":-56.5}
+ 三档批次:
+   NONE    src=DEMO_CHAIN l1=-56.5 pool=0 net=-56.5 skuAlloc=false
+   PARTIAL src=DEMO_CHAIN l1=-56.5 pool=0 net=-56.5 skuAlloc=false
+   FULL    src=DEMO_CHAIN l1=-56.5 pool=77.16 net=-133.66 skuAlloc=false
+ 勾选 FREIGHT+AD_SPEND: 演示池=52.160000000000004 静态池=5216
+
+=== 3. 两维度独立（站点费用口径 vs SKU分摊开关）===
+ 维度A=FULL, 维度B=开 → 二者独立，互不自动改变 ✓
+
+=== 汇总: 24/24 通过 ===
+全部通过 ✓

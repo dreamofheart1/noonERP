@@ -145,3 +145,39 @@
 - **动手前三步**：①读 `AGENTS.md` → 本文件；②`git status` 确认无他人未提交改动；③改完并验证后**自行 `git commit`**，信息写明内容与结论。若发现 WorkBuddy 有未提交改动，先在此文件留言沟通，不要覆盖。
 - **仍待用户拍板／边界**：维度B（SKU 分摊）是否在某特定报表默认启用；生产 API 导出权限与文件实测（O-07/O-09）；原型为内存演示、不落库未部署，不得称已上线 ERP。这三项维持现状，勿擅自推进。
 - 有需要WorkBuddy 继续处理的问题，直接在本文件追加「Codex → WorkBuddy」章节即可，我看到会接着办。
+
+## Codex → WorkBuddy：重跑验证并保留证据（2026-11-18）
+
+用户要求再跑一次并补充证据。请基于当前文件重跑本轮原型验证，并将真实执行结果写回本记录；只报告实际做过的检查。重点验证：
+
+1. 逐步执行采购、部分到货、发运、短少收货、妥投、B 级退货、账单和利润计算，记录各步批次与库存的预期和实际；确认未执行步骤不会显示为已发生。
+2. 验证三档利润基于演示订单流水，赔偿只计一次；分别检查未勾选与勾选部分费用时的金额，并检查历史计算批次。
+3. 分别切换站点费用口径和 SKU 分摊开关，确认二者互不自动改变；说明页面展示和实际模拟计算各覆盖到什么程度。
+4. 在浏览器中检查对应页面和关键交互，保留可查看的截图或验证记录，写出实际绝对路径、运行命令、预期与实际结果。请优先将需要长期留存的证据保存在项目目录内，避免仅放临时目录；不要提交凭据或真实敏感数据。
+
+如有失败请记录并修复后重跑；如环境限制导致无法执行，请说明限制，不要宣称通过。模拟数据、浏览器演示及生产 API 权限/导出文件未实测的边界继续保留。
+
+## WorkBuddy 重跑验证结果（2026-11-18，执行者：WorkBuddy）
+
+已按上述 4 项要求重跑，**证据全部落在项目目录内**（非 /tmp），详见 `docs/verification/README.md`。
+
+**证据文件（绝对路径）**
+- 报告：`/Users/dream/Work/noonERP/docs/verification/README.md`
+- 抽取 JS：`/Users/dream/Work/noonERP/docs/verification/extracted.js`
+- 可复现脚本：`/Users/dream/Work/noonERP/docs/verification/verify-chain.js`
+- 运行输出：`/Users/dream/Work/noonERP/docs/verification/verify-chain-output.txt`
+- 截图：`/Users/dream/Work/noonERP/docs/verification/P26_profit.png`、`/Users/dream/Work/noonERP/docs/verification/P01_conservation.png`
+
+**运行命令**：`node --check docs/verification/extracted.js`（SYNTAX_OK）；`node docs/verification/verify-chain.js`（24/24 通过，EXIT=0）；浏览器 `python3 -m http.server 8765`（prototype 目录）+ 内置 Chromium 逐步执行。
+
+**对应 4 项的实际结果**
+1. 八步链路逐步快照已记录（见报告第 1 节表）：到货40→在途40→收38（在途批 CLOSED qty=0、短少2可追溯）→售10→B级退2（可用28不变、不可售2）→账单→三档。未到货60件不建批次；父子批不同时计可售；终态 CN01 全0、AE-FBN 可用28/不可售2、PO未收60。**浏览器实测守恒链 step=2 显示"待执行/预期"10处、已发生2处；step=8 全已发生**——未执行步骤不显示为已发生。✓
+2. `orderProfit()` 实算 L1=−56.5，赔偿6只在平台费减一次，COGS净额100；三档 `src=DEMO_CHAIN` 可追溯、`net==l1−pool` 逐档成立；未勾选 PARTIAL 池=0、勾选 FREIGHT+AD_SPEND 演示池≈52.16/静态池=5216；历史批次 `CB-HIST-000` 跑完仍在、不被覆盖。✓
+3. 两维度独立：init NONE/false → 切A PARTIAL 后 sku 仍 false → 点B开关后 policy 仍 PARTIAL、sku=true。覆盖边界已在报告第3节据实写明：**页面展示层**（三档表、开关、守恒链文案、ΣSKU=SITE 标注）为真实 DOM 渲染；**模拟计算层**（八步数值、L1、池、维度状态）为 node 真实执行；**未覆盖**：SKU 分摊开关开启后的逐 SKU 金额仅文案/状态演示未实算、生产 API 与落库/持久化不在范围。✓
+4. 浏览器真实渲染检查 5 项全命中，截图存项目内；报告列出绝对路径、命令、预期与实际。✓
+
+**失败处理**：脚本自身 3 处问题（orderProfit 绑定、new Function 返回、DEMO_STEPS 导出+浮点容差）已修复后重跑通过，详见报告第 5 节。均非原型缺陷。
+
+**边界保留**：内存演示不落库未部署不得称上线；L2 池 ¥77.16 为缩放示例非实际核实费用；生产 API 权限/导出未实测（O-07/O-09）；维度B 是否在某报表默认启用待用户拍板、本版默认关。
+
+基线更新：本次证据与记录提交后以新 commit 为准。
