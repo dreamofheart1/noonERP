@@ -314,6 +314,26 @@ def main():
         check("J3b: 退货 order_no 与关联父行一致可插入",
               q(hins + "('J-OK','JBO','J-OS','HP-ORDER','AE',1,1,"+hrow+")", db).returncode == 0)
 
+        # K) 六轮正向断言：审批身份绑定 / 退货 UPDATE 篡改 / 审计不可篡改
+        check("K1a: 审批同条改 site_code/source_agent 被拦截",
+              q("INSERT INTO ai_suggestion(suggestion_no,scene,source_agent,site_code,payload_json,status,review_mode) VALUES ('K-AI','REPLENISH','agent','AE','{}','PENDING','MANUAL')", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),site_code='SA',source_agent='other' WHERE suggestion_no='K-AI'", db).returncode != 0)
+        check("K1b: 审批只改状态/审核字段仍允许(身份不变)",
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='K-AI'", db).returncode == 0)
+        kret = scalar("SELECT id FROM sal_return WHERE return_no='J-OK'")
+        check("K2a: 退货 UPDATE 改成错误站点被拦截",
+              q("UPDATE sal_return SET site_code='SA' WHERE id="+kret, db).returncode != 0)
+        check("K2b: 退货 UPDATE 改成错误 order_no 被拦截",
+              q("UPDATE sal_return SET order_no='OTHER-J' WHERE id="+kret, db).returncode != 0)
+        check("K2c: 退货 UPDATE 合法字段(数量)仍允许",
+              q("UPDATE sal_return SET qty=2 WHERE id="+kret, db).returncode == 0)
+        check("K3a: 审计样本可插入",
+              q("INSERT INTO noon_audit_log(log_no,action,entity_type,entity_id) VALUES ('K-AUD','APPROVE','ai_suggestion','K-AI')", db).returncode == 0)
+        check("K3b: 审计记录禁止原地 UPDATE",
+              q("UPDATE noon_audit_log SET action='CHANGED' WHERE log_no='K-AUD'", db).returncode != 0)
+        check("K3c: 审计记录禁止物理 DELETE",
+              q("DELETE FROM noon_audit_log WHERE log_no='K-AUD'", db).returncode != 0)
+
         # 幂等重跑
         r4 = feed(SCHEMA, db)
         check("v0.5 重复执行成功（幂等）", r4.returncode == 0, r4.stderr[-300:])

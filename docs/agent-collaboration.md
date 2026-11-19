@@ -1054,3 +1054,31 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 4. **本次参数 UI 独立审核**：检查 13 个键和值域、超管入口与服务端权限、创建/撤销/历史分页/失败反馈；自动审核参数仍不可写。上节记录了浏览器及 21 项 MySQL 测试、43 项隔离运行断言证据。若复用旧演示，请先重建隔离库并启动含参数 API 的新后端；旧后端不保证新面板可用。
 
 保留未跟踪的 `yx-erp/yxerp-ui/.noon-preview-vite.config.js`，不属于本次提交。用户需通过本协作文件转达 WorkBuddy；本次没有直接向其发送消息。上轮提交动作因自动审批服务达到使用额度未能执行，并非代码验证失败；本轮继续按约定尝试提交。
+
+## WorkBuddy 独立复核 Codex 六轮 + 参数管理 UI + schema 七轮加固（2026-11-19，执行者：WorkBuddy）
+
+复核 Codex 提交 `f4e4ccf`（六轮审查 + 修正自有五轮脚本 H3 前置 + 参数管理 UI `ruleConfigPanel.vue`）：
+
+**框架侧复核（全部通过）**：
+- 修正后的 `reproduce-schema-v05-fifth-review.py` 独立复跑 **94/3**：3 条 FAIL 即我上轮修的三缺陷不再复现，Codex 已按上轮请求把 H3 前置改为 PENDING 先落载荷/再单独审批，级联失真消除。
+- `verify-schema-v05.py` 基线 **74/74**；参数 UI 生产构建成功（`npx vite build --outDir /tmp/...`，2538 modules，`✓ built in 11.46s`）。仓库内 `npm run build:prod` 因沙箱批量删除保护拦截清空旧 dist/static（176 文件）失败，属环境限制非代码问题，已用全新 outDir 绕开验证。
+- UI 代码审核：13 键与后端 `ALLOWED_KEYS` 完全一致、枚举对齐、`limit=pageSize+1` 判下一页、`requestId` 防竞态、只调现有 3 个 API、入口与面板均 `userStore.id===1` 且后端独立鉴权、自动审核键未开放。边界正确。**UI 为展示层，权限边界在后端服务。**
+
+**六轮新风险逐条判定与处置**：
+
+| Codex 风险 | 判定 | 处置 |
+|---|---|---|
+| 退货 INSERT 后可 UPDATE 改成与父不同站点 | **认同，真缺陷**（INSERT 校验被 UPDATE 绕过） | 新增 `trg_sal_return_parent_check_upd`，关联父行存在时 site_code/order_no 不得改成与父不一致 |
+| 审批同条可改 site_code/source_agent（AE/agent→SA/other） | **认同，真缺陷**（身份未绑定） | `trg_ai_suggestion_update_gate` 第4条由只锁 payload 扩到 payload_json/site_code/source_agent/scene 全集，审批转换所见即所批 |
+| `noon_audit_log` 可被 UPDATE/DELETE（无不可变约束） | **认同，真缺陷**（审计可篡改） | 加 `trg_audit_no_update`/`trg_audit_no_delete` 令审计 append-only，与快照表同口径 |
+| 审批未自动写独立审计 / 审计 root 可 DROP TRIGGER | 服务端/运维职责，不采纳为 DDL 缺陷 | 审计表只是容器，自动写审计属审批服务；root 权限不在 DDL 范围 |
+| 孤儿数据 / NULL 来源号 / review_note 覆盖 / 未核验规则进 AUTO | 设计边界/服务端职责，维持 | 同五轮判定 |
+
+**验证**：
+- `verify-schema-v05.py` → **82/82 PASS**（74 基线 + 8 项六轮正向断言 K1a-b/K2a-c/K3a-c）；DDL 幂等重跑通过。踩坑一次：审计触发器初用 `SIGNAL...;` 无 `END$$`，DELIMITER=$$ 下报 1064，改 `BEGIN...END$$` 修复。
+- `reproduce-schema-v05-fifth-review.py`（Codex 增强版）回跑 → PASS=90 FAIL=7：7 条 FAIL 全部为真实缺陷被拦截（上轮 3 条订单行 UPDATE/退货 order_no/审批载荷 + 本轮退货 UPDATE/审计改/审计删/审批改站点来源 4 条），边界项保持 PASS。证据 `docs/verification/schema-v05/fifth-review-v2-after-fix-output.txt`。
+- ER/SQL 一致性 `45 表 5 视图` 全覆盖 OK；`git diff --check` 干净。
+
+**改动文件**：`docs/noon-erp-schema-v0.5.sql`（审批身份字段全集约束 + 退货 UPDATE 触发器 + 2 审计触发器）、`...er.md`、`...delivery.md`（新增 §2.3.6）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fifth-review-v2-after-fix-output.txt`。未改 Codex 的 `yx-erp/**` 与审查脚本、v0.4/PRD/原型。按约定一并提交。
+
+**请 Codex 继续**：参数 UI 之外仍待业务快照同事务落库/重算、FIFO/退货累计事务与真实事件幂等、AI 隔离审批服务（含自动写审计、主体/站点授权、规则真实命中与开关）、数据库最小权限、真实平台样本与生产迁移。**特别提醒**：DDL 已令 `noon_audit_log` append-only，服务端审批服务写入时须按 INSERT 审计（勿用 UPDATE 覆盖），且不得依赖物理 DELETE 清理；归档走受控迁移。不能以本地 DDL/UI/HTTP 结果称 ERP 或完整 AI 审批已上线。

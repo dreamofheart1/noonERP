@@ -95,6 +95,13 @@ Codex 提交 `6e6800e`：五轮审查脚本（`reproduce-schema-v05-fifth-review
 
 **验证**：`verify-schema-v05.py` → **74/74 PASS**（68 基线 + 6 项五轮正向断言 J1a-b/J2a-b/J3a-b）；H3 前置改为"PENDING 阶段先落载荷、审批只改状态"的合法两步路径。`reproduce-schema-v05-fifth-review.py` 回跑：3 条目标 OBSERVED 翻转为 FAIL=不再复现（UPDATE 篡改/退货 order_no 伪造/审批夹带载荷），6 条边界项保持 PASS（仍可观察，符合预期）；另有 7 条 FAIL 是脚本**内嵌旧基线**的前置写法（审批夹带载荷）与新约束不兼容导致的连带失败，非 DDL 缺陷——Codex 需同步其脚本前置为两步路径。证据 `docs/verification/schema-v05/fifth-review-after-fix-output.txt`。
 
+### 2.3.6 Codex 六轮复核后的 3 项补修 + 参数管理 UI（2026-11-19）
+Codex 提交 `f4e4ccf`：修正自有五轮脚本 H3 前置（独立复跑 **94/3**，3 条 FAIL 即我上轮修的三缺陷不再复现，级联失真消除）+ 参数管理 UI（若依系统参数页仅 userId=1 面板，13 键、GLOBAL/AE/SA、ID 游标分页、创建/撤销，只调现有三个 API）。框架侧复核：`verify-schema-v05.py` 基线 74/74；UI 生产构建成功（改用全新 outDir 绕开沙箱批量删除保护，2538 modules，`✓ built in 11.46s`）；13 键与后端白名单一致、枚举对齐、`limit=21` 判下一页、`requestId` 防竞态、入口与面板均 `userStore.id===1` 且后端独立鉴权。
+
+六轮新指出风险逐条判定：采纳 3 项真缺陷修 DDL——①审批同条可改 site_code/source_agent（身份未绑定）→ `trg_ai_suggestion_update_gate` 第4条由只锁 payload 扩到 payload_json/site_code/source_agent/scene 全集；②退货 INSERT 后可 UPDATE 改跨站 → 新增 `trg_sal_return_parent_check_upd`；③`noon_audit_log` 可被 UPDATE/DELETE → 加 `trg_audit_no_update`/`trg_audit_no_delete` append-only。未采纳：审批未自动写独立审计（服务端审批服务职责，审计表只是容器）、审计 root 可 DROP TRIGGER（运维权限）、孤儿/NULL 来源号/review_note/AUTO 规则（同五轮边界）。
+
+**验证**：`verify-schema-v05.py` → **82/82 PASS**（74 基线 + 8 项六轮正向断言 K1a-b/K2a-c/K3a-c）；DDL 幂等重跑通过。踩坑一次：审计触发器初用 `SIGNAL...;` 无 `END$$`，DELIMITER=$$ 下语法错 1064，改 `BEGIN...END$$` 修复。`reproduce-schema-v05-fifth-review.py`（Codex 增强版）回跑 → PASS=90 FAIL=7：7 条 FAIL 全部为真实缺陷被拦截（上轮 3 条 + 本轮退货 UPDATE/审计改/审计删/审批改站点来源 4 条），边界项保持 PASS。证据 `docs/verification/schema-v05/fifth-review-v2-after-fix-output.txt`。
+
 ### 2.4 决议固化
 - **时区**：所有业务时刻 UTC+8；`sal_order`/`sal_return`/`fin_statement` 加 `*_raw_text`/`*_raw_tz` 保留平台原始截止瞬间（对应 Codex `BusinessTimestamp` 契约）。
 - **AI 写入治理**：`ai_suggestion` 为唯一 AI 可写暂存层（不进正式表），`status=PENDING/APPROVED/REJECTED/CONVERTED`，`review_mode=MANUAL/AUTO`（默认人工），`ai_auto_review_enabled=false`、`ai_auto_review_rules=[]` 落参数表，审批通过才转正式单据。
@@ -109,13 +116,14 @@ python3 scripts/verify-schema-v05.py \
 ```
 
 实测环境：MySQL 8.4.7（隔离一次性实例，端口随机，结束自动关闭，不碰生产）。
-结果：**74/74 PASS**（22 项原有 + 9 项一轮反例修复 + 14 项二轮 followup 修复 + 10 项三轮修复断言 + 13 项四轮修复断言 H1a-b/H2a-d/H3a-e + 6 项五轮修复断言 J1a-b/J2a-b/J3a-b：审批夹带载荷、UPDATE 篡改、退货 order_no 伪造；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
+结果：**82/82 PASS**（22 项原有 + 9 项一轮反例修复 + 14 项二轮 followup 修复 + 10 项三轮修复断言 + 13 项四轮修复断言 H1a-b/H2a-d/H3a-e + 6 项五轮修复断言 J1a-b/J2a-b/J3a-b + 8 项六轮修复断言 K1a-b/K2a-c/K3a-c：审批身份绑定、退货 UPDATE 篡改、审计 append-only；另含三方共存、45 表 5 视图、初始化、CHECK、生成列、视图拆分、重复执行幂等）。
 报告：`docs/verification/schema-v05/verify-schema-v05-output.txt`。
 反例回跑：`python3 scripts/reproduce-schema-v05-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → 7 条 REPRO 全部无法再复现（PASS=22 FAIL=7）；证据 `docs/verification/schema-v05/reproduce-review-after-fix-output.txt`。
 followup 回跑：`python3 scripts/reproduce-schema-v05-followup.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=39 FAIL=3（快照删除/AI 越权转正/平台行跨订单复用三条不再复现；另两条同 key 场景见 §2.3.2 辨析）；证据 `docs/verification/schema-v05/followup-after-fix-output.txt`。
 三轮回跑：`python3 scripts/reproduce-schema-v05-third-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=59 FAIL=4（跨站同号平台行/退货来源号、驳回终态改判、规则缺失直接转正四条 OBSERVED 全部不再复现）；证据见本报告同目录 `third-review-after-fix` 说明。
 四轮回跑：`python3 scripts/reproduce-schema-v05-fourth-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=65 FAIL=7（7 条 OBSERVED 风险全部不再复现，详见 §2.3.4）；证据 `docs/verification/schema-v05/fourth-review-after-fix-output.txt`。
 五轮回跑：`python3 scripts/reproduce-schema-v05-fifth-review.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin` → PASS=76 FAIL=10（3 条目标 OBSERVED 翻转、6 条边界保持、7 条脚本内嵌旧基线前置连带失败，详见 §2.3.5）；证据 `docs/verification/schema-v05/fifth-review-after-fix-output.txt`。
+六轮回跑（Codex 已修正脚本 H3 前置）：→ PASS=90 FAIL=7（7 条 FAIL 全部为真实缺陷被拦截，边界项保持 PASS，详见 §2.3.6）；证据 `docs/verification/schema-v05/fifth-review-v2-after-fix-output.txt`。
 
 一致性核对：45 表 + 5 视图全部在 ER 文档映射中出现，`ER_SQL_CONSISTENCY_OK`。
 

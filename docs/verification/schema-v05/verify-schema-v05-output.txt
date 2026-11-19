@@ -1,7 +1,7 @@
 # v0.5 schema 隔离 MySQL 实测报告
 # MySQL: /tmp/mysql-8.4.7-macos15-arm64/bin/mysqld  Ver 8.4.7 for macos15 on arm64 (MySQL Community Server - GPL)
 # 命令: python3 scripts/verify-schema-v05.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin
-# 结果: PASS=74 FAIL=0
+# 结果: PASS=82 FAIL=0
 
 PASS | 建库
 PASS | 若依基础 SQL 执行
@@ -74,6 +74,14 @@ PASS | J2a: 合法订单行 UPDATE 成错误 order_no 被拦截
 PASS | J2b: 合法订单行更新数量字段仍允许
 PASS | J3a: 退货 order_no 与关联父行不一致被拦截
 PASS | J3b: 退货 order_no 与关联父行一致可插入
+PASS | K1a: 审批同条改 site_code/source_agent 被拦截
+PASS | K1b: 审批只改状态/审核字段仍允许(身份不变)
+PASS | K2a: 退货 UPDATE 改成错误站点被拦截
+PASS | K2b: 退货 UPDATE 改成错误 order_no 被拦截
+PASS | K2c: 退货 UPDATE 合法字段(数量)仍允许
+PASS | K3a: 审计样本可插入
+PASS | K3b: 审计记录禁止原地 UPDATE
+PASS | K3c: 审计记录禁止物理 DELETE
 PASS | v0.5 重复执行成功（幂等）
 PASS | 重跑后锁行仍 45
 PASS | 重跑后配置仍 15
