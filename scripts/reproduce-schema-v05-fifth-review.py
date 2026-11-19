@@ -285,7 +285,8 @@ def main():
         # H3) AI 审核字段不可变：审批后改 payload/审核人被拦；review_note 可补
         check("H3 前置: AI建议建立并人工审批",
               q(ai + "('H-AI','REPLENISH','agent','{}','PENDING','MANUAL')", db).returncode == 0 and
-              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),payload_json=JSON_OBJECT('qty',1) WHERE suggestion_no='H-AI'", db).returncode == 0)
+              q("UPDATE ai_suggestion SET payload_json=JSON_OBJECT('qty',1) WHERE suggestion_no='H-AI'", db).returncode == 0 and
+              q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW() WHERE suggestion_no='H-AI'", db).returncode == 0)
         check("H3a: 审批后 payload_json 同态篡改被拦截",
               q("UPDATE ai_suggestion SET payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='H-AI'", db).returncode != 0)
         check("H3b: 审批后 reviewed_by 同态篡改被拦截",
@@ -300,6 +301,8 @@ def main():
         # 各反例独立键；直接 root SQL 仅证明 DDL 行为，非应用主体能力。
         def duplicate(result):
             return result.returncode != 0 and "ERROR 1062" in result.stderr
+        def trigger_rejected(result):
+            return result.returncode != 0 and "ERROR 1644 (45000)" in result.stderr
         parent = "INSERT INTO sal_order(id,order_no,site_code,store_id,partner_sku,qty,gross_amount,currency) VALUES "
         child = "INSERT INTO sal_order_item(sal_order_id,order_no,platform_item_no,sku_id,qty,unit_price) VALUES "
         ret = "INSERT INTO sal_return(return_no,biz_return_key,source_return_no,order_no,site_code,sku_id,qty,sal_order_item_id) VALUES "
@@ -309,16 +312,28 @@ def main():
         check("OBSERVED 不存在父订单的子行仍可插入", q(child + "(95999,'Q5-ORPHAN','Q5-ORPHAN-LINE',1,1,10)",db).returncode == 0)
         check("OBSERVED 不存在父订单行的退货仍可插入", q(ret + "('Q5-OR','Q5-OB','Q5-OS','Q5-ORDER','AE',1,1,95999)",db).returncode == 0)
         check("OBSERVED 正确子行可UPDATE成错误订单号", q("UPDATE sal_order_item SET order_no='Q5-FORGED' WHERE id="+row_id,db).returncode == 0)
+        check("REVIEW 错误订单行UPDATE由触发器1644拒绝", trigger_rejected(q("UPDATE sal_order_item SET order_no='Q5-FORGED' WHERE id="+row_id,db)))
         check("REVIEW NULL站点同来源首条插入", q(ret + "('Q5-N1','Q5-NB1','Q5-SRC','Q5-ORDER',NULL,1,1,"+row_id+")",db).returncode == 0)
         check("REVIEW NULL站点同来源重复被1062拒绝", duplicate(q(ret + "('Q5-N2','Q5-NB2','Q5-SRC','Q5-ORDER',NULL,1,1,"+row_id+")",db)))
+        check("OBSERVED 已插入退货可UPDATE为不同父站点", q("UPDATE sal_return SET site_code='SA' WHERE return_no='Q5-N1'",db).returncode == 0 and scalar("SELECT site_code FROM sal_return WHERE return_no='Q5-N1'") == "SA")
         check("OBSERVED NULL来源号仍允许多条", q(ret + "('Q5-U1','Q5-UB1',NULL,'Q5-ORDER',NULL,1,1,"+row_id+"),('Q5-U2','Q5-UB2',NULL,'Q5-ORDER',NULL,1,1,"+row_id+")",db).returncode == 0)
         check("OBSERVED 同站退货order_no与父行不一致被允许", q(ret + "('Q5-RF','Q5-RB','Q5-RS','OTHER-ORDER','AE',1,1,"+row_id+")",db).returncode == 0)
+        check("REVIEW 错误退货订单号由触发器1644拒绝", trigger_rejected(q(ret + "('Q5-RF','Q5-RB','Q5-RS','OTHER-ORDER','AE',1,1,"+row_id+")",db)))
         check("REVIEW AI待审批建议建立", q("INSERT INTO ai_suggestion(suggestion_no,scene,source_agent,site_code,payload_json) VALUES ('Q5-AI','REPLENISH','agent','AE',JSON_OBJECT('qty',1))",db).returncode == 0)
         check("OBSERVED 审批瞬间可同时修改载荷", q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),review_note='first',payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='Q5-AI'",db).returncode == 0 and scalar("SELECT JSON_EXTRACT(payload_json,'$.qty') FROM ai_suggestion WHERE suggestion_no='Q5-AI'") == "999")
+        check("REVIEW 审批夹带载荷由触发器1644拒绝", trigger_rejected(q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),review_note='first',payload_json=JSON_OBJECT('qty',999) WHERE suggestion_no='Q5-AI'",db)))
+        # 反例被拦后单独走合法审批，避免后续结论受前一断言影响。
+        check("REVIEW 独立完成合法人工审批", q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),review_note='first' WHERE suggestion_no='Q5-AI'",db).returncode == 0)
         check("OBSERVED 已审批review_note可被覆盖", q("UPDATE ai_suggestion SET review_note='overwritten' WHERE suggestion_no='Q5-AI'",db).returncode == 0 and scalar("SELECT review_note FROM ai_suggestion WHERE suggestion_no='Q5-AI'") == "overwritten")
         check("REVIEW 审批后改审核主体被拦截", q("UPDATE ai_suggestion SET reviewed_by=2 WHERE suggestion_no='Q5-AI'",db).returncode != 0)
         check("REVIEW 转正状态变更", q("UPDATE ai_suggestion SET status='CONVERTED' WHERE suggestion_no='Q5-AI'",db).returncode == 0)
         check("OBSERVED 转正终态review_note仍可覆盖", q("UPDATE ai_suggestion SET review_note='overwritten again' WHERE suggestion_no='Q5-AI'",db).returncode == 0)
+        check("OBSERVED 直接SQL审批未自动写独立审计", scalar("SELECT COUNT(*) FROM noon_audit_log WHERE entity_type='ai_suggestion' AND entity_id='Q5-AI'") == "0")
+        check("REVIEW 审计样本可插入", q("INSERT INTO noon_audit_log(log_no,action,entity_type,entity_id) VALUES ('Q5-AUD','APPROVE','ai_suggestion','Q5-AI')",db).returncode == 0)
+        check("OBSERVED 当前DDL允许直接修改审计样本", q("UPDATE noon_audit_log SET action='CHANGED' WHERE log_no='Q5-AUD'",db).returncode == 0 and scalar("SELECT action FROM noon_audit_log WHERE log_no='Q5-AUD'") == "CHANGED")
+        check("OBSERVED 当前DDL允许直接删除审计样本", q("DELETE FROM noon_audit_log WHERE log_no='Q5-AUD'",db).returncode == 0 and scalar("SELECT COUNT(*) FROM noon_audit_log WHERE log_no='Q5-AUD'") == "0")
+        check("REVIEW 待审批身份绑定样本建立", q("INSERT INTO ai_suggestion(suggestion_no,scene,source_agent,site_code,payload_json) VALUES ('Q5-IDENTITY','REPLENISH','agent','AE','{}')",db).returncode == 0)
+        check("OBSERVED 审批同时可改变建议站点和来源", q("UPDATE ai_suggestion SET status='APPROVED',reviewed_by=1,reviewed_at=NOW(),site_code='SA',source_agent='other' WHERE suggestion_no='Q5-IDENTITY'",db).returncode == 0 and scalar("SELECT CONCAT(site_code,':',source_agent) FROM ai_suggestion WHERE suggestion_no='Q5-IDENTITY'") == "SA:other")
         check("REVIEW 自动审批默认关闭", scalar("SELECT config_value FROM noon_rule_config WHERE config_key='ai_auto_review_enabled' AND scope='GLOBAL'") == "false")
         check("REVIEW 独立AUTO候选建立", q("INSERT INTO ai_suggestion(suggestion_no,scene,source_agent,site_code,payload_json) VALUES ('Q5-AUTO','REPLENISH','agent','AE','{}')",db).returncode == 0)
         check("OBSERVED 未核验规则也能进入AUTO APPROVED", q("UPDATE ai_suggestion SET status='APPROVED',review_mode='AUTO',reviewed_by=1,reviewed_at=NOW(),auto_rule_ref='NOT-A-RULE' WHERE suggestion_no='Q5-AUTO'",db).returncode == 0)

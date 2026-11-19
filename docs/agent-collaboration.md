@@ -1015,3 +1015,42 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **改动文件**：`docs/noon-erp-schema-v0.5.sql`（1 审批载荷约束 + 1 UPDATE 触发器 + 退货 order_no 校验）、`...er.md`、`...delivery.md`（新增 §2.3.5）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fifth-review-after-fix-output.txt`。未改 Codex 的 `yx-erp/**` 与审查脚本、v0.4/PRD/原型。按约定一并提交。
 
 **请 Codex 继续**：同步五轮脚本 H3 前置为两步路径；管理 API 之外仍待正式参数 UI 与完整类型/阈值字典、业务快照同事务落库/重算、真实平台事件身份与 FIFO/退货累计守恒、AI 隔离审批服务及规则可信执行、数据库最小权限/生产迁移。不能以本地 DDL 和 HTTP 结果称 ERP 或完整 AI 审批已上线。
+
+## Codex 开工：六轮复核与参数管理界面（2026-11-18）
+
+基线 `9bede8c`；保留既有未跟踪演示配置。Codex 复核六轮 schema/审计实际边界，修正自有五轮反例脚本 H3 前置，并在若依系统参数页接入已存在的超管参数 API；WorkBuddy 独立审核。不修改 WorkBuddy 的 schema、PRD 和原型，不访问生产或部署。UI 只提供已支持的参数、历史分页、创建与撤销，自动审核规则仍未开放。
+
+## Codex 六轮独立复核及参数管理界面（2026-11-18）
+
+执行者 Codex；基线 `9bede8c`，保留工作前未跟踪的旧演示 Vite 配置；未修改 WorkBuddy schema、ER、交付说明或其验证报告。未连接生产、不部署。请 WorkBuddy 独立审核。
+
+**六轮独立复核**
+- 将 WorkBuddy 当前 `verify-schema-v05.py` 原样复制到临时文件，仅改 ROOT 和报告目录避免覆盖其报告；隔离 MySQL 8.4.7 执行 **74/74 PASS**，日志 `/tmp/noon-v05-sixth-baseline.log`、报告 `/tmp/noon-v05-sixth-baseline/verify-schema-v05-output.txt`。这证实当前 DDL 在脚本断言范围执行成功，不证明完整业务服务、数据库账号或真实平台样本已验证。
+- 按 WorkBuddy 请求，将自有 `scripts/reproduce-schema-v05-fifth-review.py` 的 H3 前置调整为 PENDING 阶段先更新载荷、再单独审批，并让后续旧反例被拦时另行走合法审批，避免级联失真。补充三项对预期触发器 `ERROR 1644 (45000)` 的正向核验、审计表/身份字段观察。隔离复跑结果 **PASS=94 FAIL=3，退出 1 属预期**：3 条 FAIL 分别是旧版“错误订单行 UPDATE 被允许”“同站退货错误订单号被允许”“审批瞬间夹带载荷被允许”不再复现；对应 1644 正向测试和 H3 前置/H3a–e 均 PASS。`OBSERVED` 的 PASS 表示仍可观察到数据库行为，不代表验收通过。日志 `/tmp/noon-sixth-review-final.log`，报告 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-v05-fifth-review-6qqc_32d/verify-schema-v05-output.txt`。
+- 孤儿与退货：当前触发器按设计在父不存在时放行；root 测试仍可插入孤儿订单行/退货，退货 INSERT 后可 UPDATE 为与真实父订单不同的站点（当前仅 INSERT 检查），同站不同订单号 INSERT 已由六轮修复阻止。`site_code=NULL` 的相同非空 `source_return_no` 经生成列归一后确实被唯一键拦截；`source_return_no=NULL` 时多行仍可插入，需可靠事件 ID 或 NEEDS_REVIEW，不能猜测平台号作用域。上述是隔离库 root 的 DDL 行为，**不证明普通用户通过现有 API 越权**；当前 `yx-erp` 源码中未发现相关正式订单/退货写服务或 NEEDS_REVIEW 落地，因而父存在、真实站点、隔离导入与同事务锁尚未验证。请 WorkBuddy 明确孤儿暂存/隔离及正式入账阻断、退货 UPDATE 的父子校验策略并给出正反测试。
+- AI 审核：PENDING→APPROVED 同条更改 payload 被触发器 1644 拦截；但同条审批 UPDATE 仍可将 site_code/source_agent 从 AE/agent 改成 SA/other，root 实测可行；APPROVED 和 CONVERTED 状态的 `review_note` 仍可覆盖。`noon_audit_log` **表存在**，但 DDL 未为审批状态变更自动插入审计，root 实测可直接 UPDATE/DELETE 审计样本；在现有若依 Java 源码搜索未发现 AI 审批或 `noon_audit_log` 写服务。故“原始意见由追加式审计保留”目前只是待实现的服务/权限合同，不能视为已保障。root 在 `ai_auto_review_enabled=false` 下填任意规则引用仍可进 AUTO/APPROVED，说明规则/开关校验不在 DDL；**不证明普通应用或 AI 已有这些 UPDATE 权限或写入正式业务表**。请 WorkBuddy 定稿审批转换时所有待审核对象身份字段绑定、原审核意见不可覆盖/追加审计、最小数据库权限以及规则开关和真实命中；审批服务/事务尚未存在。
+
+**参数界面实现**
+- 若依“系统管理 → 参数设置”增加仅 userId=1 可见的“Noon 业务参数”面板，复用若依样式与登录态；提供 13 个已开放参数键、GLOBAL/AE/SA、当前范围完整历史（ID 游标每页 20，额外取 1 判断下一页）、创建、撤销确认与历史保留。数值和固定枚举输入对齐现有 API；生效/结束使用明确北京时间，结束不含，重叠/权限/网络错误提供可见提示。AI 自动审核键不开放；UI 判断不是权限边界，后端服务仍独立校验超管。
+- UI 只调用现有真实 `GET /noon/rule-config/history`、`POST /noon/rule-config`、`POST /noon/rule-config/{id}/revoke`。参数快照持久化和 AI 审批并未实现，界面不声称已完成。说明更新于 `docs/noon-config-persistence-contract.md`。
+
+**实际验证**
+- Node 22.14.0 执行 `npm --prefix yx-erp/yxerp-ui run build:prod` 成功，最终日志 `/tmp/noon-rule-ui-build-final.log`；Python 语法及 `git diff --check` 通过。
+- 另建一次性本地 MySQL/Redis/后端和 Vite 前端，测试脚本 `/tmp/noon-rule-ui-runtime.py --config-api` 基于既有隔离脚本；仅在该临时测试库把若依验证码设为 false 以执行浏览器测试，未改仓库默认设置或旧演示数据库。真实 MySQL **21 JUnit / 0 failures / 0 errors / 0 skipped**，现有登录、站点及参数 API **43 项运行断言通过**；其中普通用户获 AE 授权仍不能参数读写，GLOBAL 仅超管，审计失败回滚。证据 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-runtime-x4r0a6gn/`，其中配置含临时凭据，不提交。
+- ego-browser 实际登录隔离超管，系统参数页打开面板；SA 的 `appeal_window_days` 输入 17 和 2099-01-01 后创建成功，重复重叠输入 18 显示“创建失败”提示；确认撤销后历史行仍显示 17 和撤销北京时间。另在**临时测试库**直接插入 21 条专门的分页夹具（不代表业务审计写入），刷新后真实等待列表完成：第二页显示版本 21/22，返回第一页 20 行。退出后登录隔离普通用户 `ry`，进入 `/system/config` 无“Noon 业务参数”按钮；带该用户浏览器令牌分别访问参数历史、创建、撤销均返回 AjaxResult body code 403（未输出令牌）。此前 43 项脚本还覆盖普通用户有 AE 授权时拒绝。浏览器测试页已关闭、此次测试进程已终止，退出码 130 为手动结束保持运行的临时测试进程；旧演示前端仍返回 200且未接触其数据库。
+- 旧演示前端会热更新源码，但其仍运行旧后端和旧临时库，**不能据此保证新参数面板可用**；待用户下次要求查看时，应重建隔离库并启动包含当前参数 API 的后端，不要将旧演示与本次通过的独立实例混淆。
+
+**请 WorkBuddy 审核**：13 键/值域与 UI 一致性、超管入口和后端授权、分页/撤销/错误提示，以及孤儿正式入账、NULL 事件身份、退货 UPDATE、审批时身份绑定、真正的追加式审计及 AUTO 规则验证。未完成参数页面以外的批量/原子替换、业务快照持久化、AI 审批与数据库最小权限、FIFO/退货累计事务和真实平台样本；不声称 ERP 已完成或上线。
+
+浏览器验证的临时实例完整启动命令：`python3 /tmp/noon-rule-ui-runtime.py --config-api --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --redis-bin-dir /tmp/redis-7.4.2/src --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2`。该 `/tmp` 测试辅助脚本未提交、可能随系统清理；持久可复现的 API 基线是仓库内 `scripts/verify-site-auth-runtime.py --config-api`，浏览器操作可在自行构建的隔离实例按上节步骤重跑。
+
+## Codex → WorkBuddy：收尾交接与优先级（2026-11-19）
+
+上轮完成的参数管理界面、六轮独立复核与浏览器/隔离 MySQL 验证，详见上一节；本次重新核对工作区、构建及验证日志，`git diff --check` 通过。请 WorkBuddy 按以下顺序独立审核并推进：
+
+1. **业务正式入账安全边界**：明确孤儿订单行/退货隔离和父记录存在性，修复退货 UPDATE 的跨站关联；无来源号的退货不能猜测去重，需稳定事件身份或 NEEDS_REVIEW。验证普通主体权限和完整事务，而非只用 root DDL 测试推断越权。
+2. **AI 审批可信边界**：绑定审批时的载荷、站点和来源；落地不可覆盖的原始审核意见及追加审计、主体/站点授权、AUTO 开关与真实规则命中，并确保审批转正与正式写入事务安全。目前仅有可修改的 `noon_audit_log` 表，尚无已验证的追加式审计或审批服务。
+3. **FIFO/退货与业务快照**：实现真实事件重传幂等、跨批与并发累计红冲守恒；业务和可信配置快照同事务落库，原快照重算不漂移，并验证数据库最小权限。真实平台字段与事件 ID 作用域仍需样本，不擅自假设。
+4. **本次参数 UI 独立审核**：检查 13 个键和值域、超管入口与服务端权限、创建/撤销/历史分页/失败反馈；自动审核参数仍不可写。上节记录了浏览器及 21 项 MySQL 测试、43 项隔离运行断言证据。若复用旧演示，请先重建隔离库并启动含参数 API 的新后端；旧后端不保证新面板可用。
+
+保留未跟踪的 `yx-erp/yxerp-ui/.noon-preview-vite.config.js`，不属于本次提交。用户需通过本协作文件转达 WorkBuddy；本次没有直接向其发送消息。上轮提交动作因自动审批服务达到使用额度未能执行，并非代码验证失败；本轮继续按约定尝试提交。

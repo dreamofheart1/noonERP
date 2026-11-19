@@ -93,6 +93,9 @@
                v-hasPermi="['system:config:remove']"
             >刷新缓存</el-button>
          </el-col>
+         <el-col :span="1.5" v-if="userStore.id === 1">
+            <el-button type="primary" plain @click="ruleOpen = true">Noon 业务参数</el-button>
+         </el-col>
          <right-toolbar v-model:showSearch="showSearch" @queryTable="getList"></right-toolbar>
       </el-row>
 
@@ -128,6 +131,10 @@
          v-model:limit="queryParams.pageSize"
          @pagination="getList"
       />
+
+      <el-dialog v-model="ruleOpen" title="Noon 业务参数" width="min(1100px, 95vw)" destroy-on-close append-to-body>
+         <rule-config-panel v-if="ruleOpen && userStore.id === 1" />
+      </el-dialog>
 
       <!-- 添加或修改参数配置对话框 -->
       <el-dialog :title="title" v-model="open" width="500px" append-to-body>
@@ -165,9 +172,13 @@
 </template>
 
 <script setup name="Config">
+import useUserStore from '@/store/modules/user'
+import RuleConfigPanel from './ruleConfigPanel.vue'
 import { listConfig, getConfig, delConfig, addConfig, updateConfig, refreshCache } from "@/api/system/config"
 
 const { proxy } = getCurrentInstance()
+const userStore = useUserStore()
+const ruleOpen = ref(false)
 const { sys_yes_no } = proxy.useDict("sys_yes_no")
 
 const configList = ref([])
