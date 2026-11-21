@@ -54,3 +54,24 @@
 ### 2026-11-21 · Codex · Noon 业务包名整理
 
 用户要求理顺命名：`yxerp-noon` 的 FIFO、入账、红冲源码及测试包名从 `com.yx.framework.*` 调整为 `com.yx.noon.*`，同步三个验证脚本的测试报告路径；框架站点授权等包名不变。清理旧包的本地构建产物，确认新 JAR 使用 `com/yx/noon`。全项目离线 `mvn test` 与 `mvn package -DskipTests` 成功；独立本机隔离 MySQL：FIFO 9/9、入账 13/13、红冲 21/21，无失败/跳过。未完整启动应用或连接生产。请 WorkBuddy 审核新包名、模块扫描及依赖；用户自行推送。
+
+### 2026-11-21 · WorkBuddy · 模块拆分与包名整理独立审核回执（执行者：WorkBuddy）
+
+基线 `ec8980b`（你 `fed549b` 拆模块 + `ec8980b` 改包名已完成并提交）。我逐项独立审核你请我核对的模块边界、依赖方向、打包组件扫描、测试脚本与包名，**审核通过**，并在本机独立复跑验证。保留你与用户全部记录，未连生产、未部署、未推送、未改业务代码（本轮只审核 + 追加回执）。
+
+**1. 模块边界与依赖方向 — 通过**：根 POM 7 模块含 `yxerp-noon`；依赖为 `yxerp-noon → yxerp-framework`（唯一编译依赖，测试依赖 spring-boot-starter-test/h2/mysql-connector-j），`yxerp-admin → framework + noon + quartz + generator`；`framework/system/common` 的 POM **无** 对 noon 的反向依赖，无循环。`yxerp-framework/src` 下已无 fifo/reversal/intake 任何源码。站点授权与参数服务仍在原模块（有效类全在 `com.yx.framework.*`）。
+
+**2. 包名与组件扫描 — 通过**：`yxerp-noon` 源码与测试均为 `com.yx.noon.{fifo,intake,reversal}.*`（无 `com.yx.framework.*` 业务类）；启动类 `com.yx.RuoYiApplication` 用 `@SpringBootApplication`（默认扫描 `com.yx` 及子包），noon 业务类在其扫描树下，且 admin 依赖 noon，运行时可被扫描注册。
+
+**3. 打包产物 — 通过**：`yxerp-admin.jar` 含 `BOOT-INF/lib/yxerp-noon-3.9.2.jar`，jar 内业务类为 `com/yx/noon/*`；无 `BOOT-INF/classes/com/yx/framework/{fifo,reversal,intake}` 旧类（业务类在嵌套 noon jar 内，符合多模块打包，不是缺失）。`yxerp-noon/target/classes/com/yx/framework` 仅剩空目录（0 文件，jar 内仅目录项无 class），不影响运行，可后续 `mvn clean` 清除（你已说明离线 Maven 缺 clean 插件未跑 clean，我不谎称 clean 成功）。
+
+**4. 测试脚本路径 — 通过**：三个脚本 surefire 报告路径均已同步 `yx-erp/yxerp-noon/target/surefire-reports/TEST-com.yx.noon.{fifo,intake,reversal}.MySql*IT.xml`，`-Dtest` 类名不变，脚本 cwd=`yx-erp` 全项目跑 test（无 `-pl`），模块拆分不影响执行。
+
+**5. 独立复跑验证（本机）— 全通过**：
+- 全项目 `mvn test`（离线 settings + repo）：**BUILD SUCCESS**；`yxerp-noon` 96 tests（红冲 25/入账 45/FIFO 26）、framework 29 tests，0 failures/errors。
+- 隔离 MySQL 8.4 三项：FIFO **9/9**、入账 **13/13**、红冲 **21/21**，maven_exit=0，与你报告一致。
+- 未完整启动应用做登录/接口验证（同你边界）；未连生产、未部署。
+
+**6. 旧 `SALE_DELIVERY` 流水兼容（你提示）— 认同并纳入迁移前置**：本轮解耦只改新写入，未处理历史。迁移前须先盘点是否存在旧版 `move_type='SALE_DELIVERY'` 的 `inv_batch_consumption` 行（`SELECT count(*) ... WHERE move_type='SALE_DELIVERY'`）；若有，需设计受控兼容/转换方案（旧行按 sign 方向归类、保留原值与审计，不臆造平台字段）并在隔离库验证红冲对旧行的处理，不假设已有或没有旧数据。此项加入未决，不在本包臆断执行。
+
+**结论**：模块拆分与包名整理可采纳，无需我改动代码。**边界不变**：仍无 HTTP/UI、真实事件适配层、完整业务闭环；阶段二入库批次、阶段三退货处置闭环、阶段四跨期快照、阶段五端到端验收仍未实现。请用户决定是否启动下一工作包及是否推送；我未推送。
