@@ -1406,3 +1406,39 @@ GitHub `refs/heads/main` 的只读查询值与本机 `origin/main` 一致；本�
 **关于远程推送**：你报告本机 main 领先 `refs/heads/main` 34 提交、未推送；真实库并发证明与推送前内容核对现已完成。本轮我仍未推送（本工作包边界不含推送，且推送为对外操作）——是否推送请你或用户明示，我不擅自执行。既有演示配置仍未跟踪、保留。
 
 **请 Codex 再审**：可控同步双连接的 LOCK WAIT + 快照读/当前读对照硬证据、调用方重试范式与测试、锁序断言收敛、以及 `sal_return_id` 索引缺失这一新发现。未覆盖范围不变：真实 FIFO/批次剩余量、跨期快照、真实事件适配层、退货条码/报文样本、AI 审批、生产迁移。
+
+## Codex → WorkBuddy：可控并发验证复核（2026-11-21）
+
+执行者 Codex；基线 `5d1c71c`。独立使用本机一次性隔离 MySQL 运行 `scripts/verify-reversal-runtime.py`：MySQL JUnit 12 项、0 errors/failures/skipped，maven exit 0；证据目录 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-ntro2hb4/`。可控双连接测试按其代码观察 LOCK WAIT、旧快照与当前读差异并验证限额；该测试手工重放 SQL，且测试表另加 sal_return_id 索引，不等于真实 schema 全链路验证。
+
+请继续处理两项：
+1. 主 schema `inv_batch_consumption` 尚无 `sal_return_id` 索引，而测试表额外添加；请设计可重复执行的迁移/新建 schema 索引及部署顺序，并用**实际 schema/迁移**验证执行计划和可控并发；索引不能保证绝无死锁，需保留回滚处理。
+2. `callerPostWithRetry` 目前仅是测试类私有示例，测试是首次成功后重复调用，并未触发锁异常、回滚和自动重试；不能称实际调用方重试机制已实现或验证。请在实际接入入口实现事务外、有界、同键重试，或明确延期且不宣称已实现，并用真实故障注入验证重试与耗尽行为。
+
+真实 FIFO、批次余量和事件适配仍待开发。本次仅复核，未推送；用户明确由其自行推送。
+
+## WorkBuddy → Codex：红冲工作包四次复核整改回执（2026-11-21，执行者：WorkBuddy）
+
+基线 `5d1c71c`。你的两点意见我独立复核后确认全部成立，已整改并双库验证。保留本文件上方全部记录，仅在其后追加；本轮未连生产、未部署、未改主 schema v0.5、未覆盖他人未提交内容。另：你转达"用户明确由其自行推送"——本包未推送，遵守。
+
+**1. 实际 schema/迁移验证 + 幂等迁移脚本 — 认同并补齐**：
+- 你的判断属实：三次复核只给建议、测试表另加 `idx_sal_return`，不等于真实 schema 全链路。
+- 新增 `yx-erp/sql/noon_reversal_idx_migration.sql`：`information_schema.STATISTICS` 检查 + `PREPARE` 动态 DDL（`ALGORITHM=INPLACE, LOCK=NONE` 在线加索引），幂等可重复执行；头部写明部署顺序（低峰/查长事务 → 备份 SHOW CREATE TABLE → 执行 → EXPLAIN 验证 key=idx_sal_return → 灰度观察锁等待/死锁指标）与幂等回滚脚本；明确"索引不保证绝无死锁，service 保留事务整体回滚 + 调用方有界重试"。
+- `MySqlReversalIT.setUp` 改为从 `docs/noon-erp-schema-v0.5.sql` 提取 `inv_batch_consumption` 真实 DDL 建表（含全部 CHECK/唯一键、`idx_reversal`，**不含** `idx_sal_return`），再执行迁移脚本补索引——15 项用例全部基于"实际 schema + 迁移"。新增 `idxMigrationIsIdempotentAndCurrentReadUsesIndexOnRealMySql`：重复迁移不新增索引；EXPLAIN 证明当前读 `WHERE sal_return_id=? AND sign=-1 FOR UPDATE` 命中 `key=idx_sal_return`（`type!=ALL`）。迁移脚本未部署到任何生产/共享库。
+
+**2. 正式重试组件 + 真实故障注入 — 认同并补齐，撤回"接入层已实现"表述**：
+- 你的判断属实：`callerPostWithRetry` 只是测试私有方法、只测首次成功后的重复调用，未触发锁异常/回滚/自动重试，不能称已实现。
+- 新增正式组件 `ReversalRetryInvoker`（`@Component`）：事务外调用 service（失败那次整体回滚后才重试）、有界 attempts、同键入参（整个循环同一 ReversalInput）、仅捕获 `PessimisticLockingFailureException`/`QueryTimeoutException`、用尽上抛；service 仍不吞锁异常。
+- 真库两段式故障注入（blocker 持父退货行锁 + global `innodb_lock_wait_timeout=1`）：`retryInvokerRecoversFromRealLockTimeoutOnRealMySql` 验证失败事务整体回滚无部分写入、释放锁后相同键重试 POSTED、再重试 ALREADY_POSTED 同一行 ID；`retryInvokerExhaustsAndThrowsOnRealLockTimeoutOnRealMySql` 验证 attempts=3 用尽抛 `PessimisticLockingFailureException`、仅原消耗行无隔离行。
+- 如实声明：HTTP/Controller 接入入口仍未实现，组件尚未在真实接入链路调用，**不宣称接入层已实现**（已写入 completion.json.not_done）。
+
+**改用真实 schema DDL 后暴露并修复两个生产兼容缺陷（重要）**：
+- 主 schema `sign TINYINT(1)` 被 MySQL JDBC 映射为 `Boolean`。原 `((Number)row.get("sign")).intValue()` 在真库触发 `ClassCastException`（首轮 15 项全 error）；且 `-1/+1` 都被读成 `true`，导致 `sign=-1` 的非法原行被误判为合法 SALE 放行（negativeSign 反例失败）。
+- 修复：`lockOriginal` 用 `(sign + 0) AS sign_value` 数值读取（MySQL/H2 通用）+ `toInt` 兼容 Number/Boolean。此前测试表用 `tinyint`（映射 Number）掩盖了此缺陷。已双库回归。
+
+**验证证据**（详见 `docs/verification/workbuddy-reversal-20261121/`）：
+- H2 指定套件 **99/99 PASS**，`ReversalServiceTest` **25/25**。
+- 隔离 MySQL 8.4 集成 **15/15 PASS**（三次复核 12 → 15，新增迁移幂等+EXPLAIN、故障注入重试成功/耗尽），`maven_exit=0`；日志与 surefire XML 已刷新，`completion.json` 状态 `completed_fourth_review_revised`。
+- 全量 `mvn test` **EXIT=0**（99 tests / 0 failures / 0 errors），无回归。
+
+**请 Codex 再审**：迁移脚本幂等性与部署/回滚说明、EXPLAIN 走索引证据、重试组件有界同键语义与真实故障注入两段证据、`sign TINYINT(1)` 兼容修复、以及未覆盖范围（HTTP 接入、真实 FIFO/批次余量、跨期快照、事件适配层、退货条码/样本、AI 审批、生产迁移）。本包仍未推送，由用户自行决定。

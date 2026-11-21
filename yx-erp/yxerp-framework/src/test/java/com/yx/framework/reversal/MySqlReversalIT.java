@@ -8,6 +8,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -85,20 +86,65 @@ class MySqlReversalIT
                 + "unique key(event_id))");
         jdbc.execute("create table sal_return (id bigint auto_increment primary key, site_code varchar(16), "
                 + "sku_id bigint not null, sal_order_item_id bigint, qty int not null, status varchar(24))");
-        jdbc.execute("create table inv_batch_consumption (id bigint auto_increment primary key, "
-                + "consumption_no varchar(64) not null, biz_event_key varchar(160) not null, "
-                + "source_event_id varchar(128), batch_id bigint not null, sal_order_item_id bigint, "
-                + "sku_id bigint not null, qty int not null, unit_cost decimal(18,4) not null, "
-                + "amount decimal(18,4) not null, consumed_at datetime(3) not null, "
-                + "move_type varchar(24) not null, sign tinyint not null, reversal_of_id bigint, "
-                + "sal_return_id bigint, period char(7), cross_period tinyint not null default 0, "
-                + "raw_payload json, created_at datetime(3) not null, "
-                + "unique key(consumption_no), unique key(biz_event_key,batch_id), "
-                + "key idx_reversal (reversal_of_id), key idx_sal_return (sal_return_id), "
-                + "check (qty > 0 and amount >= 0), check (sign in (-1,1)))");
+
+        // 用【实际主 schema v0.5】的 inv_batch_consumption DDL 建表（含全部 CHECK/唯一键/真实索引，
+        // 不含 idx_sal_return），再执行【实际迁移脚本】补索引——所有用例均基于"真实 schema + 迁移"，
+        // 而非测试表硬编码索引（Codex 三次复核意见 1）。
+        String schema = Files.readString(Path.of("../../docs/noon-erp-schema-v0.5.sql"));
+        jdbc.execute(extractCreateTable(schema, "inv_batch_consumption"));
+        applyIdxMigration();
+
+        // 每个用例开始时把全局锁等待超时复位为默认 50s，避免故障注入用例
+        // 临时改小后残留，影响可控同步测试对 LOCK WAIT 的观察窗口。
+        jdbc.execute("set global innodb_lock_wait_timeout=50");
 
         service = context.getBean(ReversalService.class);
         login(1L);
+    }
+
+    /** 从主 schema SQL 提取指定表的 CREATE TABLE 语句（到分号为止）。 */
+    private static String extractCreateTable(String schema, String table)
+    {
+        String marker = "CREATE TABLE IF NOT EXISTS " + table + " (";
+        int start = schema.indexOf(marker);
+        if (start < 0) throw new IllegalStateException("主 schema 未找到建表语句：" + table);
+        int end = schema.indexOf(";", start);
+        if (end < 0) throw new IllegalStateException("主 schema 建表语句未闭合：" + table);
+        return schema.substring(start, end + 1);
+    }
+
+    /** 执行实际迁移脚本（同一 Connection 逐句，跳过纯注释行），idx_sal_return 已存在则跳过。 */
+    private void applyIdxMigration()
+    {
+        String migration;
+        try { migration = Files.readString(Path.of("../sql/noon_reversal_idx_migration.sql")); }
+        catch (Exception e) { throw new IllegalStateException("读取索引迁移脚本失败", e); }
+        // 迁移用会话变量(@noon_idx_ddl)+PREPARE，必须在【同一连接】上按顺序执行，
+        // 否则新连接看不到会话变量（DriverManagerDataSource 每次 getConnection 是新连接）。
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            try (Statement st = connection.createStatement())
+            {
+                for (String statement : migration.split(";"))
+                {
+                    String s = stripSqlComments(statement);
+                    if (!s.isBlank()) st.execute(s);
+                }
+            }
+            return null;
+        });
+    }
+
+    /** 去掉以 -- 开头的整行 SQL 注释（迁移脚本头部说明），保留语句本体。 */
+    private static String stripSqlComments(String sql)
+    {
+        StringBuilder out = new StringBuilder();
+        for (String line : sql.split("\\R"))
+        {
+            String trimmed = line.stripLeading();
+            if (trimmed.startsWith("--")) continue;
+            out.append(line).append('\n');
+        }
+        return out.toString();
     }
 
     @AfterEach
@@ -363,46 +409,128 @@ class MySqlReversalIT
 
     // ---------- 三次复核意见：可控同步双连接，证明旧快照与父退货行锁等待真实出现 ----------
 
-    /**
-     * 调用方重试范式（service 不吞锁异常，重试在调用方）：捕获锁等待超时/死锁异常后，以
-     * <b>相同 sourceEventId 与相同入参</b>重试；service 前置幂等键保证重试命中 ALREADY_POSTED
-     * 返回同一行 ID，不重复入账。用尽 attempts 仍失败则向上抛，由调用方决定隔离/告警。
-     */
-    private Result callerPostWithRetry(ReversalInput in, int attempts)
-    {
-        for (int i = 1; i <= attempts; i++)
-        {
-            try { return service.postReversal(in); }
-            catch (org.springframework.dao.PessimisticLockingFailureException
-                    | org.springframework.dao.QueryTimeoutException lockEx)
-            {
-                if (i == attempts) throw lockEx;
-            }
-        }
-        throw new IllegalStateException("unreachable");
-    }
+    // ---------- 三次复核意见 2：正式重试组件 + 真实锁异常故障注入 ----------
 
+    /**
+     * 正式组件 ReversalRetryInvoker 的同键幂等冒烟：首次 POSTED，相同入参重复调用命中
+     * ALREADY_POSTED 同一行 ID、不新增红冲。真实锁异常下的【重试成功/耗尽抛错】见下方两个
+     * 故障注入测试（Codex 三次复核意见 2：不再用测试私有重试方法充当"已验证的重试机制"）。
+     */
     @Test
-    void callerRetryWithSameEventIsIdempotentOnRealMySql()
+    void retryInvokerSameKeyIsIdempotentOnRealMySql()
     {
         long returnId = seedReturn("AE", 11L, 100L, 3);
         long originalId = seedConsumption(16L, 11L, 100L, 3, "10.0000");
         String raw = payload(returnId, originalId, 3, 11L);
         seedEvent("EVT-CALLER-RETRY", "AE", raw, "PROCESSED");
         var in = input("AE", "EVT-CALLER-RETRY", returnId, originalId, 3, raw);
+        ReversalRetryInvoker invoker = context.getBean(ReversalRetryInvoker.class);
 
-        Result first = callerPostWithRetry(in, 3);
+        ReversalRetryInvoker.RetryResult first = invoker.postWithRetry(in, 3, 0);
         assertTrue(first.posted());
-        // 模拟调用方未收到首次响应，按相同入参重试 3 次。
+        assertEquals(1, first.attempts(), "首次即成功，attempts=1");
         for (int k = 0; k < 3; k++)
         {
-            Result retry = callerPostWithRetry(in, 3);
+            ReversalRetryInvoker.RetryResult retry = invoker.postWithRetry(in, 3, 0);
             assertTrue(retry.posted());
-            assertEquals("ALREADY_POSTED", retry.reasonCode());
-            assertEquals(first.entityId(), retry.entityId(), "重试必须返回同一行 ID");
+            assertEquals("ALREADY_POSTED", retry.result().reasonCode());
+            assertEquals(first.result().entityId(), retry.result().entityId(), "重试必须返回同一行 ID");
         }
         assertEquals(2, count("inv_batch_consumption"), "重试不得新增红冲行");
         assertEquals(0, count("noon_reversal_review"));
+    }
+
+    /**
+     * 真实锁异常故障注入·重试成功（确定性两段式）：
+     * 第 1 段 blocker 持有父退货行锁，调用组件（attempts=1）真实撞锁等待超时并抛锁异常，
+     * 证明"锁异常真实发生且 service 事务整体回滚（无部分写入）"；
+     * 第 2 段测试主动释放锁，再用相同入参调用组件（attempts=3）成功过账。
+     * 两段合起来证明"锁异常 → 回滚 → 以同键重试 → 成功且不重复入账"。
+     * 组件内部的【有界重试与耗尽抛错】由 retryInvokerExhaustsAndThrowsOnRealLockTimeoutOnRealMySql 覆盖。
+     */
+    @Test
+    void retryInvokerRecoversFromRealLockTimeoutOnRealMySql() throws Exception
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(17L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-RETRY-OK", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-RETRY-OK", returnId, originalId, 3, raw);
+
+        DataSource ds = context.getBean(DataSource.class);
+        ReversalRetryInvoker invoker = context.getBean(ReversalRetryInvoker.class);
+        Integer oldTimeout = jdbc.queryForObject("select @@global.innodb_lock_wait_timeout", Integer.class);
+        jdbc.execute("set global innodb_lock_wait_timeout=1");
+        try
+        {
+            // 第 1 段：持锁调用，真实锁超时 → 组件 attempts=1 抛锁异常。
+            try (Connection blocker = ds.getConnection(); Statement st = blocker.createStatement())
+            {
+                blocker.setAutoCommit(false);
+                try (ResultSet rs = st.executeQuery("select qty from sal_return where id=" + returnId + " for update"))
+                {
+                    assertTrue(rs.next());
+                }
+                assertThrows(org.springframework.dao.PessimisticLockingFailureException.class,
+                        () -> invoker.postWithRetry(in, 1, 0));
+                assertEquals(1, count("inv_batch_consumption"), "锁失败那次事务整体回滚，无部分写入");
+                assertEquals(0, count("noon_reversal_review"));
+                // 主动释放锁，进入第 2 段。
+                blocker.rollback();
+            }
+
+            // 第 2 段：锁已释放，相同入参重试成功，attempts=1（首次即成功）。
+            ReversalRetryInvoker.RetryResult retry = invoker.postWithRetry(in, 3, 0);
+            assertTrue(retry.posted(), "锁故障解除后相同键重试应成功：" + retry.result().reasonCode());
+            assertEquals(1, retry.attempts());
+            assertEquals(2, count("inv_batch_consumption"), "只入账一次红冲，无部分写入");
+            assertEquals(0, count("noon_reversal_review"));
+            // 再重试一次 → 幂等 ACK 同一行，验证故障恢复后重复调用不重复入账。
+            ReversalRetryInvoker.RetryResult again = invoker.postWithRetry(in, 3, 0);
+            assertEquals("ALREADY_POSTED", again.result().reasonCode());
+            assertEquals(retry.result().entityId(), again.result().entityId());
+            assertEquals(2, count("inv_batch_consumption"));
+        }
+        finally
+        {
+            jdbc.execute("set global innodb_lock_wait_timeout=" + oldTimeout);
+        }
+    }
+
+    /**
+     * 真实锁异常故障注入·耗尽抛错：锁持续被持有，ReversalRetryInvoker 用尽 attempts 后
+     * 抛出锁异常（不吞），且 service 每次失败事务整体回滚——无部分写入、无隔离行。
+     */
+    @Test
+    void retryInvokerExhaustsAndThrowsOnRealLockTimeoutOnRealMySql() throws Exception
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(18L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-RETRY-EXHAUST", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-RETRY-EXHAUST", returnId, originalId, 3, raw);
+
+        DataSource ds = context.getBean(DataSource.class);
+        ReversalRetryInvoker invoker = context.getBean(ReversalRetryInvoker.class);
+        Integer oldTimeout = jdbc.queryForObject("select @@global.innodb_lock_wait_timeout", Integer.class);
+        jdbc.execute("set global innodb_lock_wait_timeout=1");
+        try (Connection blocker = ds.getConnection(); Statement st = blocker.createStatement())
+        {
+            blocker.setAutoCommit(false);
+            try (ResultSet rs = st.executeQuery("select qty from sal_return where id=" + returnId + " for update"))
+            {
+                assertTrue(rs.next());
+            }
+            // 锁始终持有；attempts=3、每次等待约 1s，用尽后必须向上抛锁异常。
+            assertThrows(org.springframework.dao.PessimisticLockingFailureException.class,
+                    () -> invoker.postWithRetry(in, 3, 20));
+            assertEquals(1, count("inv_batch_consumption"), "仅原消耗行，失败事务整体回滚无部分写入");
+            assertEquals(0, count("noon_reversal_review"), "锁异常由调用方处理，service 不写隔离行");
+        }
+        finally
+        {
+            jdbc.execute("set global innodb_lock_wait_timeout=" + oldTimeout);
+        }
     }
 
     /**
@@ -594,6 +722,40 @@ class MySqlReversalIT
         }
     }
 
+    // ---------- 三次复核意见 1：实际 schema 迁移幂等 + 执行计划走索引 ----------
+
+    /**
+     * 实际 schema/迁移验证：setUp 已用主 schema v0.5 的真实 DDL 建 inv_batch_consumption
+     * （无 idx_sal_return）并执行 noon_reversal_idx_migration.sql。本测试再执行一次迁移，
+     * 验证幂等（不报错、索引仍只有 1 个），并用 EXPLAIN 证明 sumReversedOnReturn 的当前读
+     * 走 idx_sal_return（type=ref）而非全表扫描（type=ALL）——迁移确实改变执行计划。
+     */
+    @Test
+    void idxMigrationIsIdempotentAndCurrentReadUsesIndexOnRealMySql()
+    {
+        // 1) 索引已由 setUp 迁移建立，恰好一个。
+        Integer before = jdbc.queryForObject("select count(*) from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return'", Integer.class);
+        assertEquals(1, before, "setUp 迁移应已建立且仅建立一个 idx_sal_return");
+
+        // 2) 重复执行迁移脚本应幂等：不抛异常、索引数不变。
+        assertDoesNotThrow(this::applyIdxMigration);
+        Integer after = jdbc.queryForObject("select count(*) from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return'", Integer.class);
+        assertEquals(1, after, "重复迁移不得新增索引");
+
+        // 3) EXPLAIN：当前读 SUM 的 WHERE sal_return_id=? AND sign=-1 走 idx_sal_return。
+        List<Map<String, Object>> plan = jdbc.queryForList("explain select id,qty from inv_batch_consumption "
+                + "where sal_return_id=? and sign=-1 for update", 999L);
+        assertFalse(plan.isEmpty(), "EXPLAIN 应返回执行计划");
+        String accessType = String.valueOf(plan.get(0).get("type"));
+        String key = plan.get(0).get("key") == null ? "" : String.valueOf(plan.get(0).get("key"));
+        assertEquals("idx_sal_return", key, "当前读应命中 idx_sal_return，实际 key=" + key);
+        assertNotEquals("ALL", accessType, "不应全表扫描；实际 type=" + accessType);
+    }
+
     @Test
     void negativeSignOriginalIsQuarantinedOnRealMySql()
     {
@@ -646,5 +808,8 @@ class MySqlReversalIT
         {
             return new ReversalService(jdbcTemplate, guard);
         }
+
+        @Bean
+        ReversalRetryInvoker reversalRetryInvoker(ReversalService service) { return new ReversalRetryInvoker(service); }
     }
 }

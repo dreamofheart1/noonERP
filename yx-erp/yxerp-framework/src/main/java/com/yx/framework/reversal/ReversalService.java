@@ -257,8 +257,12 @@ public class ReversalService
     private OriginalConsumption lockOriginal(Long id)
     {
         if (id == null || id <= 0) return null;
+        // sign 在真实 schema 为 TINYINT(1)，MySQL JDBC 默认映射 Boolean，会把 -1/+1 都读成 true，
+        // 丢失红冲方向；加 0 强制结果为数值类型（MySQL/H2 通用），是本服务在真实 schema 上
+        // 正确校验 sign 的前提。
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,batch_id,sku_id,sal_order_item_id,qty,unit_cost,period,move_type,sign "
+                "SELECT id,batch_id,sku_id,sal_order_item_id,qty,unit_cost,period,move_type,"
+                        + "(sign + 0) AS sign_value "
                         + "FROM inv_batch_consumption WHERE id=? FOR UPDATE", id);
         if (rows.size() != 1) return null;
         Map<String, Object> row = rows.get(0);
@@ -270,7 +274,7 @@ public class ReversalService
                 (java.math.BigDecimal) row.get("unit_cost"),
                 (String) row.get("period"),
                 (String) row.get("move_type"),
-                ((Number) row.get("sign")).intValue());
+                toInt(row.get("sign_value")));
     }
 
     private ParentReturn findParentReturn(Long id)
@@ -435,6 +439,18 @@ public class ReversalService
     }
 
     private static boolean sameId(Long a, Long b) { return a != null && b != null && a.longValue() == b.longValue(); }
+
+    /**
+     * 数值列健壮读取：真实 schema v0.5 的 sign 为 TINYINT(1)，MySQL JDBC 默认映射为 Boolean，
+     * 而测试表用 tinyint 映射为 Number；两种都必须支持，否则真库上锁原行读 sign 会
+     * ClassCastException（三次复核改用真实 schema DDL 后实证）。
+     */
+    private static int toInt(Object value)
+    {
+        if (value instanceof Number n) return n.intValue();
+        if (value instanceof Boolean b) return b ? 1 : 0;
+        return Integer.parseInt(String.valueOf(value));
+    }
 
     private static boolean hasText(String s) { return s != null && !s.isBlank(); }
 

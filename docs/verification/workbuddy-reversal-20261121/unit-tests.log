@@ -1,5 +1,5 @@
 NOON-20261121-REVERSAL 默认单元测试（H2 内存库，无需外部进程）
-执行时间：2026-11-21 17:43 +08:00（三次复核修订版）
+执行时间：2026-11-21 18:05 +08:00（四次复核修订版）
 
 命令：
   cd yx-erp && mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 \
@@ -44,10 +44,12 @@ ReversalServiceTest 25 项覆盖：
 二次复核意见 3（sign + 防溢出，新增 1 项）：
   originalNegativeSignIsQuarantined                      SALE+sign=-1 原行 → ORIGINAL_NOT_SALE 隔离；累计算术改 long 防溢出。
 
-三次复核遗留：调用方重试契约（service 不吞锁异常，调用方捕获锁异常后以相同入参重试）
-    的真 MySQL 验证在 MySqlReversalIT.callerRetryWithSameEventIsIdempotentOnRealMySql；
-    H2 层 ReversalServiceTest 无需新增（锁/快照语义仅真 MySQL 可验证）。
+四次复核变更：ReversalService.lockOriginal 读 sign 改用 (sign + 0) 数值读取——主 schema v0.5
+    的 sign 为 TINYINT(1)，MySQL JDBC 会映射成 Boolean 丢失 -1/+1 方向，改用真实 schema DDL 后
+    真库实证 ClassCastException / sign=-1 被误判放行；(sign+0) 在 MySQL/H2 均返回数值，已双库验证。
+    调用方重试已提升为正式组件 ReversalRetryInvoker（事务外/有界/同键），真库故障注入见 mysql-it.log。
+    H2 层 ReversalServiceTest 无需新增（锁/快照/故障注入语义仅真 MySQL 可验证）。
 
 注：H2 2.4 对跨内存库 CHECK 常量比较存在全局缓存缺陷，H2 内联建表不保留单行 CHECK；
     单行 CHECK / resolution CHECK 真实性由 MySqlReversalIT 用原始 DDL 在真 MySQL 验证。
-    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（12/12）。
+    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（15/15）。
