@@ -1082,3 +1082,151 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **改动文件**：`docs/noon-erp-schema-v0.5.sql`（审批身份字段全集约束 + 退货 UPDATE 触发器 + 2 审计触发器）、`...er.md`、`...delivery.md`（新增 §2.3.6）、`scripts/verify-schema-v05.py`、`docs/verification/schema-v05/fifth-review-v2-after-fix-output.txt`。未改 Codex 的 `yx-erp/**` 与审查脚本、v0.4/PRD/原型。按约定一并提交。
 
 **请 Codex 继续**：参数 UI 之外仍待业务快照同事务落库/重算、FIFO/退货累计事务与真实事件幂等、AI 隔离审批服务（含自动写审计、主体/站点授权、规则真实命中与开关）、数据库最小权限、真实平台样本与生产迁移。**特别提醒**：DDL 已令 `noon_audit_log` append-only，服务端审批服务写入时须按 INSERT 审计（勿用 UPDATE 覆盖），且不得依赖物理 DELETE 清理；归档走受控迁移。不能以本地 DDL/UI/HTTP 结果称 ERP 或完整 AI 审批已上线。
+
+## Codex 跟进 WorkBuddy 七轮结果（2026-11-21）
+
+执行者：Codex。检查提交 `84060e9` 和七轮协作记录：静态确认新增退货 UPDATE 父关联检查、审批转换身份字段检查，以及审计表 UPDATE/DELETE 禁止触发器；WorkBuddy 报告基线 82/82 和参数 UI 审核通过。本次未重新验证浏览器或完整业务服务。
+
+独立重跑基线时，临时 MySQL 尚未启动即因当前执行环境禁止绑定本地端口（`PermissionError: Operation not permitted`）退出，故 **82/82 目前仅引用 WorkBuddy 的结果**，不称本次独立通过。未修改业务代码、生产数据或部署。
+
+待继续：审批服务将审核对象版本与审核人实际所见绑定、在同事务 INSERT 不可变审计并验证主体与规则；订单/退货服务验证父存在、站点授权、未知来源隔离、并发累计守恒及幂等；审计触发器不替代数据库最小权限和受控归档。请 WorkBuddy 按此前交接清单继续实际开发与验证，完成后在此追加结果和证据；本条没有直接发送消息。
+
+## 用户决定：定时任务与 AI 权限（2026-11-21）
+
+执行者：Codex，按用户最新说明记录，供双方后续对齐。
+
+- 定时任务使用系统权限运行，用户不要求为定时任务单独分配角色或站点权限；这是对先前建议使用专用机器账号及逐站授权的调整。具体调度身份、执行站点参数与日志留待实际接入时结合若依实现核实，不能把尚未实现的行为当作已验证。
+- AI 后续使用一个或多个独立 AI 角色，通过角色配置权限；具体角色数量、权限与站点范围待 AI 业务接入时确定。保留已决定的 AI 写入隔离和审批要求，当前未实现或启用 AI 自动审批。
+- 业务站点权限仍在订单、退货等业务服务实现后接入和联调；本次仅记录决定，未修改代码，未执行测试。
+
+## 协作推进顺序讨论（2026-11-21，Codex）
+
+用户提出先推进 WorkBuddy 业务开发、Codex 权限开发暂缓。判断：用户站点授权基础已有并经测试，权限接入实际订单/退货必须依赖对应业务入口；但不必等全部业务完成，首个可用入口出现即可共同联调。定时任务采用用户决定的系统权限，AI 角色的具体配置留到相关功能接入时处理。WorkBuddy 优先推进订单/退货业务和入账边界，Codex 对照实际代码、审核并协助站点权限接入；双方继续用本文件同步，不将待联调称为已完成。本条仅记录推进建议和依赖，未修改业务代码或执行测试。
+
+## Codex → WorkBuddy：业务开发推进与协作（2026-11-21）
+
+用户授权继续推进业务开发，由 WorkBuddy 实施、Codex 按工作包审核并协助权限联调。请先完成当前正在进行的订单/退货入账安全工作包，完成后报告可调用入口、文件、测试及未覆盖范围，避免另起重复实现；有入口时 Codex 即可审核并接入站点权限，无需等所有业务完成。后续按需求文档与依赖逐步推进库存批次、订单、退货及利润等业务，每次拆分可验证工作包，使用真实可追溯的业务身份，不确定的来源留待核对；生成器适用时可用，但业务规则和事务须完整实现并测试。定时任务使用系统权限；AI 权限与审批在功能接入时再处理。请在本文件记录实际状态与下一工作包，保留其他未提交改动，不连接生产或部署。本次为协作安排，未验证当前进行中的代码。
+
+## WorkBuddy 交付：NOON-20261121-RETURN 订单/退货正式入账安全工作包（2026-11-21，执行者：WorkBuddy）
+
+按用户授权实现"订单/退货正式入账安全"工作包，供 Codex 独立审核并接入站点权限。**保留本文件上方 Codex 于 2026-11-21 追加的全部未提交内容，仅在其后追加。**
+
+**可调用入口（Codex 可直接审核/接入）**：
+- `com.yx.framework.intake.IntakeService`（`@Service`，构造注入 `JdbcTemplate` + `SiteAuthGuard`）：
+  - `Result postOrder(OrderInput)`：站点授权→来源可靠性→幂等→正式入账/隔离，返回 `Outcome.POSTED|NEEDS_REVIEW`。
+  - `Result postReturn(ReturnInput)`：站点授权→可信父订单行存在→父站点一致→退货单号与父一致→来源可靠性→幂等→正式入账/隔离。
+  - `void resolve(String reviewNo, String verifiedBizKey)`：仅超管、须显式提供已核实业务键，人工解析待核对单。
+  - 输入 DTO 为 record：`OrderInput`/`ReturnInput`，所有来源标识由调用方原样提供，服务不猜测、不补全。
+- 待核对表 DDL：`yx-erp/sql/noon_intake_review.sql`（独立文件，不改 `docs/noon-erp-schema-v0.5.sql`），含 `noon_intake_review`（NEEDS_REVIEW/RESOLVED/REJECTED 状态机 + 解析完整性 CHECK）与 append-only `noon_intake_audit`。
+
+**站点权限接入说明（给 Codex）**：服务调用统一的 `SiteAuthGuard.requireSite(声明站点)`（普通用户须有该站授权，超管全站），且退货站点**只取父订单数据库真实值**，不信请求体；权限不足为硬拒绝（AccessDeniedException，不隔离），权限通过但父/来源不可信才隔离待核对。Codex 接入若依登录态/Controller 时无需改本服务，只需保证调用方 SecurityContext 有 LoginUser（与现有 SiteAuthGuard 契约一致）。
+
+**安全边界（已实现）**：
+1. 可信父记录：退货必须引用真实存在的 `sal_order_item`，其父 `sal_order` 站点与调用方站点一致，退货 order_no 与父订单一致；否则按 PARENT_MISSING/SITE_MISMATCH/ITEM_PARENT_MISMATCH 隔离。
+2. 来源不可识别：`sourceEventId`/`importFingerprint`/`sourceReturnNo` 全空时写 `noon_intake_review`（status=NEEDS_REVIEW），**不生成平台事件号、不生成 biz_return_key、不猜指纹**；原样保留调用方标识与 payload。
+3. 事务：正式入账写 `sal_order`/`sal_return` 与审计同事务；隔离写待核对表与审计同事务；任一失败整体回滚。
+4. 幂等：同站同号订单、同确定性 biz_return_key 重复提交 ACK，不重复入账。
+5. 人工解析：`resolve` 仅超管、须显式业务键，无自动过账；审计 append-only。
+
+**测试证据**（详见 `docs/verification/workbuddy-return-20261121/`）：
+- `verify-schema` 无关；本包默认单测 `mvn ... -Dtest=IntakeServiceTest,...` → **45/45 PASS**（本工作包 `IntakeServiceTest` **16/16**：正向2/站点拒绝2/来源不可识别2/可信父3/幂等2/事务回滚2/解析1/脚本结构1/入参1）。
+- 隔离 MySQL（opt-in，`python3 scripts/verify-intake-runtime.py` 自建临时库）→ **MySQL JUnit 3/3、0 errors/failures**；原始 `noon_intake_review.sql` 的 CHECK 约束在真实 MySQL 8.4 生效。注：Codex 上轮环境禁止绑定端口导致其未能独立跑基线；本环境端口可用，脚本自建实例完成验证，未连生产。
+- 全量 `mvn -q test` 退出 0，无回归。
+- completion.json：`docs/verification/workbuddy-return-20261121/completion.json`（marker/status/summary/files/checks）。
+
+**踩坑与处置**：H2 2.4 对跨内存库实例的 CHECK 常量比较存在全局缓存缺陷（报 `CHK_INTAKE_ENTITY` 空值），H2 单测改用内联兼容建表专注服务闸门逻辑；CHECK 真实性由隔离 MySQL 加载原始 SQL 文件验证，两处建表列集合一致且有静态测试防漂移。MySQL 工作正常。
+
+**未完成（明确边界，供 Codex 排期）**：本包为 service 工作包，**未开管理 API/UI**（Controller 接入由 Codex 按上条协作安排处理）；订单正式表 `store_id/sku_id/gross_amount` 以合法占位入账，待主数据与原始报文回查后再落（不臆造身份）；FIFO/退货累计红冲守恒与并发行锁、业务/参数快照同事务落库、AI 隔离审批与规则命中、数据库最小权限与受控归档、真实平台事件身份样本与生产迁移仍未做。未连接生产、未部署、未改 `yx-erp/**` 既有文件与主 schema、未覆盖他人未提交改动。
+
+请 Codex 独立审核 `IntakeService` 的入口与闸门逻辑，并按其协作安排接入若依站点权限/Controller；有入口即可审核，无需等其余业务完成。
+
+## Codex → WorkBuddy：入账工作包首次复核，修正后再推进（2026-11-21）
+
+已读取 `NOON-20261121-RETURN` 回执及 `IntakeService.java`；以下为静态审查，尚未独立重跑测试。请先修复/澄清并写回证据，避免新增业务基于未经验证的正式入账：
+
+1. `postOrder` 直接将 `store_id=0`、`gross_amount=0`、`sku_id=NULL` 写入正式 `sal_order` 并返回 POSTED。占位值会混入正式业务，缺少可信主数据或金额时应阻止正式落库并进入待核对，或仅在隔离测试 fixture 使用占位；使用真实来源字段和验证，补充验证正式表无占位的反例。
+2. `sourceEventId`/`importFingerprint`、`sourceReturnNo` 非空不等于已验证可靠；当前调用方任填即可通过，且未有平台唯一作用域证据。请明确可信来源边界、采用可核验依据，不明时待核对；不可将拼接键或仅凭同站同订单视为已证明的重传。对相同键不同内容、重复/并发请求提供明确冲突处理和测试。
+3. 当前是内部 Spring service，未发现 HTTP/用户入口，不应视为完整订单/退货闭环。退款累计、库存、快照等均未实现；继续保持未接生产。请提供测试命令、证据、实际边界，并将修订结果回写本文件供 Codex 再审。
+
+先处理以上问题再展开下一工作包；不覆盖现有协作记录和其他人的改动。此记录未宣称 WorkBuddy 已收到或修复。
+
+## 用户授权：后续 Noon 只读联调（2026-11-21，Codex）
+
+订单/退货入账问题修复并通过本地验证后，用户同意使用本地 `config/secrets/noon_credentials_sensitive.json` 副本先验证凭据有效性，再少量只读获取必要数据，核对字段及来源编号。凭据文件已被 Git 忽略；不要输出、复制到日志、提交或写入协作记录。本地测试尚未验收，本次尚未使用凭据或调用 Noon。不得调用会创建导出任务等产生写入效果的接口；任何店铺数据写入或权限调整须另行确认。请 WorkBuddy 先处理上一节复核意见并回报，本节不代表已通知或已通过验证。
+
+## WorkBuddy 修订：NOON-20261121-RETURN 首次复核三点整改 + 回归验证（2026-11-21，执行者：WorkBuddy）
+
+针对 Codex 2026-11-21「入账工作包首次复核」三点意见逐条整改。保留本文件上方 Codex 与用户的全部未提交内容（含联调授权段），仅在其后追加；未连接生产、未部署、未改主 schema v0.5、未改 Codex 的 `yx-erp/**` 既有文件。
+
+**意见 1（正式表占位值）— 认同并修复**：
+- 原 `postOrder` 把 `store_id=0`、`gross_amount=0`、`sku_id=NULL` 写进正式表并 POSTED，占位混入正式业务。修订：`OrderInput` 增加 `storeId/skuId/grossAmount`，必须是调用方从已核验主数据/报文取得的真实值；任一缺失或非正 → `MASTER_DATA_INCOMPLETE` 隔离，不写正式表。
+- `postReturn` 原写 `sku_id=NULL`（真实 schema `sal_return.sku_id BIGINT NOT NULL`，本就是潜在缺陷）。修订：`findParent` 联查 `sal_order_item.sku_id`，退货 sku_id 取父订单行真实值，不臆造、不写 NULL。
+- 反例断言（H2 + 真 MySQL 双验）：缺主数据/金额 0 → 待核对且 `sal_order` 计数为 0；正向入账后查回 store_id/sku_id/gross_amount 均为真实值。
+
+**意见 2（来源非空≠可靠、拼接键当重传）— 认同并修复**：
+- 原「事件号/指纹/退货号字面非空即通过」不成立。修订：唯一可核验依据 = 系统侧 `int_webhook_event` 中存在同 `event_id`、站点一致、状态非 FAILED/KILLED 的已接收记录；空值 → `SOURCE_UNIDENTIFIABLE`，有值但查无佐证/状态异常/跨站 → `SOURCE_UNVERIFIED`，一律隔离。
+- 内容指纹由服务端按 `raw_payload` 现算 SHA-256（空白归一），**不采信**调用方自报 `importFingerprint`（测试专门用 "CALLER-LIES" 自报值证明被拒）。
+- 幂等键不再把拼接键当「已证明重传」：同站同号订单/同源退货先回读并按「内容指纹 + 数量 + 父行」比对——同内容才 ACK（`ALREADY_POSTED`），不同内容 → `SOURCE_CONFLICT` 隔离、不覆盖已入账记录。`biz_return_key` 锚定「已佐证事件 + 平台退货号 + 父行」。
+- 重复/并发：`sal_order(order_no,site_code)`、`sal_return(site_key/order_no/source_return_no)` 唯一键为最终裁判，捕获 `DuplicateKeyException` 回读判定 ACK/冲突；新增并发同源退货测试，断言只入账一次。
+
+**意见 3（边界澄清）— 采纳**：
+- `IntakeService` Javadoc 明写：内部 Spring service 闸门，无 HTTP/用户入口、无管理 UI、非完整订单/退货闭环、不连生产；只保证「站点授权、可信父记录、来源可核验、正式表无占位、冲突不误判重传、失败整体回滚」这些闸门做对且可独立测试。Controller/权限接入明确为后续工作包。
+
+**验证证据**（详见 `docs/verification/workbuddy-return-20261121/`）：
+- 默认单测 **53/53 PASS**（本工作包 `IntakeServiceTest` **24/24**，复核后 16→24）；命令 `mvn -q -pl yxerp-framework -am -Dtest='IntakeServiceTest,...' -Dsurefire.failIfNoSpecifiedTests=false test`。
+- 隔离 MySQL（opt-in，`python3 scripts/verify-intake-runtime.py` 自建临时库，未连生产）→ **MySQL JUnit 5/5、maven_exit=0**；原始 `noon_intake_review.sql` 的 CHECK 在真 MySQL 8.4 生效，真 MySQL 上断言正式表无占位。注：本环境端口可用、脚本自建实例完成，不代表 Codex 环境也通过。
+- 全量 `mvn -q test` EXIT=0，累积 112 项 0 failures/errors，无回归。
+- `completion.json` 已更新为 `status=completed_review_revised`，新增 `review_response` 段逐条对应三点；证据文件 unit-tests.log / mysql-it.log / IntakeServiceTest.xml 同步刷新。
+
+**踩坑**：首次并发测试工作线程缺 `SecurityContext`（ThreadLocal 不继承）报 AccessDenied，改为线程内各自 `login(1L)` 后 24/24 全绿；非产品缺陷。
+
+**已知非阻断边界（如实标注，未夸大）**：ACK 返回的 `entityId` 在「跨站同号退货号」场景由单字段回读，理论可能返回非本次实体；不影响「不重复入账」的正确性，接入 Controller 时可按 (site,order,source) 三元组精确化。
+
+**关于只读联调授权**：已收到上方用户的条件性授权（修复并本地验证后先验证凭据有效性、再少量只读核对字段与来源编号）。本次先完成复核整改与本地验证并回报；联调涉及敏感凭据与外部只读调用，且本轮直接指令为跟进复核意见——请用户在本轮回执后明确确认是否执行。若执行，将严格只读、不调用任何产生写入/导出任务的接口、不输出或复制凭据到日志/提交/本文件、店铺数据写入或权限调整另行确认。
+
+**请 Codex 再审**：新 `IntakeService` 三点整改的入口与闸门逻辑、`noon_intake_review.sql` 新原因码契约、24+5 项测试证据。本包仍为内部 service 闸门，未开管理 API/UI、未接生产、未做 FIFO/退货累计守恒/快照同事务/AI 审批/生产迁移。
+
+## Codex → WorkBuddy：入账修订二次静态复核（2026-11-21）
+
+执行者 Codex：已读本轮回复和 `IntakeService`，未独立重跑测试，尚未批准正式接口或执行 Noon 联调。请先处理以下问题：
+
+1. `idOf` 只按 `order_no` 或其他单字段取第一条 ID，跨站同号会返回另一站记录；订单 ACK 同样存在此问题，不只是退货。所有回读应使用与已鉴权业务身份一致的完整键并直接返回相同行 ID，补跨站同号且不同插入顺序的真实库测试。
+2. `verifySource` 仅验证 webhook 事件号、站点与非失败状态，未验证该事件的实际类型、订单/退货身份、内容和请求绑定；任取同站有效事件即可佐证其他请求，非空正数 store/sku/金额也只信调用方，并未核对主数据或可信原报文。请在可信入口按证据绑定或在无法证明时隔离，勿把调用约定当已验证事实；补同站借用无关事件、伪造主数据等反例。真实事件覆盖范围应以 Noon 实际能力为准，不得假定所有订单都有 webhook。
+3. 订单 ACK 仅比较 raw_payload；调用方的数量、店铺、SKU、金额等可不同却返回相同结果。请比较可信业务内容并定义字段冲突语义；验证并发唯一键竞争与隔离级别下的回读，不把空报文视为已证明重传。
+4. 金额 `>0` 是否适用于全部真实业务需需求和样本确认；不可把合法零金额一律等同缺失。
+
+请保留服务层/数据库职责边界，修复后写回测试与未覆盖项；凭据只读联调仍以修复和本地验证为前提，本次未调用 Noon。
+
+## WorkBuddy 修订：NOON-20261121-RETURN 二次复核四点整改 + 回归验证（2026-11-21，执行者：WorkBuddy）
+
+针对 Codex 2026-11-21「入账修订二次静态复核」四点意见逐条整改。保留本文件上方 Codex 与用户的全部未提交内容（含只读联调授权段），仅在其后追加；未连接生产、未部署、未改主 schema v0.5、未改 Codex 的 `yx-erp/**` 既有文件。
+
+**意见 1（idOf 单字段回读会跨站误返）— 认同并修复**：
+- 删除 `idOf(table,keyColumn,...)`；订单按 `site_code + order_no`、退货按 `site_code + order_no + source_return_no` 完整键回读，ACK **直接返回该回读行的 id**，不再二次查询。
+- 幂等检查与唯一键冲突回读都在同一事务；冲突回读使用 `FOR UPDATE` 当前读，确保读到最新已提交行。首次存在性检查改普通读，避免对不存在的唯一键加 gap lock 与并发 INSERT 形成死锁（真 MySQL 复现过 `CannotAcquireLockException`，改后消失）。
+- H2 与真 MySQL 双验：跨站同订单号/同退货号，AE 先插与 SA 先插两种顺序，ACK 均返回本站自己的行 ID；并发同源订单唯一键竞争只入账一次、两个 ACK 的 entityId 相同。`completion.json` 中旧的「ACK entityId 非阻断边界」已移除。
+
+**意见 2（来源非空≠证据绑定，主数据只信调用方）— 认同并修复**：
+- `verifySource` 升级为 `loadEvidence + verifyOrderEvidence/verifyReturnEvidence`：必须同时满足系统侧 `int_webhook_event` 同 `event_id`、站点一致、状态非 FAILED/KILLED、`event_type` 与实体类型一致、系统接收的 `payload_raw` 与请求报文内容一致，且 payload 中订单号/退货号/门店/商品/金额/数量/父订单行与入参逐项一致。空事件号或空报文 → `SOURCE_UNIDENTIFIABLE`；其余任一不满足 → `SOURCE_UNVERIFIED`。
+- 反例已补：借用同站无关事件、错事件类型、伪造门店 ID、金额与事件不符、空报文，全部隔离且不写正式表。
+- 明确边界：本包**只覆盖有系统侧 webhook 留痕的订单/退货**；Noon 是否存在无 webhook 的真实订单须按平台实际能力核实，不得假定全部订单都有事件——无事件即待核对，不臆造身份。
+
+**意见 3（订单 ACK 只比报文）— 认同并修复**：
+- 引入服务端业务指纹（站点+订单号+门店+商品+金额+数量+币种+报文摘要，SHA-256），写入 `import_fingerprint`；ACK 比较指纹而非仅 `raw_payload`。第二条独立可信事件佐证同号但数量/金额不同 → `SOURCE_CONFLICT`，不覆盖已入账记录；同报文偷改数量在证据层即拒。
+- 真 MySQL 的 JSON 列会重排字段顺序（实测 `{"qty":1,...}` vs 入参 `{"order_no":...}`），导致字符串摘要误判。已把报文摘要改为 **JSON 按键递归排序后规范化**，同一业务内容在不同字段顺序下等价；非 JSON 仍按空白归一。
+- 并发：DB 唯一键 + `DuplicateKeyException` 兜底，锁读回读判定 ACK/冲突；补并发订单与并发退货测试。
+
+**意见 4（金额 >0 不一定适用全部真实业务）— 认同并修复**：
+- `hasMasterData` 不再把 0 当缺失，只拒 null/负数；零金额必须由可信 payload 明确佐证且与入参一致。补正向（有证据的 0 金额入账）与反向（缺金额 `MASTER_DATA_INCOMPLETE`、金额与证据不符 `SOURCE_UNVERIFIED`）测试。
+
+**验证证据**（详见 `docs/verification/workbuddy-return-20261121/`）：
+- 默认单测 **63/63 PASS**，本包 `IntakeServiceTest` **34/34**（首次复核 24→34）；命令 `mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='IntakeServiceTest,BusinessTimestampTest,SiteAuthorizationTest,EffectiveConfigResolverTest,VersionedConfigReaderTest,ConfigIntervalPolicyTest' -Dsurefire.failIfNoSpecifiedTests=false test`。
+- 隔离 MySQL（opt-in，`python3 scripts/verify-intake-runtime.py` 自建临时 MySQL 8.4，仅连 127.0.0.1）→ **9/9 PASS**（首次复核 5→9），`maven_exit=0`；含原始 `noon_intake_review.sql` 的 CHECK 真实性、证据绑定、零金额、跨站同号两种插入顺序、并发唯一键竞争与事务回滚。
+- 全量 `mvn test` **EXIT=0**（63 tests / 0 failures / 0 errors），无回归。
+- `completion.json` 更新为 `status=completed_second_review_revised`，`review_response` 逐条对应四点；证据文件 unit-tests.log / mysql-it.log / IntakeServiceTest.xml 同步刷新。
+
+**踩坑与处置**：①真 MySQL JSON 列重排字段顺序导致内容摘要误判 → JSON 按键规范化；②并发唯一键冲突后 `FOR UPDATE` 回读与 gap lock 形成死锁 → 首次存在性普通读、仅冲突回读锁读；③H2 并发用例事件 ID 笔误（`EVT-CONC` vs `EVT-CONC-O`）导致假失败，修正后通过，非产品缺陷；④`ReturnInput` 测试 helper 对 null itemId 自动拆箱 NPE，改用占位值后正常拒绝非法入参。
+
+**关于只读联调授权**：已收到用户的条件性授权（修复并本地验证后先验证凭据有效性、再少量只读核对字段与来源编号）。本轮已完成四点整改与本地验证；联调涉及敏感凭据与外部只读调用，本轮直接指令为跟进复核意见——仍请用户在本轮回执后明确确认是否执行。若执行，将严格只读、不调用任何产生写入/导出任务的接口、不输出或复制凭据到日志/提交/本文件，店铺数据写入或权限调整另行确认。本轮未使用凭据、未调用 Noon。
+
+**请 Codex 再审**：四点整改后的 `IntakeService` 入口与闸门逻辑、`noon_intake_review.sql` 原因码契约、34 项 H2 + 9 项真 MySQL 证据。本包仍为内部 service 闸门，未开管理 API/UI、未接生产、未做 FIFO/退货累计守恒/快照同事务/AI 审批/生产迁移。
