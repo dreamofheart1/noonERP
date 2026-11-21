@@ -1,0 +1,295 @@
+package com.yx.framework.fifo;
+
+import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Timestamp;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.mybatis.spring.SqlSessionFactoryBean;
+import org.mybatis.spring.SqlSessionTemplate;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+import com.yx.common.core.domain.entity.SysUser;
+import com.yx.common.core.domain.model.LoginUser;
+import com.yx.framework.fifo.FifoConsumptionService.DeliveryInput;
+import com.yx.framework.fifo.FifoConsumptionService.DeliveryLine;
+import com.yx.framework.fifo.FifoConsumptionService.Result;
+import com.yx.framework.security.site.SiteAuthGuard;
+import com.yx.system.mapper.SysUserSiteMapper;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/** NOON-20261121-FIFO 隔离 MySQL 集成验证（opt-in）：用真实 schema v0.5 DDL 验证 FIFO/守恒/并发在真库成立。 */
+@EnabledIfEnvironmentVariable(named = "NOON_MYSQL_TEST_PORT", matches = "[0-9]+")
+class MySqlFifoIT
+{
+    private static final ThreadLocal<String> DATABASE = new ThreadLocal<>();
+    private AnnotationConfigApplicationContext context;
+    private JdbcTemplate jdbc;
+    private FifoConsumptionService service;
+
+    private static DataSource serverDataSource()
+    {
+        int port = Integer.parseInt(System.getenv("NOON_MYSQL_TEST_PORT"));
+        String password = System.getenv("NOON_MYSQL_TEST_PASSWORD");
+        return new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:mysql://127.0.0.1:" + port + "/?allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=Asia/Shanghai",
+                "root", password);
+    }
+
+    @BeforeEach
+    void setUp() throws Exception
+    {
+        context = new AnnotationConfigApplicationContext(MysqlConfig.class);
+        jdbc = new JdbcTemplate(context.getBean(DataSource.class));
+        jdbc.execute("create table sys_user (user_id bigint primary key, status char(1), del_flag char(1))");
+        jdbc.update("insert into sys_user values (1,'0','0'), (2,'0','0')");
+        String siteSql = Files.readString(Path.of("../sql/noon_wp1_site_auth.sql"));
+        for (String s : siteSql.split(";")) if (!s.isBlank()) jdbc.execute(s);
+
+        String reviewSql = Files.readString(Path.of("../sql/noon_fifo_review.sql"));
+        for (String s : reviewSql.split(";"))
+        {
+            String t = stripComments(s);
+            if (!t.isBlank()) jdbc.execute(t);
+        }
+
+        // 真实 schema DDL：sal_order / sal_order_item / inv_batch / inv_batch_consumption / inv_stock_ledger / int_webhook_event。
+        String schema = Files.readString(Path.of("../../docs/noon-erp-schema-v0.5.sql"));
+        for (String table : new String[]{"sal_order", "sal_order_item", "inv_batch", "inv_batch_consumption",
+                "inv_stock_ledger", "int_webhook_event"})
+            jdbc.execute(extractCreateTable(schema, table));
+
+        service = context.getBean(FifoConsumptionService.class);
+        login(1L);
+    }
+
+    private static String extractCreateTable(String schema, String table)
+    {
+        String marker = "CREATE TABLE IF NOT EXISTS " + table + " (";
+        int start = schema.indexOf(marker);
+        if (start < 0) throw new IllegalStateException("未找到建表语句：" + table);
+        int end = schema.indexOf(";", start);
+        if (end < 0) throw new IllegalStateException("建表语句未闭合：" + table);
+        return schema.substring(start, end + 1);
+    }
+
+    private static String stripComments(String sql)
+    {
+        StringBuilder out = new StringBuilder();
+        for (String line : sql.split("\\R"))
+            if (!line.stripLeading().startsWith("--")) out.append(line).append('\n');
+        return out.toString();
+    }
+
+    @AfterEach
+    void tearDown()
+    {
+        SecurityContextHolder.clearContext();
+        if (context != null) context.close();
+        String database = DATABASE.get();
+        if (database != null)
+        {
+            new JdbcTemplate(serverDataSource()).execute("drop database if exists `" + database + "`");
+            DATABASE.remove();
+        }
+    }
+
+    private static void login(long id)
+    {
+        SysUser user = new SysUser();
+        user.setUserId(id);
+        user.setUserName("user" + id);
+        LoginUser principal = new LoginUser(id, 100L, user, Set.of("*:*:*"));
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(principal, "", List.of()));
+    }
+
+    private long seedOrder(String site, String orderNo)
+    {
+        jdbc.update("insert into sal_order(site_code,order_no,store_id,partner_sku,qty,gross_amount,currency) "
+                + "values (?,?,1,'SKU',10,100,'AED')", site, orderNo);
+        return jdbc.queryForObject("select id from sal_order where order_no=? and site_code=?", Long.class, orderNo, site);
+    }
+
+    private long seedItem(long orderId, long sku, int qty)
+    {
+        jdbc.update("insert into sal_order_item(sal_order_id,order_no,sku_id,qty,unit_price) "
+                + "values (?,?,?,?,10)", orderId, "ON:" + UUID.randomUUID(), sku, qty);
+        return jdbc.queryForObject("select id from sal_order_item where sal_order_id=? and sku_id=?", Long.class, orderId, sku);
+    }
+
+    private long seedBatch(String site, long sku, long wh, String receivedAt, int qty, String cost)
+    {
+        jdbc.update("insert into inv_batch(batch_no,sku_id,warehouse_id,site_code,received_at,qty_in,qty_remaining,"
+                + "unit_cost,status) values (?,?,?,?,?,?,?,?,'OPEN')",
+                "B:" + UUID.randomUUID(), sku, wh, site, Timestamp.valueOf(receivedAt), qty, qty, new BigDecimal(cost));
+        return jdbc.queryForObject("select id from inv_batch where batch_no like 'B:%' and sku_id=? order by id desc limit 1",
+                Long.class, sku);
+    }
+
+    private void seedLedger(String site, long sku, long wh, int avail)
+    {
+        jdbc.update("insert into inv_stock_ledger(sku_id,warehouse_id,site_code,qty_available) values (?,?,?,?)",
+                sku, wh, site, avail);
+    }
+
+    private void seedEvent(String eventId, String site, String payload)
+    {
+        jdbc.update("insert into int_webhook_event(event_id,event_type,site_code,payload_raw,received_at,status) "
+                        + "values (?,?,?,?,current_timestamp(3),'PROCESSED')",
+                eventId, "SALE_DELIVERY", site, payload);
+    }
+
+    private static String payload(long itemId, long sku, int qty)
+    {
+        return "{\"sal_order_item_id\":" + itemId + ",\"lines\":[{\"sku_id\":" + sku + ",\"qty\":" + qty + "}]}";
+    }
+
+    private static DeliveryInput input(String site, String eventId, long itemId, long sku, int qty, String raw)
+    {
+        return new DeliveryInput(site, eventId, itemId, List.of(new DeliveryLine(sku, qty)), raw);
+    }
+
+    private int count(String table) { return jdbc.queryForObject("select count(*) from " + table, Integer.class); }
+
+    @Test
+    void fifoOrderAndConservationOnRealSchema()
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 5, "10.0000");
+        seedBatch("AE", 11L, 100L, "2026-11-05 00:00:00", 5, "12.0000");
+        String raw = payload(item, 11L, 7);
+        seedEvent("EVT-R1", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-R1", item, 11L, 7, raw));
+        assertTrue(r.posted(), "真库应过账");
+        assertEquals(2, count("inv_batch_consumption"), "跨 2 批应写 2 行");
+        assertEquals(5, jdbc.queryForObject("select sum(qty) from inv_batch_consumption where unit_cost=10.0000", Integer.class));
+        assertEquals(2, jdbc.queryForObject("select sum(qty) from inv_batch_consumption where unit_cost=12.0000", Integer.class));
+        assertEquals(13, jdbc.queryForObject("select qty_available from inv_stock_ledger", Integer.class));
+        assertEquals(1, jdbc.queryForObject("select count(*) from inv_batch where status='CLOSED'", Integer.class), "老批扣满关批");
+    }
+
+    @Test
+    void negativeSignTinyIntColumnReadsNumericallyOnRealSchema()
+    {
+        // 真实 schema sign TINYINT(1)：服务写 sign=1 后，读回必须是数值语义（当前读 sum 用 sign=1）。
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 2);
+        seedEvent("EVT-R2", "AE", raw);
+        assertTrue(service.postDelivery(input("AE", "EVT-R2", item, 11L, 2, raw)).posted());
+        // 累计妥投守恒 sumPostedOnItem 用 sign=1 过滤；若 TINYINT→Boolean 映射错误会读不到、导致第二次超限误判。
+        String raw2 = payload(item, 11L, 2);
+        seedEvent("EVT-R2B", "AE", raw2);
+        assertTrue(service.postDelivery(input("AE", "EVT-R2B", item, 11L, 2, raw2)).posted(),
+                "第二次妥投应能正确读取已投 2，累计 4<=10");
+        assertEquals(4, jdbc.queryForObject("select sum(qty) from inv_batch_consumption", Integer.class));
+    }
+
+    @Test
+    void concurrentSameEventOnlyPostsOnceOnRealSchema() throws Exception
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 20, "10.0000");
+        String raw = payload(item, 11L, 2);
+        seedEvent("EVT-R3", "AE", raw);
+        DeliveryInput in = input("AE", "EVT-R3", item, 11L, 2, raw);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postDelivery(in); });
+        Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postDelivery(in); });
+        start.countDown();
+        Result r1 = f1.get(), r2 = f2.get();
+        pool.shutdownNow();
+        login(1L);
+        assertTrue(r1.posted() && r2.posted());
+        assertEquals(2, jdbc.queryForObject("select coalesce(sum(qty),0) from inv_batch_consumption", Integer.class),
+                "同事件并发只扣一次，不双计");
+    }
+
+    @Test
+    void batchShortageRollsBackOnRealSchema()
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 20);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 3, "10.0000");
+        String raw = payload(item, 11L, 5);
+        seedEvent("EVT-R4", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-R4", item, 11L, 5, raw));
+        assertFalse(r.posted());
+        assertEquals("BATCH_QTY_SHORTAGE", r.reasonCode());
+        assertEquals(0, count("inv_batch_consumption"), "守恒失败无部分写入");
+        assertEquals(3, jdbc.queryForObject("select qty_remaining from inv_batch", Integer.class), "批次未扣");
+        assertEquals(20, jdbc.queryForObject("select qty_available from inv_stock_ledger", Integer.class), "台账未扣");
+    }
+
+    @Configuration
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class MysqlConfig
+    {
+        @Bean
+        DataSource dataSource()
+        {
+            DataSource ds = serverDataSource();
+            String database = "noon_fifo_" + UUID.randomUUID().toString().replace("-", "");
+            new JdbcTemplate(ds).execute("create database `" + database + "` character set utf8mb4");
+            DATABASE.set(database);
+            org.springframework.jdbc.datasource.DriverManagerDataSource configured =
+                    (org.springframework.jdbc.datasource.DriverManagerDataSource) ds;
+            configured.setUrl(configured.getUrl().replace("/?", "/" + database + "?"));
+            return configured;
+        }
+
+        @Bean
+        PlatformTransactionManager transactionManager(DataSource ds) { return new DataSourceTransactionManager(ds); }
+
+        @Bean
+        SysUserSiteMapper mapper(DataSource ds) throws Exception
+        {
+            SqlSessionFactoryBean factory = new SqlSessionFactoryBean();
+            factory.setDataSource(ds);
+            factory.setMapperLocations(new ClassPathResource("mapper/system/SysUserSiteMapper.xml"));
+            return new SqlSessionTemplate(factory.getObject()).getMapper(SysUserSiteMapper.class);
+        }
+
+        @Bean
+        SiteAuthGuard guard(SysUserSiteMapper mapper) { return new SiteAuthGuard(mapper); }
+
+        @Bean
+        JdbcTemplate jdbcTemplate(DataSource ds) { return new JdbcTemplate(ds); }
+
+        @Bean
+        FifoConsumptionService fifoConsumptionService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard)
+        {
+            return new FifoConsumptionService(jdbcTemplate, guard);
+        }
+    }
+}

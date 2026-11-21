@@ -1505,3 +1505,23 @@ GitHub `refs/heads/main` 的只读查询值与本机 `origin/main` 一致；本�
 **验证**：H2 99/99（ReversalServiceTest 25/25 不变）；隔离 MySQL **21/21**（五次 18 → 21），连续两次独立运行稳定；全量 `mvn test` EXIT=0（99 tests）。证据日志/XML 刷新，`completion.json` 状态 `completed_sixth_review_revised`。
 
 **关于库存/退货业务（用户授权）**：研究报告已梳理需求文档（PRD v1.0 / 需求 v0.2 / schema v0.5-er）与真实平台事实边界。按授权将分阶段实现「可调用、可验证的业务入口 + 明确事务边界」，覆盖批次数量守恒、累计退货、并发/重复处理；**真实平台未验证字段/来源不臆造**，接口接入复用现有 SiteAuthGuard 站点权限。这是较大工程，下一工作包另起独立验证目录与回执，不在本包混做。请 Codex 独立审核与联调。本包未推送，由用户自行决定。
+
+## WorkBuddy → Codex：库存/退货业务阶段一（FIFO 出库消耗）交付回执（2026-11-21，执行者：WorkBuddy）
+
+依据你在「用户授权：继续库存与退货开发」中的任务安排，本轮先完成索引 ownership 安全项（见上一条回执，已提交 f23c2d6），随后按分阶段启动库存业务。**本条为阶段一交付**。保留本文件上方全部记录，仅在其后追加；未连生产、未部署、未改主 schema v0.5、未推送、未覆盖他人改动。
+
+**阶段一范围：FIFO 批次出库消耗闸门 FifoConsumptionService.postDelivery**：
+- 依据：docs/noon-erp-prd-v1.0.md §4 FR-04.2（FIFO received_at ASC,batch_id ASC 扣减）、schema v0.5 inv_batch/inv_batch_consumption/inv_stock_ledger/sal_order_item 约束、幂等键契约 SALE:delivery_event_id。
+- 闸门：站点授权 → 可信父订单行（sal_order_item+sal_order 真实存在、站点一致）→ 系统侧事件佐证（int_webhook_event）→ 幂等/冲突前置 → 两阶段先判定后写入 → FIFO 选 OPEN 批 FOR UPDATE 当前读 → 批次剩余量守恒 → 妥投量不超订单可投量(qty-qty_cancelled) → 台账 qty_available 递减 → 写 SALE 消耗流水(sign=+1)+审计同事务。
+- 覆盖：批次数量守恒、累计妥投、并发（同事件只入账一次）、明确事务边界、站点权限（复用 SiteAuthGuard）。
+- 平台事实纪律：SALE_DELIVERY 是系统侧内部契约、非 Noon 原生事件类型；事件号只信 int_webhook_event 留痕，SKU/订单行/数量取数据库真实值，不臆造平台字段。真实类型适配层未实现（已写入 not_done）。
+
+**真库实证并修复 3 个跨库/DDL 坑**：① sal_order_item.order_no 为 NOT NULL 无默认值，夹具显式写入；② MySQL UPDATE SET 左到右求值，内联 CASE 判断 qty_remaining 在真库读到已更新值致关批失败（H2 读原值通过）→ 改按规划汇总剩余量显式计算 status；③ H2 不支持 IF()→CASE WHEN。并据此把服务重构为「两阶段先判定后写入」——H2 反例实证原实现"先扣旧批再发现台账不足"会残留部分写入（返回 NEEDS_REVIEW 不触发 rollbackFor），改为所有判定前置后无部分写入。
+
+**验证证据**（详见 docs/verification/workbuddy-fifo-20261121/）：
+- H2 FifoConsumptionServiceTest **15/15 PASS**；全量 mvn test **114/114 EXIT=0**（原 99 + FIFO 15，无回归）。
+- 隔离 MySQL 8.4 MySqlFifoIT **4/4 PASS**（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚），maven_exit=0。证据日志/XML/completion.json（状态 completed_phase1）已生成。
+
+**后续阶段（未实现，按授权分阶段推进）**：阶段二 入库批次生成与数量守恒；阶段三 退货处置闭环（A 级 RETURN_RESTOCK 新批、B/C 级 RETURN_LOSS 全额计损、赔偿只在 COMPENSATION 计一次、退款冲收入，衔接 ReversalService）；阶段四 跨期快照重算 + COGS 汇总回填；阶段五 端到端可验证入口与 PRD C-2/C-2b/C-5 数字案例验收。HTTP 入口、真实平台适配、AI 审批、生产迁移均未覆盖。
+
+**请 Codex 独立审核与联调**：阶段一 FIFO 出库守恒闸门的两阶段写入、幂等/并发、真库 TINYINT 与关批修复。本包未推送，由用户自行决定。

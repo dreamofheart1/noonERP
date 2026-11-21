@@ -1,0 +1,73 @@
+{
+  "marker": "NOON-20261121-FIFO",
+  "status": "completed_phase1",
+  "summary": "库存批次与退货数量业务·阶段一：FIFO 批次出库消耗服务（用户 2026-11-21 授权分阶段开发的首个工作包）。实现内部 Spring service 闸门 FifoConsumptionService.postDelivery：站点授权 + 可信父订单行（sal_order/sal_order_item 真实存在、站点一致）+ 系统侧事件证据绑定 + 幂等键 SALE:sourceEventId + 两阶段先判定后写入 + FIFO 按 received_at/id 选 OPEN 批 FOR UPDATE 当前读 + 批次剩余量守恒 + 妥投量不超订单可投量 + 台账 qty_available 同步递减 + 写 SALE 消耗流水(sign=+1) + 不可变审计同事务。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。SALE_DELIVERY 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
+  "files": [
+    "yx-erp/sql/noon_fifo_review.sql",
+    "yx-erp/yxerp-framework/src/main/java/com/yx/framework/fifo/FifoConsumptionService.java",
+    "yx-erp/yxerp-framework/src/test/java/com/yx/framework/fifo/FifoConsumptionServiceTest.java",
+    "yx-erp/yxerp-framework/src/test/java/com/yx/framework/fifo/MySqlFifoIT.java",
+    "scripts/verify-fifo-runtime.py",
+    "docs/verification/workbuddy-fifo-20261121/unit-tests.log",
+    "docs/verification/workbuddy-fifo-20261121/mysql-it.log",
+    "docs/verification/workbuddy-fifo-20261121/FifoConsumptionServiceTest.xml",
+    "docs/verification/workbuddy-fifo-20261121/MySqlFifoIT.xml",
+    "docs/agent-collaboration.md"
+  ],
+  "checks": [
+    {
+      "name": "H2 默认单元测试",
+      "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='FifoConsumptionServiceTest' -Dsurefire.failIfNoSpecifiedTests=false test",
+      "result": "15/15 PASS（正向 FIFO/授权/父行/证据/幂等/冲突/守恒/并发/审计）",
+      "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
+    },
+    {
+      "name": "隔离 MySQL 集成测试（opt-in）",
+      "command": "python3 scripts/verify-fifo-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
+      "result": "maven_exit=0；MySQL JUnit tests=4 errors=0 failures=0 skipped=0（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚）",
+      "evidence": "docs/verification/workbuddy-fifo-20261121/mysql-it.log"
+    },
+    {
+      "name": "全量默认测试无回归",
+      "command": "mvn test",
+      "result": "EXIT=0；114 tests / 0 failures / 0 errors（原 99 + FIFO 15）",
+      "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
+    }
+  ],
+  "scope_boundaries": {
+    "done": [
+      "站点授权闸门（SiteAuthGuard，非超管无授权抛 AccessDeniedException）",
+      "可信父订单行：sal_order_item + sal_order 真实存在、站点与调用方一致，sku/可投数量取数据库真实值",
+      "来源证据绑定：event_id 在系统侧 int_webhook_event 留痕、站点一致、状态非 FAILED/KILLED、event_type=SALE_DELIVERY、payload 与请求内容一致且 sal_order_item_id/lines(sku,qty) 逐项一致",
+      "幂等/冲突前置：biz_event_key=SALE:sourceEventId，同键核心业务一致 ACK 同一行 ID，报文不符 SOURCE_UNVERIFIED / SOURCE_CONFLICT 隔离",
+      "FIFO 选批：按 received_at ASC, id ASC 只选 status=OPEN 且 qty_remaining>0 的批次，FOR UPDATE 当前读锁定",
+      "批次剩余量守恒：每行分配不超批次剩余量（规划阶段按 batchId 跟踪已分配量），不足 BATCH_QTY_SHORTAGE 隔离且无部分写入；扣到 0 关批",
+      "妥投量守恒：该订单行累计已过账 SALE + 本次 <= qty - qty_cancelled（当前读行锁 + long 累加），超出 DELIVERY_EXCEEDS_ORDER 隔离",
+      "台账同步：qty_available 按批次仓库递减且 >=0（条件 UPDATE 防并发超扣），不足 LEDGER_SHORTAGE 隔离",
+      "两阶段先判定后写入：所有守恒/来源判定在写入前完成，任何隔离都无部分写入；写入阶段异常整体回滚、不在半途放行",
+      "写入：sign=+1 的 SALE 消耗流水（金额=数量×单位成本），批次扣减、台账扣减、不可变审计同事务",
+      "并发：同事件双线程只入账一次（唯一键 (biz_event_key,batch_id) + 幂等）"
+    ],
+    "not_done": [
+      "HTTP/Controller 与管理 UI 入口（本包为内部 service 闸门，非业务闭环）",
+      "真实平台事件类型→内部类型适配层：SALE_DELIVERY 为系统侧内部契约，真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现；真实妥投事件号来源待联调",
+      "入库批次生成（inv_inbound CONFIRMED 按 qty_qualified 生成 inv_batch）与数量守恒（阶段二）",
+      "退货处置闭环：A 级 RETURN_RESTOCK 新批、B/C 级 RETURN_LOSS 按原成本计损、赔偿只在 COMPENSATION 计一次、退款冲收入（阶段三，衔接 ReversalService）",
+      "跨期快照重算与 COGS 汇总回填（sal_order_item.cogs_amount 汇总），cross_period 恒置 0",
+      "数据库最小权限、AI 隔离审批、受控归档与生产迁移",
+      "未连接生产、未部署、未推送",
+      "锁异常调用方有界重试未接本服务入口（可复用 ReversalRetryInvoker 范式）"
+    ]
+  },
+  "real_schema_findings_fixed": [
+    "sal_order_item.order_no 为 NOT NULL 无默认值，测试夹具必须显式写入",
+    "MySQL UPDATE SET 列表从左到右求值：内联 CASE 判断 qty_remaining 在真库读到已更新值导致关批失败（H2 读原值能通过）；改为按规划汇总剩余量显式计算 status，跨库一致",
+    "H2 不支持 IF() 函数，改 CASE WHEN；最终弃用内联表达式走显式状态写入"
+  ],
+  "platform_recon_reference": "真实事件类型来自 Codex 2026-11-21 只读联调，固化于 ../workbuddy-return-20261121/completion.json 的 platform_recon_20261121；本包未读取凭据、未调用 Noon",
+  "preserved_changes": [
+    "docs/agent-collaboration.md 中 Codex 与用户追加的全部记录（本包仅在其后追加，未覆盖）",
+    "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
+  ],
+  "generated_at": "2026-11-21T18:40:00+08:00"
+}

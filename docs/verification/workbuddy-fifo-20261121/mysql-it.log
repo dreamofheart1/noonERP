@@ -1,0 +1,28 @@
+NOON-20261121-FIFO 阶段一 隔离 MySQL 集成验证（opt-in）
+执行时间：2026-11-21 18:40 +08:00
+命令：python3 scripts/verify-fifo-runtime.py \
+        --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
+        --maven /tmp/apache-maven-3.9.11/bin/mvn \
+        --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
+
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-fifo-04j2zk0r
+MySQL JUnit: tests=4 errors=0 failures=0 skipped=0
+maven_exit=0
+
+4 项真库覆盖（均基于 docs/noon-erp-schema-v0.5.sql 原始 DDL 建表）：
+  1) fifoOrderAndConservationOnRealSchema：真实 schema 下两批 FIFO 顺序扣减，老批满扣关批（status=CLOSED）、
+     新批部分，2 条消耗流水 sum 与手算一致，台账 qty_available=13。
+  2) negativeSignTinyIntColumnReadsNumericallyOnRealSchema：sign TINYINT(1) 真库写 sign=1 后，
+     当前读 sumPostedOnItem（sign=1 过滤）能正确读取已投 2，第二次妥投累计 4<=10 成功——
+     证明累计守恒查询在真实 TINYINT(1) 列上语义正确。
+  3) concurrentSameEventOnlyPostsOnceOnRealSchema：真库同事件双线程并发，只扣一次、不双计 COGS。
+  4) batchShortageRollsBackOnRealSchema：批次不足 BATCH_QTY_SHORTAGE，无部分写入，批次/台账均未被扣。
+
+真库实证坑（已修复）：
+  A) sal_order_item.order_no 为 NOT NULL 无默认值，测试夹具必须显式写入。
+  B) MySQL UPDATE SET 列表从左到右求值：status=CASE WHEN qty_remaining-?=0 在真库读到已更新值导致关批失败；
+     H2 读原值能通过。改为按规划汇总剩余量显式计算 status（CLOSED/OPEN），跨库一致。
+  C) IF() 函数 H2 不支持，改 CASE WHEN（后因 B 弃用内联表达式，走显式状态写入）。
+  以上均在真 MySQL 8.4 复现并修复，双库回归通过。
+
+说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。
