@@ -40,11 +40,19 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * 真实类型→内部类型适配层未实现，禁止把内部类型当平台事实。来源佐证只信系统侧
  * {@code int_webhook_event} 留痕，不因调用方字面非空就通过。
  *
+ * <p><b>处理顺序（二次复核修订，务必按此理解）</b>：授权 → 锁原行并校验 sign/类型 →
+ * 父退货 → 一致性 → 来源证据 → <b>幂等/冲突判定（前置）</b> → <b>仅确属新增才算累计守恒</b> →
+ * 写入。幂等必须前置于守恒：否则原消耗已用满时，相同事件重传会被"已冲回+本次>原消耗"
+ * 误判为超限隔离，而不是 ACK（Codex 二次复核意见 1）。
+ *
  * <p><b>累计守恒契约</b>：schema v0.5 明确 DDL 只负责单次幂等（uk_consume_biz_event），
- * 累计守恒须应用层事务。本服务先以 {@code SELECT ... FOR UPDATE} 锁住原消耗行，
- * 再 SUM(reversal_of_id=原行 AND sign=-1) 与 SUM(sal_return_id=父退货 AND sign=-1)，
- * 确认"已冲回 + 本次 qty"同时不超过原消耗 qty 与父退货 qty 才过账；任一超限进待核对，
- * 不写正式表。并发由 DB 唯一键 + DuplicateKeyException 兜底。
+ * 累计守恒须应用层事务。以 {@code SELECT ... FOR UPDATE} 锁住原消耗行与父退货行使同组串行；
+ * 两次 SUM 一律用 {@code FOR UPDATE} <b>当前读</b>（Codex 二次复核意见 2），避免 MySQL
+ * REPEATABLE READ 下上游普通读先建快照导致 SUM 看不到已提交红冲行而超额。锁顺序固定为
+ * 原消耗行 → 父退货行 → 汇总行（按 id 升序），全程当前读、无循环等待；撞锁异常由事务
+ * 整体回滚，调用方重试（本 service 不吞锁异常、不在半途放行）。确认"已冲回 + 本次 qty"
+ * 同时不超过原消耗 qty 与父退货 qty（long 防溢出）才过账；任一超限进待核对，不写正式表。
+ * DB 唯一键 + DuplicateKeyException 兜底并发重传。
  *
  * <p>事务：红冲写入与不可变审计同事务，失败整体回滚。
  */
@@ -96,14 +104,16 @@ public class ReversalService
     /** 父退货真实值：站点、SKU、订单行、数量只从数据库取。 */
     private record ParentReturn(String siteCode, Long skuId, Long salOrderItemId, int qty) { }
 
-    /** 原消耗行真实值：批次、SKU、订单行、数量、成本、类型只从数据库取。 */
+    /** 原消耗行真实值：批次、SKU、订单行、数量、成本、类型、sign 只从数据库取。 */
     private record OriginalConsumption(Long id, Long batchId, Long skuId, Long salOrderItemId,
-                                       int qty, java.math.BigDecimal unitCost, String period, String moveType) { }
+                                       int qty, java.math.BigDecimal unitCost, String period, String moveType,
+                                       int sign) { }
 
     /**
      * 红冲过账闸门。
-     * 步骤：站点授权 → 输入校验 → 锁原消耗行 → 父退货/来源证据 → 一致性 → 累计守恒 →
-     * 幂等比对 → 写入/隔离，全程同事务。
+     * 步骤：站点授权 → 输入校验 → 锁原行(sign/类型) → 父退货/一致性 → 来源证据 →
+     * 幂等比对(前置) → 仅确属新增才算累计守恒(当前读) → 写入/隔离，全程同事务。
+     * 幂等前置是关键：原消耗已用满时，同一事件重传必须先命中 ACK，不能被守恒误判为超限。
      */
     @Transactional(rollbackFor = Exception.class)
     public Result postReversal(ReversalInput in)
@@ -113,12 +123,14 @@ public class ReversalService
         // 1) 站点授权：空授权/无权限直接抛 AccessDeniedException，不留隔离。
         guard.requireSite(in.siteCode());
 
-        // 2) 先锁原消耗行（FOR UPDATE）：并发红冲同一原行时串行化，避免 SUM 后各自放行导致超额。
+        // 2) 锁原消耗行（FOR UPDATE 当前读）：串行化同原行并发，并读取真实 sign/类型。
         OriginalConsumption orig = lockOriginal(in.originalConsumptionId());
         if (orig == null)
             return quarantine(in, "ORIGINAL_CONSUMPTION_MISSING", "原消耗行不存在，禁止臆造批次消耗", actor);
-        if (!"SALE".equals(orig.moveType()))
-            return quarantine(in, "ORIGINAL_NOT_SALE", "原消耗行不是 SALE 正常扣减，禁止红冲非销售消耗", actor);
+        if (orig.sign() != 1 || !"SALE".equals(orig.moveType()))
+            return quarantine(in, "ORIGINAL_NOT_SALE",
+                    "原消耗行不是 sign=+1 的 SALE 正常扣减（实际 sign=" + orig.sign()
+                            + ", move_type=" + orig.moveType() + "），禁止红冲非销售扣减", actor);
 
         // 3) 可信父退货：站点/SKU/订单行/数量只取数据库真实值。
         ParentReturn parent = findParentReturn(in.salReturnId());
@@ -134,30 +146,24 @@ public class ReversalService
         if (sourceProblem != null)
             return quarantine(in, sourceProblem, "红冲来源证据不足或与请求绑定不一致", actor);
 
-        // 5) 累计守恒（已锁原行）：已冲回 + 本次不得超过原消耗 qty，也不得超过父退货 qty。
-        int alreadyOnOriginal = sumReversedOnOriginal(orig.id());
-        if (alreadyOnOriginal + in.qty() > orig.qty())
+        // 5) 幂等/冲突【前置】：先经可信证据 + 完整业务键判定，命中即 ACK 或冲突隔离，
+        //    绝不让已用满的原消耗把合法重传误判为超限（Codex 二次复核意见 1）。
+        String bizEventKey = "REV:" + in.sourceEventId();
+        Result idempotent = checkIdempotent(in, parent, orig, bizEventKey, actor);
+        if (idempotent != null) return idempotent;
+
+        // 6) 累计守恒【仅确属新增】：已锁原行 + 父退货行，SUM 用 FOR UPDATE 当前读
+        //    （Codex 二次复核意见 2），long 防溢出（意见 3）。
+        long alreadyOnOriginal = sumReversedOnOriginal(orig.id());
+        if (longSum(alreadyOnOriginal, in.qty()) > orig.qty())
             return quarantine(in, "REVERSAL_EXCEEDS_ORIGINAL",
                     "累计红冲将超过原消耗数量（已冲回 " + alreadyOnOriginal + " + 本次 " + in.qty()
                             + " > 原消耗 " + orig.qty() + "）", actor);
-        int alreadyOnReturn = sumReversedOnReturn(in.salReturnId());
-        if (alreadyOnReturn + in.qty() > parent.qty())
+        long alreadyOnReturn = sumReversedOnReturn(in.salReturnId());
+        if (longSum(alreadyOnReturn, in.qty()) > parent.qty())
             return quarantine(in, "REVERSAL_EXCEEDS_RETURN",
                     "累计红冲将超过退货单数量（已冲回 " + alreadyOnReturn + " + 本次 " + in.qty()
                             + " > 退货 qty " + parent.qty() + "）", actor);
-
-        // 6) 幂等 + 冲突：biz_event_key = REV:sourceEventId，完整键锁读回读。
-        String bizEventKey = "REV:" + in.sourceEventId();
-        List<Map<String, Object>> existing = jdbc.queryForList(
-                "SELECT id,qty,sku_id,sal_return_id,reversal_of_id FROM inv_batch_consumption "
-                        + "WHERE biz_event_key=? AND batch_id=? FOR UPDATE", bizEventKey, orig.batchId());
-        if (!existing.isEmpty())
-        {
-            Map<String, Object> row = existing.get(0);
-            return sameReversalBusiness(row, parent, orig, in)
-                    ? new Result(Outcome.POSTED, ((Number) row.get("id")).longValue(), null, "ALREADY_POSTED")
-                    : quarantine(in, "SOURCE_CONFLICT", "同源红冲事件但核心业务字段不同，禁止当重传 ACK", actor);
-        }
 
         // 7) 写入红冲流水：sign=-1 表示红冲，金额正值乘 sign 即 COGS 减项。
         LocalDateTime now = now();
@@ -203,6 +209,23 @@ public class ReversalService
         return new Result(Outcome.POSTED, key.longValue(), null, "POSTED");
     }
 
+    /**
+     * 幂等/冲突前置判定：完整业务键锁读。命中且核心业务一致 → ACK（返回既有行 ID）；
+     * 同键核心业务不同 → SOURCE_CONFLICT 隔离；未命中返回 null 表示确属新增，继续守恒检查。
+     */
+    private Result checkIdempotent(ReversalInput in, ParentReturn parent, OriginalConsumption orig,
+                                   String bizEventKey, long actor)
+    {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id,qty,sku_id,sal_return_id,reversal_of_id FROM inv_batch_consumption "
+                        + "WHERE biz_event_key=? AND batch_id=? FOR UPDATE", bizEventKey, orig.batchId());
+        if (rows.isEmpty()) return null;
+        Map<String, Object> row = rows.get(0);
+        return sameReversalBusiness(row, parent, orig, in)
+                ? new Result(Outcome.POSTED, ((Number) row.get("id")).longValue(), null, "ALREADY_POSTED")
+                : quarantine(in, "SOURCE_CONFLICT", "同源红冲事件但核心业务字段不同，禁止当重传 ACK", actor);
+    }
+
     /** 并发撞唯一键后完整键锁读回读：同业务 ACK 并返回同一行 ID，不同隔离。 */
     private Result resolveConcurrent(ReversalInput in, ParentReturn parent, OriginalConsumption orig,
                                      String bizEventKey, long actor)
@@ -225,13 +248,13 @@ public class ReversalService
                 && sameId(((Number) row.get("reversal_of_id")).longValue(), orig.id());
     }
 
-    /** 锁原消耗行并读取真实值（FOR UPDATE 当前读，杜绝并发超额）。 */
+    /** 锁原消耗行并读取真实值（FOR UPDATE 当前读；含 sign 供显式校验）。 */
     private OriginalConsumption lockOriginal(Long id)
     {
         if (id == null || id <= 0) return null;
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,batch_id,sku_id,sal_order_item_id,qty,unit_cost,period,move_type FROM inv_batch_consumption "
-                        + "WHERE id=? FOR UPDATE", id);
+                "SELECT id,batch_id,sku_id,sal_order_item_id,qty,unit_cost,period,move_type,sign "
+                        + "FROM inv_batch_consumption WHERE id=? FOR UPDATE", id);
         if (rows.size() != 1) return null;
         Map<String, Object> row = rows.get(0);
         return new OriginalConsumption(((Number) row.get("id")).longValue(),
@@ -241,7 +264,8 @@ public class ReversalService
                 ((Number) row.get("qty")).intValue(),
                 (java.math.BigDecimal) row.get("unit_cost"),
                 (String) row.get("period"),
-                (String) row.get("move_type"));
+                (String) row.get("move_type"),
+                ((Number) row.get("sign")).intValue());
     }
 
     private ParentReturn findParentReturn(Long id)
@@ -257,21 +281,36 @@ public class ReversalService
                 ((Number) row.get("qty")).intValue());
     }
 
-    private int sumReversedOnOriginal(Long originalId)
+    /**
+     * 已冲回原消耗行数量：先 {@code SELECT id,qty ... FOR UPDATE} 当前读锁住所有匹配红冲行
+     * （按 id 升序固定锁序），再在 Java 端以 long 累加。这样避免 MySQL RR 下普通一致性读
+     * 使用旧快照看不到已提交红冲行而超额（Codex 二次复核意见 2），且跨 MySQL/H2 兼容
+     * （H2 不支持聚合 + FOR UPDATE）。行锁在当前事务内读到最新已提交值，杜绝幻读。
+     */
+    private long sumReversedOnOriginal(Long originalId)
     {
-        Integer n = jdbc.queryForObject(
-                "SELECT COALESCE(SUM(qty),0) FROM inv_batch_consumption WHERE reversal_of_id=? AND sign=-1",
-                Integer.class, originalId);
-        return n == null ? 0 : n;
+        return sumLocked("SELECT id,qty FROM inv_batch_consumption "
+                + "WHERE reversal_of_id=? AND sign=-1 ORDER BY id FOR UPDATE", originalId);
     }
 
-    private int sumReversedOnReturn(Long returnId)
+    /** 已红冲父退货数量：当前读行锁 + long 累加，理由同上。 */
+    private long sumReversedOnReturn(Long returnId)
     {
-        Integer n = jdbc.queryForObject(
-                "SELECT COALESCE(SUM(qty),0) FROM inv_batch_consumption WHERE sal_return_id=? AND sign=-1",
-                Integer.class, returnId);
-        return n == null ? 0 : n;
+        return sumLocked("SELECT id,qty FROM inv_batch_consumption "
+                + "WHERE sal_return_id=? AND sign=-1 ORDER BY id FOR UPDATE", returnId);
     }
+
+    /** 当前读锁行后 long 域求和，避免 int 溢出。 */
+    private long sumLocked(String sql, Object key)
+    {
+        long total = 0L;
+        for (Map<String, Object> row : jdbc.queryForList(sql, key))
+            total += ((Number) row.get("qty")).longValue();
+        return total;
+    }
+
+    /** long 域求和，避免两个 int 相加溢出。 */
+    private static long longSum(long a, int b) { return a + (long) b; }
 
     /**
      * 来源证据绑定：系统侧 int_webhook_event 中存在同 event_id、站点非空且等于请求站点、

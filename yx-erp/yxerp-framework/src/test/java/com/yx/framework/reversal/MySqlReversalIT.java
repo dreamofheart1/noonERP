@@ -6,6 +6,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -123,12 +127,19 @@ class MySqlReversalIT
 
     private long seedConsumption(long batchId, long sku, long itemId, int qty, String unitCost)
     {
+        return seedConsumption(batchId, sku, itemId, qty, unitCost, "SALE", 1);
+    }
+
+    private long seedConsumption(long batchId, long sku, long itemId, int qty, String unitCost,
+                                 String moveType, int sign)
+    {
         jdbc.update("insert into inv_batch_consumption(consumption_no,biz_event_key,source_event_id,batch_id,"
                         + "sal_order_item_id,sku_id,qty,unit_cost,amount,consumed_at,move_type,sign,period,cross_period,created_at) "
-                        + "values (?,?,?,?,?,?,?,?,?,current_timestamp(3),'SALE',1,?,0,current_timestamp(3))",
+                        + "values (?,?,?,?,?,?,?,?,?,current_timestamp(3),?,?,?,0,current_timestamp(3))",
                 "CN:" + UUID.randomUUID(), "SALE:" + UUID.randomUUID(), null, batchId, itemId, sku, qty,
-                new BigDecimal(unitCost), new BigDecimal(unitCost).multiply(BigDecimal.valueOf(qty)), "2026-11");
-        return jdbc.queryForObject("select id from inv_batch_consumption where batch_id=? and sign=1", Long.class, batchId);
+                new BigDecimal(unitCost), new BigDecimal(unitCost).multiply(BigDecimal.valueOf(qty)),
+                moveType, sign, "2026-11");
+        return jdbc.queryForObject("select id from inv_batch_consumption where batch_id=?", Long.class, batchId);
     }
 
     private void seedEvent(String eventId, String site, String payload, String status)
@@ -225,6 +236,135 @@ class MySqlReversalIT
         assertEquals("SOURCE_UNVERIFIED", u.reasonCode());
         assertEquals(1, count("inv_batch_consumption"), "仅原消耗行，两笔均不得红冲入账");
         assertEquals(2, count("noon_reversal_review"));
+    }
+
+    // ---------- 二次复核意见 1：已用满仍 ACK 重传（真 MySQL） ----------
+
+    @Test
+    void retransmitAfterOriginalFullIsAckOnRealMySql()
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(10L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-RFULL", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-RFULL", returnId, originalId, 3, raw);
+        assertTrue(service.postReversal(in).posted());
+        Result again = service.postReversal(in);
+        assertTrue(again.posted(), "已用满原消耗同事件重传应 ACK：实际 " + again.reasonCode());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(2, count("inv_batch_consumption"));
+        assertEquals(0, count("noon_reversal_review"));
+    }
+
+    @Test
+    void retransmitAfterReturnFullIsAckOnRealMySql()
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 2);
+        long originalId = seedConsumption(11L, 11L, 100L, 10, "10.0000");
+        String raw = payload(returnId, originalId, 2, 11L);
+        seedEvent("EVT-RFULLR", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-RFULLR", returnId, originalId, 2, raw);
+        assertTrue(service.postReversal(in).posted());
+        Result again = service.postReversal(in);
+        assertTrue(again.posted(), "退货用满同事件重传应 ACK：实际 " + again.reasonCode());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(2, count("inv_batch_consumption"));
+    }
+
+    @Test
+    void concurrentRetransmitAfterFullPostsOnceOnRealMySql() throws Exception
+    {
+        // 用满后两个并发重传：均应 ACK 同一行，且只入账一次。
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(12L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-RCONC", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-RCONC", returnId, originalId, 3, raw);
+        assertTrue(service.postReversal(in).posted()); // 首次用满
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try
+        {
+            Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postReversal(in); });
+            Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postReversal(in); });
+            start.countDown();
+            Result a = f1.get();
+            Result b = f2.get();
+            assertTrue(a.posted() && b.posted(), "并发重传均应 ACK：a=" + a.reasonCode() + " b=" + b.reasonCode());
+            assertEquals(a.entityId(), b.entityId());
+            assertEquals(2, count("inv_batch_consumption"), "并发重传不得新增行");
+        }
+        finally { pool.shutdownNow(); login(1L); }
+    }
+
+    // ---------- 二次复核意见 2：不同原行同父退货并发不超额（真 MySQL，RR 当前读） ----------
+
+    @Test
+    void concurrentDifferentOriginalsCannotOverdrawReturnOnRealMySql() throws Exception
+    {
+        // 父退货 qty=5；两个不同原消耗行各 10，各红冲 3（合计 6>5）。
+        // service 内部 requireSite/requireCurrentUserId 是普通读，会在各自事务里建立 RR 快照；
+        // 两个并发事务锁同一父退货行而串行，后到者必须用【当前读】SUM 才能看到先到者已提交
+        // 的红冲行并拒绝，否则普通一致性读用旧快照会放行导致 6>5 超额。
+        // 允许数据库层锁等待超时/死锁异常——那也是事务整体回滚、未部分入账的合法结果。
+        long returnId = seedReturn("AE", 11L, 100L, 5);
+        long o1 = seedConsumption(13L, 11L, 100L, 10, "10.0000");
+        long o2 = seedConsumption(14L, 11L, 100L, 10, "10.0000");
+        String rawA = payload(returnId, o1, 3, 11L);
+        String rawB = payload(returnId, o2, 3, 11L);
+        seedEvent("EVT-OS-A", "AE", rawA, "PROCESSED");
+        seedEvent("EVT-OS-B", "AE", rawB, "PROCESSED");
+        var a = input("AE", "EVT-OS-A", returnId, o1, 3, rawA);
+        var b = input("AE", "EVT-OS-B", returnId, o2, 3, rawB);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try
+        {
+            Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postReversal(a); });
+            Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postReversal(b); });
+            start.countDown();
+            Result r1 = settle(f1);
+            Result r2 = settle(f2);
+            int posted = (r1 != null && r1.posted() ? 1 : 0) + (r2 != null && r2.posted() ? 1 : 0);
+            assertTrue(posted <= 1, "并发不同原行同父退货最多一笔入账，实际=" + posted);
+            // 核心不变量：退货累计红冲数量不得超过父退货 qty=5。
+            Integer reversed = jdbc.queryForObject(
+                    "select coalesce(sum(qty),0) from inv_batch_consumption where sal_return_id=? and sign=-1",
+                    Integer.class, returnId);
+            assertNotNull(reversed);
+            assertTrue(reversed <= 5, "退货累计红冲 " + reversed + " 不得超过 5（当前读守恒必须生效）");
+            assertEquals(2 + posted, count("inv_batch_consumption"), "只入账 posted 笔红冲，无部分写入");
+        }
+        finally { pool.shutdownNow(); login(1L); }
+    }
+
+    /** 并发结果归一：锁等待超时/死锁异常视为事务整体回滚（未入账），返回 null。 */
+    private static Result settle(Future<Result> f) throws Exception
+    {
+        try { return f.get(); }
+        catch (java.util.concurrent.ExecutionException e)
+        {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            String name = cause.getClass().getName();
+            if (name.contains("CannotAcquireLock") || name.contains("Deadlock")
+                    || name.contains("PessimisticLocking") || name.contains("QueryTimeout"))
+                return null;
+            throw e;
+        }
+    }
+
+    @Test
+    void negativeSignOriginalIsQuarantinedOnRealMySql()
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 5);
+        long originalId = seedConsumption(15L, 11L, 100L, 10, "10.0000", "SALE", -1);
+        String raw = payload(returnId, originalId, 2, 11L);
+        seedEvent("EVT-NEGSIGN", "AE", raw, "PROCESSED");
+        Result r = service.postReversal(input("AE", "EVT-NEGSIGN", returnId, originalId, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("ORIGINAL_NOT_SALE", r.reasonCode());
+        assertEquals(1, count("inv_batch_consumption"));
     }
 
     @Configuration

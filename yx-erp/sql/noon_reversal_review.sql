@@ -24,17 +24,26 @@
 --     无佐证一律隔离，不臆造平台事件号。
 --   * salReturnId 必须指向真实存在的 sal_return（可信父退货），站点与 sku 取父记录真实值。
 --   * originalConsumptionId 必须指向真实存在的 inv_batch_consumption 正常扣减行
---     （sign = +1、move_type = SALE），其 sku_id / sal_order_item_id 必须与父退货一致。
+--     （服务用 FOR UPDATE 当前读取 actual sign，显式校验 sign = +1 且 move_type = SALE；
+--      DDL 允许 SALE+sign=-1，故不能只看 move_type），其 sku_id / sal_order_item_id
+--     必须与父退货一致。sign/move_type 不符进 ORIGINAL_NOT_SALE 隔离。
 --   * 业务幂等键 biz_event_key = 'REV:' + sourceEventId（系统侧确定性键，非平台事件号）；
 --     唯一键 (biz_event_key, batch_id) 阻止同一红冲事件重复过账，同键核心业务字段不同进
 --     SOURCE_CONFLICT，相同按幂等 ACK。
+--   * 处理顺序【二次复核修订】：幂等/冲突判定必须先于累计守恒。否则原消耗已用满时，
+--     合法重传会被"已冲回+本次>原消耗"误判超限隔离，而非 ACK。
 -- -----------------------------------------------------------------------------
 -- 累计守恒（schema v0.5 明确 DDL 不承担，须应用层事务）：
---   * 对原消耗行：以 SELECT ... FOR UPDATE 锁原行，SUM(reversal_of_id=原行 AND sign=-1)
---     得已冲回数量，要求 已冲回 + 本次 qty <= 原消耗 qty，否则 REVERSAL_EXCEEDS_ORIGINAL 隔离。
---   * 对父退货单：SUM(sal_return_id=父退货 AND sign=-1) 得该退货已红冲数量，要求
+--   * 对原消耗行：以 SELECT id,qty ... FOR UPDATE 当前读锁住 reversal_of_id=原行 AND
+--     sign=-1 的所有红冲行（按 id 升序固定锁序），Java 端 long 累加得已冲回数量，
+--     要求 已冲回 + 本次 qty <= 原消耗 qty，否则 REVERSAL_EXCEEDS_ORIGINAL 隔离。
+--   * 对父退货单：同样当前读锁住 sal_return_id=父退货 AND sign=-1 的红冲行，要求
 --     已红冲 + 本次 qty <= 退货单 qty，否则 REVERSAL_EXCEEDS_RETURN 隔离。
---   * DDL 只负责单次幂等（uk_consume_biz_event）与单行 CHECK，不承担累计守恒。
+--   * 必须用当前读而非普通一致性读：MySQL REPEATABLE READ 下若上游先建旧快照，普通
+--     SUM 看不到已提交红冲行，不同原行同父退货会超额；FOR UPDATE 当前读解决此问题。
+--     long 累加避免 int 溢出。DDL 只负责单次幂等（uk_consume_biz_event）与单行 CHECK，
+--     不承担累计守恒。锁顺序固定：原消耗行 → 父退货行 → 红冲汇总行(id 升序)，无循环等待；
+--     锁异常由事务整体回滚，调用方重试，service 不在半途放行。
 -- -----------------------------------------------------------------------------
 -- reason_code 全集：
 --   PARENT_RETURN_MISSING / SITE_MISMATCH / ORIGINAL_CONSUMPTION_MISSING /

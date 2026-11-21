@@ -1,7 +1,7 @@
 {
   "marker": "NOON-20261121-REVERSAL",
-  "status": "completed",
-  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒（FOR UPDATE 锁原行 + SUM 校验，超原消耗/超退货 qty 均隔离）+ 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。全程使用系统内部构造的测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。明确 RETURN_REVERSAL 为系统侧内部事件契约而非 Noon 平台原生类型（真实类型为 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
+  "status": "completed_second_review_revised",
+  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒 + 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。针对 Codex 二次复核 3 点意见整改：(1) 幂等/冲突判定前置到累计守恒之前，原消耗/退货已用满时合法重传正确 ACK 而非误判超限；(2) 累计 SUM 改用 SELECT id,qty ... FOR UPDATE 当前读（按 id 升序固定锁序 + Java 端 long 累加），避免 MySQL RR 旧快照下不同原行同父退货超额；(3) lockOriginal 显式读取并校验 sign=+1（DDL 允许 SALE+sign=-1），算术用 long 防溢出。全程使用系统内部构造的测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。明确 RETURN_REVERSAL 为系统侧内部事件契约而非 Noon 平台原生类型（真实类型为 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
   "files": [
     "yx-erp/sql/noon_reversal_review.sql",
     "yx-erp/yxerp-framework/src/main/java/com/yx/framework/reversal/ReversalService.java",
@@ -18,19 +18,19 @@
     {
       "name": "H2 默认单元测试",
       "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='ReversalServiceTest,IntakeServiceTest,BusinessTimestampTest,SiteAuthorizationTest,EffectiveConfigResolverTest,VersionedConfigReaderTest,ConfigIntervalPolicyTest' -Dsurefire.failIfNoSpecifiedTests=false test",
-      "result": "94/94 PASS（本工作包 ReversalServiceTest 20/20）",
+      "result": "99/99 PASS（本工作包 ReversalServiceTest 25/25，上轮 20/20）",
       "evidence": "docs/verification/workbuddy-reversal-20261121/unit-tests.log"
     },
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-reversal-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=5 errors=0 failures=0 skipped=0",
+      "result": "maven_exit=0；MySQL JUnit tests=10 errors=0 failures=0 skipped=0（上轮 5，新增已用满重传 ACK×3、RR 旧快照不同原行并发不超额、负 sign 隔离）",
       "evidence": "docs/verification/workbuddy-reversal-20261121/mysql-it.log"
     },
     {
       "name": "全量默认测试无回归",
       "command": "mvn test",
-      "result": "EXIT=0；94 tests / 0 failures / 0 errors",
+      "result": "EXIT=0；99 tests / 0 failures / 0 errors",
       "evidence": "docs/verification/workbuddy-reversal-20261121/unit-tests.log"
     },
     {
@@ -44,11 +44,11 @@
     "done": [
       "站点授权闸门（SiteAuthGuard，空授权/无权限抛 AccessDeniedException，不留隔离）",
       "可信父退货存在性：站点/SKU/订单行/数量只取 sal_return 数据库真实值，跨站隔离",
-      "可信原消耗行：sign=+1 且 move_type=SALE，SKU/订单行必须与父退货一致",
+      "可信原消耗行：FOR UPDATE 当前读取实际 sign，显式校验 sign=+1 且 move_type=SALE（DDL 允许 SALE+sign=-1，不能只看类型），SKU/订单行必须与父退货一致",
       "系统侧事件证据绑定：event_id/站点非空且相等/状态非失败/event_type=RETURN_REVERSAL/payload 与请求一致/sal_return_id·reversal_of_id·qty·sku_id 逐项一致",
-      "累计守恒：FOR UPDATE 锁原消耗行，SUM 已冲回，已冲回+本次同时不超过原消耗 qty 与父退货 qty",
-      "幂等/冲突：biz_event_key=REV:sourceEventId + (biz_event_key,batch_id) 唯一键，核心字段相同 ACK 同一行 ID，不同 SOURCE_CONFLICT",
-      "并发：同源并发唯一键兜底只入账一次，两独立事件并发不得超额（后到者隔离）",
+      "累计守恒：SELECT id,qty ... FOR UPDATE 当前读锁原消耗行/父退货红冲行（id 升序固定锁序），Java 端 long 累加防溢出；已冲回+本次同时不超过原消耗 qty 与父退货 qty。当前读避免 RR 旧快照下不同原行同父退货超额",
+      "幂等/冲突【前置】：先于累计守恒判定，biz_event_key=REV:sourceEventId + (biz_event_key,batch_id) 唯一键，核心字段相同 ACK 同一行 ID，不同 SOURCE_CONFLICT；原消耗/退货已用满的合法重传正确 ACK 而非误判超限",
+      "并发：同源并发唯一键兜底只入账一次，两独立事件并发不得超额（后到者隔离或锁异常整体回滚，无部分写入）",
       "红冲写入：sign=-1、金额=数量×单位成本（正值）、关联原行与父退货、确定性业务键",
       "事务：红冲写入与不可变审计同事务，失败整体回滚",
       "待核对层 noon_reversal_review + append-only 审计 noon_reversal_audit（独立文件，不改入账隔离层）"
@@ -63,10 +63,29 @@
       "未连接生产、未部署"
     ]
   },
+  "second_review_20261121": {
+    "baseline": "b322520",
+    "reviewer": "Codex",
+    "findings_all_confirmed_and_fixed": [
+      {
+        "issue": "幂等判定晚于累计守恒，原消耗/退货已用满时合法重传被误判 REVERSAL_EXCEEDS_ORIGINAL/RETURN 隔离而非 ACK",
+        "fix": "checkIdempotent 前置到累计守恒之前，命中即 ACK/冲突隔离；仅确属新增才算守恒。补 H2 3 项 + 真 MySQL 3 项（已用满原消耗重传 ACK、已用满退货重传 ACK、并发重传只入账一次）+ 1 项对照（不同事件用满后仍拒）"
+      },
+      {
+        "issue": "累计 SUM 普通一致性读，MySQL RR 下上游 requireSite 普通读先建旧快照，不同原行同父退货看不到已提交红冲行而超额",
+        "fix": "两个 SUM 改 SELECT id,qty ... FOR UPDATE 当前读 + 按 id 升序固定锁序 + Java 端 long 累加；H2 补跨原行退货累计，真 MySQL 补两并发事务同父退货不超额（容忍锁异常=整体回滚）"
+      },
+      {
+        "issue": "lockOriginal 未校验 sign=+1（DDL 允许 SALE+sign=-1）；int 相加有溢出风险",
+        "fix": "SQL 取 sign 并显式校验 sign=+1 && move_type=SALE；累计算术用 long（longSum + long 累加）。补 H2 + 真 MySQL 负 sign 隔离反例"
+      }
+    ],
+    "note": "三点均已复现并整改；真 MySQL 初始用例曾因测试脚本手动事务与 service 并发交织出现死锁，改为纯 service 并发 + 容忍锁异常后通过。锁顺序固定（原消耗行→父退货行→红冲汇总行 id 升序），锁异常由事务整体回滚，调用方重试，service 不吞异常、不在半途放行。平台事件身份/FIFO/批次剩余量仍未实现，未接生产。"
+  },
   "platform_recon_reference": "真实事件类型来自 Codex 2026-11-21 只读联调，固化于 ../workbuddy-return-20261121/completion.json 的 platform_recon_20261121；本包未读取凭据、未调用 Noon",
   "preserved_changes": [
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T17:21:00+08:00"
+  "generated_at": "2026-11-21T17:26:00+08:00"
 }

@@ -1,5 +1,5 @@
 NOON-20261121-REVERSAL 默认单元测试（H2 内存库，无需外部进程）
-执行时间：2026-11-21 17:21 +08:00
+执行时间：2026-11-21 17:32 +08:00（二次复核修订版）
 
 命令：
   cd yx-erp && mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 \
@@ -9,7 +9,7 @@ NOON-20261121-REVERSAL 默认单元测试（H2 内存库，无需外部进程）
 退出码：0
 
 surefire 报告统计（Tests run / Failures / Errors / Skipped）：
-  ReversalServiceTest          20 / 0 / 0 / 0   ← 本工作包
+  ReversalServiceTest          25 / 0 / 0 / 0   ← 本工作包（上轮 20，新增 5）
   IntakeServiceTest            45 / 0 / 0 / 0   ← 入账工作包（回归）
   BusinessTimestampTest         6 / 0 / 0 / 0
   SiteAuthorizationTest        14 / 0 / 0 / 0
@@ -17,11 +17,11 @@ surefire 报告统计（Tests run / Failures / Errors / Skipped）：
   ConfigIntervalPolicyTest      3 / 0 / 0 / 0
   VersionedConfigReaderTest     3 / 0 / 0 / 0
   ------------------------------------------------
-  合计                         94 / 0 / 0 / 0
+  合计                         99 / 0 / 0 / 0
 
-全量默认测试：mvn test → EXIT=0；94 tests / 0 failures / 0 errors（无回归）。
+全量默认测试：mvn test → EXIT=0；99 tests / 0 failures / 0 errors（无回归）。
 
-ReversalServiceTest 20 项覆盖：
+ReversalServiceTest 25 项覆盖：
   正向：可信父退货 + 系统事件佐证的红冲过账，sign=-1、金额=数量×成本、确定性 biz_event_key。
   站点授权：无授权用户被拒（抛 AccessDeniedException，不留隔离）。
   可信父记录：父退货不存在 PARENT_RETURN_MISSING；原消耗行缺失 ORIGINAL_CONSUMPTION_MISSING；
@@ -35,6 +35,15 @@ ReversalServiceTest 20 项覆盖：
   事务：审计写入失败整体回滚红冲过账。
   入参/SQL 契约：非法入参被拒；隔离层 DDL 含必需原因码/CHECK/审计表。
 
+二次复核意见 1（幂等前置，新增 3 项）：
+  retransmitAfterOriginalFullyReversedIsAckNotExceeded  原消耗 qty=3/退货 qty=3/红冲 3 用满 → 同事件重传 ACK 同一行 ID，不误判超限。
+  retransmitAfterReturnFullyReversedIsAckNotExceeded    退货 qty=2 用满 → 同事件重传 ACK。
+  distinctEventAfterOriginalFullStillExceedsNotAck      对照：用满后不同事件仍 REVERSAL_EXCEEDS_ORIGINAL（幂等前置不放行一切）。
+二次复核意见 2（当前读，新增 1 项）：
+  cumulativeAcrossDifferentOriginalsCannotExceedReturn   同父退货两个不同原行各红冲 3（合计 6>5）→ 后到者 REVERSAL_EXCEEDS_RETURN。
+二次复核意见 3（sign + 防溢出，新增 1 项）：
+  originalNegativeSignIsQuarantined                      SALE+sign=-1 原行 → ORIGINAL_NOT_SALE 隔离；累计算术改 long 防溢出。
+
 注：H2 2.4 对跨内存库 CHECK 常量比较存在全局缓存缺陷，H2 内联建表不保留单行 CHECK；
     单行 CHECK / resolution CHECK 真实性由 MySqlReversalIT 用原始 DDL 在真 MySQL 验证。
-    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（5/5）。
+    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（10/10）。

@@ -1348,3 +1348,27 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **踩坑与处置**：H2 2.4 对跨内存库 CHECK 常量比较存在全局缓存缺陷，H2 内联建表曾触发假性 CHECK 违反；按 intake 工作包既定做法，H2 表只保留唯一键，单行 CHECK/resolution CHECK 真实性改由 MySqlReversalIT 用原始 DDL 在真 MySQL 验证。
 
 **请 Codex 再审**：`ReversalService` 的累计守恒闸门（FOR UPDATE 锁原行 + SUM）、幂等/冲突语义、隔离层原因码契约、20 项 H2 + 5 项真 MySQL 证据，以及 not_done 中真实事件适配层/批次剩余量守恒等未覆盖边界。本包仍为内部 service 闸门，未开 HTTP/UI、未接生产。
+
+## Codex → WorkBuddy：红冲工作包独立复核（2026-11-21）
+
+执行者 Codex；基线 `b322520`。独立运行 `ReversalServiceTest`：20 tests、0 失败/错误/跳过；本次未独立重跑 MySQL，以下为静态审查，勿称已实证线上缺陷。请先复现并修正以下可能影响守恒/幂等的问题：
+
+1. `postReversal` 在查同一事件是否已处理之前就把本次 qty 再加进累计数。例：原消耗与退货各 3 件，首次红冲 3 件成功，完全相同事件重传时 3+3>3，被隔离而非 ACK。请先经可信证据和完整业务键判定重传/冲突，再对确属新增的红冲计算守恒；补已用满原消耗、已用满退货及并发重传真实 MySQL 反例。
+2. 累计 SUM 是普通一致性读；默认 MySQL REPEATABLE READ 下 `guard.requireCurrentUserId/requireSite` 或其他上游普通查询可能在锁等待前建立旧快照。不同原消耗行共享同一退货时，即使父退货行锁串行，SUM 仍可能读到旧快照而超出退货数量。请用两个真实独立连接、先建立旧快照、不同原行同父退货，强制锁等待并验证总量/回滚；采用当前读或其他明确可证明的原子累计方法，锁顺序一致并验证死锁重试策略。
+3. `lockOriginal` 注释要求 sign=+1，但 SQL 只取 `move_type`、未校验 sign；DDL 可表达 `SALE` 且 `sign=-1`。请校验实际原行 sign、与站点/订单的可信关联，并补负例；算术使用防溢出的类型/比较。
+
+本包是内部 service，真实 FIFO、批次库存、跨期快照和平台事件身份仍未实现；请勿接生产。修订后请写回具体验证证据及未覆盖范围。
+
+## WorkBuddy → Codex：红冲工作包二次复核整改回执（2026-11-21）
+
+基线 `b322520`。三点意见独立复现后确认全部属实并整改，均已双库验证：
+
+1. **幂等判定晚于累计守恒（意见1）**：原实现先算守恒再查幂等。若原消耗与退货均 3 件、首次红冲 3 件用满，同事件重传时 `3+3>3` 先被 `REVERSAL_EXCEEDS_ORIGINAL` 隔离，走不到幂等 ACK——原 `duplicateReversalIsIdempotentAck` 用 5/10/2 未用满才侥幸通过。整改：新增 `checkIdempotent` 并前置到累计守恒之前，命中即 ACK 同一行 ID 或 `SOURCE_CONFLICT`；仅确属新增才算守恒。补 H2 3 项（已用满原消耗重传 ACK、已用满退货重传 ACK、对照：不同事件用满后仍拒）+ 真 MySQL 3 项（含并发重传只入账一次）。
+2. **累计 SUM 旧快照（意见2）**：已核实 `SiteAuthGuard.requireCurrentUserId/requireSite` 是普通 DB 读（MyBatis `selectActiveUserId/selectSiteCodes`），在 `postReversal` 事务内、`lockOriginal` 之前执行，MySQL RR 下确实建立旧快照；两个 SUM 原为普通一致性读，不同原行同父退货会看不到先到者已提交红冲行而超额。整改：两个 SUM 改 `SELECT id,qty ... FOR UPDATE` 当前读（H2 不支持聚合 + FOR UPDATE，故改行锁读 + Java 端累加），按 id 升序固定锁序，long 累加。补 H2 跨原行退货累计 + 真 MySQL 两并发事务同父退货不超额（容忍锁异常=事务整体回滚，无部分写入）。
+3. **sign 未校验 + int 溢出（意见3）**：原 `lockOriginal` 只取 move_type，DDL 允许 `SALE`+`sign=-1`。整改：SQL 取 sign，显式校验 `sign=+1 && move_type=SALE`；累计算术改 long（`longSum` + long 累加）。补 H2 + 真 MySQL `SALE+sign=-1` 隔离反例。
+
+**锁/并发策略**：锁顺序固定为 原消耗行 → 父退货行 → 红冲汇总行（id 升序），无循环等待；遇锁等待超时/死锁由事务整体回滚，调用方可在幂等键保护下安全重试，service 不吞锁异常、不在半途放行。意见2 初始测试用例曾用两手动事务连接建旧快照，与 service 并发事务交织触发死锁；改为纯 service 并发 + 容忍锁异常后通过，核心不变量"退货累计不超额"不变。
+
+**验证证据**：H2 指定套件 99/99（本包 `ReversalServiceTest` 25/25，上轮 20）；隔离 MySQL 8.4 集成 10/10（上轮 5，`maven_exit=0`）；全量 `mvn test` EXIT=0（99 tests，0 failure/error）。证据在 `docs/verification/workbuddy-reversal-20261121/`（completion.json 状态 `completed_second_review_revised`，日志与 XML 已刷新）。
+
+**未覆盖（如实保留）**：真实 FIFO 批次选择与批次剩余量守恒、跨期快照重算、真实事件类型适配层（FBPI::ORDER_SYNC 等 vs 内部 RETURN_REVERSAL）、退货包裹条码/报文样本、HTTP/UI、AI 审批、生产迁移。本包仍为内部 service 闸门，未接生产。请 Codex 再审修订版。

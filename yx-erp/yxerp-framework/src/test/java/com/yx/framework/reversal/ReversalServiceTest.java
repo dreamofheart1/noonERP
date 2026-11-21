@@ -132,12 +132,19 @@ class ReversalServiceTest
     /** 种一条销售正常扣减（sign=+1），返回其 id。 */
     private long seedConsumption(long batchId, long sku, long itemId, int qty, String unitCost)
     {
+        return seedConsumption(batchId, sku, itemId, qty, unitCost, "SALE", 1);
+    }
+
+    /** 种一条指定 move_type/sign 的消耗行（用于负例），返回其 id。 */
+    private long seedConsumption(long batchId, long sku, long itemId, int qty, String unitCost,
+                                 String moveType, int sign)
+    {
         jdbc.update("insert into inv_batch_consumption(consumption_no,biz_event_key,source_event_id,batch_id,"
                         + "sal_order_item_id,sku_id,qty,unit_cost,amount,consumed_at,move_type,sign,period,cross_period,created_at) "
-                        + "values (?,?,?,?,?,?,?,?,?,current_timestamp,'SALE',1,?,0,current_timestamp)",
+                        + "values (?,?,?,?,?,?,?,?,?,current_timestamp,?,?,?,0,current_timestamp)",
                 "CN:" + UUID.randomUUID(), "SALE:" + UUID.randomUUID(), null, batchId, itemId, sku, qty,
-                new BigDecimal(unitCost), new BigDecimal(unitCost).multiply(BigDecimal.valueOf(qty)), "2026-11");
-        return jdbc.queryForObject("select id from inv_batch_consumption where batch_id=? and sign=1", Long.class, batchId);
+                new BigDecimal(unitCost), new BigDecimal(unitCost).multiply(BigDecimal.valueOf(qty)), moveType, sign, "2026-11");
+        return jdbc.queryForObject("select id from inv_batch_consumption where batch_id=?", Long.class, batchId);
     }
 
     /** 种系统侧红冲事件（内部契约类型 RETURN_REVERSAL），payload 与入参一致。 */
@@ -388,6 +395,79 @@ class ReversalServiceTest
         assertEquals(2, count("inv_batch_consumption"));
     }
 
+    // ---------- 二次复核意见 1：已用满仍须 ACK 重传 ----------
+
+    @Test
+    void retransmitAfterOriginalFullyReversedIsAckNotExceeded() throws Exception
+    {
+        // 原消耗 qty=3、退货 qty=3、本次红冲 3（刚好用满）；相同事件重传必须 ACK，
+        // 不能被"已冲回3+本次3>原消耗3"误判为 REVERSAL_EXCEEDS_ORIGINAL。
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(20L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-FULL", "AE", raw, "PROCESSED");
+        ReversalInput in = input("AE", "EVT-FULL", returnId, originalId, 3, raw);
+        Result first = service.postReversal(in);
+        assertTrue(first.posted());
+        Result again = service.postReversal(in);
+        assertTrue(again.posted(), "已用满原消耗后同事件重传应 ACK：实际 " + again.reasonCode());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(first.entityId(), again.entityId());
+        assertEquals(2, count("inv_batch_consumption"), "重传不得新增红冲行");
+        assertEquals(0, count("noon_reversal_review"), "重传不得隔离");
+    }
+
+    @Test
+    void retransmitAfterReturnFullyReversedIsAckNotExceeded()
+    {
+        // 退货 qty=2 用满，原消耗充足；同事件重传必须 ACK 而非 REVERSAL_EXCEEDS_RETURN。
+        long returnId = seedReturn("AE", 11L, 100L, 2);
+        long originalId = seedConsumption(21L, 11L, 100L, 10, "10.0000");
+        String raw = payload(returnId, originalId, 2, 11L);
+        seedEvent("EVT-FULLR", "AE", raw, "PROCESSED");
+        ReversalInput in = input("AE", "EVT-FULLR", returnId, originalId, 2, raw);
+        assertTrue(service.postReversal(in).posted());
+        Result again = service.postReversal(in);
+        assertTrue(again.posted(), "退货用满后同事件重传应 ACK：实际 " + again.reasonCode());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(2, count("inv_batch_consumption"));
+        assertEquals(0, count("noon_reversal_review"));
+    }
+
+    @Test
+    void distinctEventAfterOriginalFullStillExceedsNotAck() throws Exception
+    {
+        // 对照：用满后【不同】事件仍须按守恒拒绝，不能因为幂等前置就放行一切重传。
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(22L, 11L, 100L, 3, "10.0000");
+        String raw1 = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-F1", "AE", raw1, "PROCESSED");
+        assertTrue(service.postReversal(input("AE", "EVT-F1", returnId, originalId, 3, raw1)).posted());
+        String raw2 = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-F2", "AE", raw2, "PROCESSED");
+        Result second = service.postReversal(input("AE", "EVT-F2", returnId, originalId, 3, raw2));
+        assertFalse(second.posted());
+        assertEquals("REVERSAL_EXCEEDS_ORIGINAL", second.reasonCode());
+        assertEquals(2, count("inv_batch_consumption"));
+    }
+
+    // ---------- 二次复核意见 3：sign 校验 + 防溢出 ----------
+
+    @Test
+    void originalNegativeSignIsQuarantined()
+    {
+        // DDL 允许 SALE + sign=-1；此类行不是正常扣减，禁止红冲。
+        long returnId = seedReturn("AE", 11L, 100L, 5);
+        long originalId = seedConsumption(23L, 11L, 100L, 10, "10.0000", "SALE", -1);
+        String raw = payload(returnId, originalId, 2, 11L);
+        seedEvent("EVT-NEGSIGN", "AE", raw, "PROCESSED");
+        Result r = service.postReversal(input("AE", "EVT-NEGSIGN", returnId, originalId, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("ORIGINAL_NOT_SALE", r.reasonCode());
+        assertEquals(1, count("inv_batch_consumption"), "负 sign 原行不得产生红冲");
+        assertEquals(1, count("noon_reversal_review"));
+    }
+
     // ---------- 并发 ----------
 
     @Test
@@ -447,6 +527,28 @@ class ReversalServiceTest
             pool.shutdownNow();
             login(1L);
         }
+    }
+
+    // ---------- 二次复核意见 2：不同原行同父退货的累计守恒（当前读） ----------
+
+    @Test
+    void cumulativeAcrossDifferentOriginalsCannotExceedReturn()
+    {
+        // 同一父退货 qty=5，两个不同原消耗行各 qty=10。
+        // 先红冲 O1 3 件，再红冲 O2 3 件 → 退货累计 6>5 必拒（REVERSAL_EXCEEDS_RETURN）。
+        long returnId = seedReturn("AE", 11L, 100L, 5);
+        long o1 = seedConsumption(24L, 11L, 100L, 10, "10.0000");
+        long o2 = seedConsumption(25L, 11L, 100L, 10, "10.0000");
+        String raw1 = payload(returnId, o1, 3, 11L);
+        seedEvent("EVT-D1", "AE", raw1, "PROCESSED");
+        assertTrue(service.postReversal(input("AE", "EVT-D1", returnId, o1, 3, raw1)).posted());
+        String raw2 = payload(returnId, o2, 3, 11L);
+        seedEvent("EVT-D2", "AE", raw2, "PROCESSED");
+        Result second = service.postReversal(input("AE", "EVT-D2", returnId, o2, 3, raw2));
+        assertFalse(second.posted(), "退货累计 6>5 必须拒绝：实际 " + second.reasonCode());
+        assertEquals("REVERSAL_EXCEEDS_RETURN", second.reasonCode());
+        assertEquals(3, count("inv_batch_consumption"), "原1+原2+第一笔红冲，第二笔未写");
+        assertEquals(1, count("noon_reversal_review"));
     }
 
     // ---------- 事务回滚 ----------
