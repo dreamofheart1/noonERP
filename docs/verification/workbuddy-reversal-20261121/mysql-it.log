@@ -1,14 +1,15 @@
 NOON-20261121-REVERSAL 隔离 MySQL 集成验证（opt-in）
-执行时间：2026-11-21 18:05 +08:00（四次复核修订版）
+执行时间：2026-11-21 18:18 +08:00（五次复核修订版；连续两次 18/18 稳定通过）
 命令：python3 scripts/verify-reversal-runtime.py \
         --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
         --maven /tmp/apache-maven-3.9.11/bin/mvn \
         --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
 
-隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-cqskuf6p
-MySQL JUnit: tests=15 errors=0 failures=0 skipped=0
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-f245hfmd（末次）
+MySQL JUnit: tests=18 errors=0 failures=0 skipped=0
 maven_exit=0
-证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-cqskuf6p
+证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-f245hfmd
+稳定性：连续两次独立运行均 18/18（g0netagu、f245hfmd），消除 LOCK WAIT 观察偶发竞态。
 
 【本轮关键变更：所有用例改用【实际主 schema v0.5】DDL + 【实际迁移脚本】建表】
 - setUp 从 docs/noon-erp-schema-v0.5.sql 提取 inv_batch_consumption 真实 DDL（含全部 CHECK、
@@ -41,6 +42,15 @@ maven_exit=0
   15)【四次复核·故障注入·耗尽】retryInvokerExhaustsAndThrowsOnRealLockTimeoutOnRealMySql：
       锁持续持有，组件 attempts=3 用尽后抛 PessimisticLockingFailureException（不吞），
       每次失败事务整体回滚，仅原消耗行、无隔离行。
+  16)【五次复核·迁移列校验】idxMigrationRejectsSameNamedWrongColumnIndexOnRealMySql：
+      先删正确索引改建同名错列（batch_id）索引，再跑迁移脚本——列定义校验命中，ADD INDEX
+      触发 Duplicate key name 明确报错，绝不静默跳过错列索引。
+  17)【五次复核·回滚/重跑】idxRollbackAndRerunRestoresIndexOnRealMySql：
+      执行 noon_reversal_idx_rollback.sql 删索引 -> 重复回滚幂等 -> 重跑迁移恢复唯一索引
+      -> EXPLAIN 仍命中 idx_sal_return，证明迁移+回滚配套恢复/重跑行为真库可用。
+  18)【五次复核·事务边界】retryInvokerRejectsCallInsideActiveTransactionOnRealMySql：
+      外层有活动事务时调用 ReversalRetryInvoker 被显式拒绝（IllegalStateException，含"事务外"），
+      外层事务未被污染为 rollback-only、无 service 写入；事务外相同入参仍能正常过账（fail-fast 不破坏功能）。
 
 真实 schema 实证发现（四次复核改用真实 DDL 后暴露并修复）：
   A) sign 列 TINYINT(1) 被 MySQL JDBC 映射为 Boolean：原 lockOriginal 用 ((Number)row.get("sign"))
@@ -50,8 +60,18 @@ maven_exit=0
   以上两点均为"测试表 tinyint（→Number）掩盖、真实 schema TINYINT(1)（→Boolean）才暴露"的
   生产兼容缺陷，已修复并双库回归。
 
-迁移脚本与部署：yx-erp/sql/noon_reversal_idx_migration.sql（幂等：information_schema 检查 +
-  动态 DDL ALGORITHM=INPLACE LOCK=NONE；头部含部署顺序/备份/EXPLAIN 验证/灰度观察/回滚脚本）。
-  索引不保证绝无死锁；service 保留锁异常事务整体回滚 + 调用方有界同键重试（ReversalRetryInvoker）。
+迁移/回滚脚本与部署：
+  - yx-erp/sql/noon_reversal_idx_migration.sql：幂等 + 列定义校验（GROUP_CONCAT 列序列），
+    同名错列走 ADD INDEX 触发 Duplicate key name 明确报错；动态 DDL ALGORITHM=INPLACE LOCK=NONE；
+    头部含部署顺序、结构/数据备份区分（SHOW CREATE TABLE 仅结构，数据用 mysqldump）、EXPLAIN 验证、
+    灰度观察、回滚语句（每条带分号）。
+  - yx-erp/sql/noon_reversal_idx_rollback.sql：幂等回滚（有索引才 DROP），回滚后重跑迁移可恢复（已验证）。
+  索引不保证绝无死锁；service 保留锁异常事务整体回滚 + 调用方有界同键重试（ReversalRetryInvoker，
+  入口显式拒绝已有 Spring 事务，fail-fast 保证每次调用独立事务，不盲目 REQUIRES_NEW）。
+
+稳定性加固（五次复核）：可控同步双连接测试曾偶发观察不到 LOCK WAIT（B 发出 latch 后真正进入
+  for update 等待有调度延迟，且前序故障注入用例调整 global innodb_lock_wait_timeout 有残留）。
+  加固：B 连接显式 set session innodb_lock_wait_timeout=30，B 发 latch 后主线程 sleep 200ms 再轮询；
+  连续两次独立运行均 18/18，未改被测 service 逻辑。
 
 说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。

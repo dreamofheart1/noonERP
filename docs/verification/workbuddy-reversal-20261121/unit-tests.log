@@ -1,5 +1,5 @@
 NOON-20261121-REVERSAL 默认单元测试（H2 内存库，无需外部进程）
-执行时间：2026-11-21 18:05 +08:00（四次复核修订版）
+执行时间：2026-11-21 18:18 +08:00（五次复核修订版）
 
 命令：
   cd yx-erp && mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 \
@@ -50,6 +50,12 @@ ReversalServiceTest 25 项覆盖：
     调用方重试已提升为正式组件 ReversalRetryInvoker（事务外/有界/同键），真库故障注入见 mysql-it.log。
     H2 层 ReversalServiceTest 无需新增（锁/快照/故障注入语义仅真 MySQL 可验证）。
 
+五次复核变更：ReversalRetryInvoker 入口显式检测 TransactionSynchronizationManager.isActualTransactionActive()，
+    外层已有 Spring 事务时 fail-fast 抛 IllegalStateException（不盲目 REQUIRES_NEW、不改 service REQUIRED），
+    保证"每次 postReversal 独立事务"契约；事务边界/回滚/重试/耗尽测试均在真 MySQL（见 mysql-it.log）。
+    迁移脚本加列定义校验（同名错列明确报错）、新增幂等回滚脚本 noon_reversal_idx_rollback.sql。
+    H2 层无新增（事务边界/迁移校验语义依赖 Spring 事务管理器与 information_schema，仅真 MySQL 可验证）。
+
 注：H2 2.4 对跨内存库 CHECK 常量比较存在全局缓存缺陷，H2 内联建表不保留单行 CHECK；
     单行 CHECK / resolution CHECK 真实性由 MySqlReversalIT 用原始 DDL 在真 MySQL 验证。
-    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（15/15）。
+    隔离 MySQL 的 MySqlReversalIT 为 opt-in，单独在 mysql-it.log 记录（18/18）。

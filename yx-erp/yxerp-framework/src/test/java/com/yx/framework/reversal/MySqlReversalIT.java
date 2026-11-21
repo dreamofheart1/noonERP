@@ -35,6 +35,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.yx.common.core.domain.entity.SysUser;
 import com.yx.common.core.domain.model.LoginUser;
@@ -113,18 +114,25 @@ class MySqlReversalIT
         return schema.substring(start, end + 1);
     }
 
-    /** 执行实际迁移脚本（同一 Connection 逐句，跳过纯注释行），idx_sal_return 已存在则跳过。 */
-    private void applyIdxMigration()
+    /** 执行实际迁移脚本（幂等）：无索引则建、列正确跳过、同名错列则明确报错（Duplicate key name）。 */
+    private void applyIdxMigration() { applySqlScriptFile("../sql/noon_reversal_idx_migration.sql"); }
+
+    /** 执行实际回滚脚本（幂等）：有 idx_sal_return 则删、无则跳过。 */
+    private void applyIdxRollback() { applySqlScriptFile("../sql/noon_reversal_idx_rollback.sql"); }
+
+    /**
+     * 通用：执行一个含会话变量 + PREPARE 的 SQL 脚本文件。必须在【同一连接】上按顺序执行，
+     * 否则新连接看不到会话变量（DriverManagerDataSource 每次 getConnection 是新连接）。
+     */
+    private void applySqlScriptFile(String path)
     {
-        String migration;
-        try { migration = Files.readString(Path.of("../sql/noon_reversal_idx_migration.sql")); }
-        catch (Exception e) { throw new IllegalStateException("读取索引迁移脚本失败", e); }
-        // 迁移用会话变量(@noon_idx_ddl)+PREPARE，必须在【同一连接】上按顺序执行，
-        // 否则新连接看不到会话变量（DriverManagerDataSource 每次 getConnection 是新连接）。
+        String sql;
+        try { sql = Files.readString(Path.of(path)); }
+        catch (Exception e) { throw new IllegalStateException("读取 SQL 脚本失败：" + path, e); }
         jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             try (Statement st = connection.createStatement())
             {
-                for (String statement : migration.split(";"))
+                for (String statement : sql.split(";"))
                 {
                     String s = stripSqlComments(statement);
                     if (!s.isBlank()) st.execute(s);
@@ -569,6 +577,12 @@ class MySqlReversalIT
         {
             xa.setAutoCommit(false);
             xb.setAutoCommit(false);
+            // 稳定性加固：B 连接显式设较长锁等待超时，避免前序故障注入用例调整 global
+            // innodb_lock_wait_timeout 的残留（测试执行顺序不确定）令 B 过早超时、观察不到 LOCK WAIT。
+            try (Statement sb = xb.createStatement())
+            {
+                sb.execute("set session innodb_lock_wait_timeout=30");
+            }
             try
             {
                 bFuture = pool.submit(() -> {
@@ -616,6 +630,9 @@ class MySqlReversalIT
                 assertNotNull(lockOne(xa, "select qty from sal_return where id=" + returnId + " for update"));
 
                 assertTrue(bAboutToLockParent.await(20, TimeUnit.SECONDS), "B 应到达即将锁父退货行处");
+                // B 已发出"即将锁父退货行"，但真正发起 for update 并进入 LOCK WAIT 有微小调度延迟；
+                // 稍等再开始轮询，避免首帧观察过早（偶发竞态加固）。
+                Thread.sleep(200);
                 // 观察锁等待：轮询 innodb_trx，直到出现 LOCK WAIT 状态事务。
                 boolean observed = false;
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -754,6 +771,93 @@ class MySqlReversalIT
         String key = plan.get(0).get("key") == null ? "" : String.valueOf(plan.get(0).get("key"));
         assertEquals("idx_sal_return", key, "当前读应命中 idx_sal_return，实际 key=" + key);
         assertNotEquals("ALL", accessType, "不应全表扫描；实际 type=" + accessType);
+    }
+
+    /**
+     * 五次复核意见 2·同名错列校验：先删掉 setUp 建立的正确 idx_sal_return，改建成同名但错列
+     * （batch_id）的索引，再跑迁移脚本——列定义校验必须【明确报错】（走 ADD INDEX 触发
+     * Duplicate key name），绝不静默跳过错列索引。
+     */
+    @Test
+    void idxMigrationRejectsSameNamedWrongColumnIndexOnRealMySql()
+    {
+        jdbc.execute("alter table inv_batch_consumption drop index idx_sal_return");
+        jdbc.execute("alter table inv_batch_consumption add index idx_sal_return (batch_id)");
+        Integer salCount = jdbc.queryForObject("select count(*) from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return' and column_name='sal_return_id'", Integer.class);
+        assertEquals(0, salCount, "错列索引不应包含 sal_return_id 列");
+
+        // 同名索引列不匹配 -> 迁移脚本应明确报错（Duplicate key name），不静默跳过。
+        RuntimeException ex = assertThrows(RuntimeException.class, this::applyIdxMigration,
+                "同名错列索引必须导致迁移明确失败");
+        String msg = String.valueOf(ex.getMessage()) + " / " + String.valueOf(ex.getCause());
+        assertTrue(msg.contains("Duplicate") || msg.contains("idx_sal_return"),
+                "报错应指出索引冲突，实际：" + msg);
+    }
+
+    /**
+     * 五次复核意见 2·回滚/重跑：执行回滚脚本删索引 -> 重复回滚幂等 -> 再跑迁移恢复 -> EXPLAIN 仍命中，
+     * 证明迁移+回滚脚本配套的恢复/重跑行为在真库可用（文档所述与实际一致）。
+     */
+    @Test
+    void idxRollbackAndRerunRestoresIndexOnRealMySql()
+    {
+        applyIdxRollback();
+        assertEquals(0, idxSalCount(), "回滚后索引应消失");
+
+        assertDoesNotThrow(this::applyIdxRollback, "重复回滚应幂等");
+        assertEquals(0, idxSalCount(), "重复回滚后仍无索引");
+
+        assertDoesNotThrow(this::applyIdxMigration, "回滚后重跑迁移应恢复索引");
+        assertEquals(1, idxSalCount(), "重跑迁移应恢复唯一 idx_sal_return");
+
+        List<Map<String, Object>> plan = jdbc.queryForList("explain select id,qty from inv_batch_consumption "
+                + "where sal_return_id=? and sign=-1 for update", 999L);
+        assertEquals("idx_sal_return", String.valueOf(plan.get(0).get("key")),
+                "恢复后当前读仍应命中 idx_sal_return");
+    }
+
+    private int idxSalCount()
+    {
+        Integer n = jdbc.queryForObject("select count(*) from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return'", Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    /**
+     * 五次复核意见 1·事务边界：外层已有活动事务时调用 ReversalRetryInvoker 必须被显式拒绝
+     * （IllegalStateException），且不执行任何 service 写入、不污染外层事务为 rollback-only；
+     * 被拒后在事务外再用相同入参调用仍可正常过账（fail-fast 不破坏功能与幂等）。
+     */
+    @Test
+    void retryInvokerRejectsCallInsideActiveTransactionOnRealMySql()
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(19L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-INNER-TX", "AE", raw, "PROCESSED");
+        ReversalInput in = input("AE", "EVT-INNER-TX", returnId, originalId, 3, raw);
+        ReversalRetryInvoker invoker = context.getBean(ReversalRetryInvoker.class);
+        PlatformTransactionManager txManager = context.getBean(PlatformTransactionManager.class);
+        login(1L);
+
+        // 外层事务内调用：被拒绝，但外层事务本身未被标记 rollback-only，可正常完成提交。
+        assertDoesNotThrow(() -> new TransactionTemplate(txManager).execute(status -> {
+            IllegalStateException ex = assertThrows(IllegalStateException.class,
+                    () -> invoker.postWithRetry(in, 3, 0), "外层事务中调用应被显式拒绝");
+            assertTrue(ex.getMessage().contains("事务外"), "拒绝原因应指明事务边界契约");
+            return null;
+        }), "外层事务不应因组件拒绝而被污染为 rollback-only");
+
+        assertEquals(1, count("inv_batch_consumption"), "被拒调用不得触发任何 service 写入");
+        assertEquals(0, count("noon_reversal_review"));
+
+        // 事务外用相同入参调用仍成功，fail-fast 不破坏功能；原 1 行 + 红冲 1 行。
+        ReversalRetryInvoker.RetryResult ok = invoker.postWithRetry(in, 3, 0);
+        assertTrue(ok.posted(), "事务外重试应成功：reason=" + ok.result().reasonCode());
+        assertEquals(2, count("inv_batch_consumption"));
     }
 
     @Test
