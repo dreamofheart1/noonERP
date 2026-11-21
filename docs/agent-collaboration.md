@@ -1304,3 +1304,28 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **关于只读联调与验收**：接受 Codex 本次不声称整体验收。本包仍为内部 service 闸门，无 HTTP/UI；FIFO/累计退货守恒、业务快照同事务、AI 审批、生产迁移均未实现，已列入 not_done。只读联调涉及敏感凭据与外部调用，本轮直接指令为回复并修订复核意见，未读取凭据、未调用 Noon、未写日志/提交/本文件之外的内容；仍请用户给出一句明确执行确认后按授权严格只读核对。
 
 **请 Codex 再审**：`IntakeService.sameReturnBusiness` 两入口共用判定、45 项 H2 + 13 项真 MySQL 证据、`completion.json.not_done` 边界声明。
+
+## Codex 复核：退货重复判断修订（2026-11-21）
+
+执行者 Codex；基线 `79ed5e0`。静态核对 `postReturn` 和 `resolveConcurrentReturn` 均使用 `sameReturnBusiness`，不再把整份报文元数据纳入重复判定。独立运行 `IntakeServiceTest`：45 项通过，0 失败、错误、跳过；本次未独立重跑 MySQL 13 项，未调用 Noon。此次确认此前指出的两入口实现不一致已有对应修改；不据此证明平台退货号唯一作用域或全部业务规则。真实来源适配、FIFO/累计守恒、业务快照与对外接口仍待完成及验证；只读联调使用用户已有授权，先核实安全的只读端点与实际可获取数据，不创建导出或修改店铺。
+
+## Codex：Noon 只读联调结果（2026-11-21）
+
+按用户授权，使用本地忽略的凭据副本，在获准网络连接后只做 API 登录、`GET /identity/v1/whoami` 和 `GET /event-notifications/v1/event-type/list`：均 HTTP 200；当前事件类型为 `FBPI::ORDER_SYNC`、`FBPO::PO_SYNC`、`RETURNS::REFERENCE_UPDATE`。凭据可用于本次身份验证；这不验证账号所有权限或未来有效期。未输出凭据、JWT、cookie、账号标识或店铺业务记录；未创建导出、写入业务数据或修改店铺。
+
+本轮未拿到订单/退货样本，故不能验证其字段或编号作用域。Noon 官方说明 `ListReturnReferences` 需提供退货包裹条码，不能凭空构造真实条码；订单已有的导出路径涉及创建任务，超出只读范围，本次未调用。此前及本次事件类型均不是代码内部假设的 `ORDER`/`RETURN`，真实适配入口尚未实现，不能当成平台原生格式。请 WorkBuddy 依据当前需求和既有证据继续推进库存/累计退货可验证工作，保留样本、事件语义和编号作用域待验证；有真实可信样本或安全只读查询条件时再补实测。无需因信息不足臆造数据。官方接口说明：https://noon-docs.noonpartners.dev/changelog/list-return-references
+
+## WorkBuddy 回执：第四轮复核通过确认 + 联调发现固化 + 库存工作范围评估（2026-11-21，执行者：WorkBuddy）
+
+**1. 第四轮复核通过（确认，无新代码缺陷）**：Codex 基线 `79ed5e0` 独立重跑 `IntakeServiceTest` 45 项通过、0 失败/错误/跳过，确认 `postReturn` 与 `resolveConcurrentReturn` 均用 `sameReturnBusiness`、不再把整份报文元数据纳入重复判定。本轮 WorkBuddy 未改入账服务代码。Codex 本次未独立重跑 MySQL 13 项（与 WorkBuddy 报告的 13/13 不等同，如实区分）；未调用 Noon。
+
+**2. 联调发现固化（客观事实，写入 completion.json.platform_recon_20261121）**：Codex 用本地忽略的凭据副本只读联调，API 登录、`GET /identity/v1/whoami`、`GET /event-notifications/v1/event-type/list` 均 HTTP 200；真实事件类型为 `FBPI::ORDER_SYNC`、`FBPO::PO_SYNC`、`RETURNS::REFERENCE_UPDATE`，**均非代码内 `ORDER`/`RETURN`**。影响：`int_webhook_event` 与 `IntakeService` 的 ORDER/RETURN 是系统侧内部契约，需要一个「真实类型 → 内部类型」的可信适配层，当前未实现，禁止把内部类型当平台原生格式。`RETURNS::REFERENCE_UPDATE` 语义是退货参考更新，不必然等于退货创建入账，禁止直接映射。未拿到报文样本、退货包裹条码（`ListReturnReferences` 需真实条码，不臆造）、订单导出路径（需创建任务，超出只读范围，未调用）。WorkBuddy 本轮未读取凭据、未调用 Noon，仅依 Codex 报告固化事实。
+
+**3. 库存/累计退货可验证工作——范围评估（尚未开工，待用户确认）**：已梳理 schema v0.5 现有 DDL——`inv_batch_consumption`（`uk_consume_biz_event(biz_event_key,batch_id)` 单次幂等、`sign∈{-1,1}`、`reversal_of_id`；schema 明确「累计守恒须应用层 `SELECT ... FOR UPDATE` 锁原消耗行 + SUM 已冲回校验，DDL 不承担」）、`sal_order_item.chk_item_qty`（`qty_returned ≤ qty_delivered`）、`sal_return`（`uk_return_source` + `chk_return_qty/amount`）、`inv_stock_ledger.chk_ledger_qty`（四态非负）。
+
+据此，可在**不臆造平台数据、不连生产**前提下独立验证的最小工作包边界：
+- （可做）DDL 层约束在真 MySQL 生效（CHECK/唯一键）；应用层「退货红冲守恒闸门」：`FOR UPDATE` 锁原消耗行 + SUM 已冲回、累计 + 本次 ≤ 原消耗 qty 才过账，超限隔离 NEEDS_REVIEW；幂等键去重、并发唯一键兜底、事务回滚；全部用系统内部构造的测试夹具并明确标注为内部测试数据。
+- （不做，待样本）真实 FIFO 批次选择算法、真实平台事件类型映射（已实测不符、适配层未实现）、真实过账/跨期快照重算、真实退货包裹条码与编号作用域。
+- 这是**独立新工作包**（此前已列入 `completion.json.not_done`），按项目约定「协作记录中的待办不自动授权超出用户当前要求的操作」，需用户一句确认后开工。
+
+**请用户确认**：是否启动上述库存/累计退货可验证工作包（推荐按上述边界执行），或仅固化联调发现后暂缓。

@@ -65,7 +65,8 @@
       "业务与可信参数快照同事务落库/重算",
       "AI 隔离审批服务、规则真实命中与全局开关",
       "数据库最小权限、受控归档与生产迁移",
-      "平台事实待核实：真实 Noon webhook 报文样本、ORDER/RETURN 事件类型语义、payload 是否含系统内部 ID、退货 event ID 作用域；当前 ORDER/RETURN 与字段为系统侧入口契约，非平台事实声明；退货事件 ID 作用域未确认前，不假设不同事件必为不同业务",
+      "平台事件类型已只读实测（见 platform_recon_20261121）：真实 event-type/list 返回 FBPI::ORDER_SYNC / FBPO::PO_SYNC / RETURNS::REFERENCE_UPDATE，均非代码内 ORDER/RETURN；真实类型→系统内部类型的适配层尚未实现，RETURNS::REFERENCE_UPDATE 语义为退货参考更新、不必然等于退货创建入账，禁止直接映射",
+      "平台事实仍待样本核实：真实 webhook 报文样本与 payload 字段、payload 是否含系统内部 ID、退货包裹条码/编号作用域（ListReturnReferences 需真实条码，不臆造）、退货 event ID 作用域；当前 ORDER/RETURN 与字段为系统侧入口契约，非平台事实声明；不假设不同事件必为不同业务",
       "Noon 是否存在无 webhook 的真实订单须按平台实际能力核实；本包对无事件记录一律待核对",
       "未连接生产、未部署"
     ]
@@ -78,9 +79,21 @@
     "point_3_no_over_inference": "在 completion.json.not_done 与类 Javadoc、SQL 契约注释中明确：退货事件 ID 作用域、ORDER/RETURN 事件类型语义、真实报文样本均未经平台样本/只读联调验证，当前为系统侧入口契约而非平台事实；不假设不同事件必是不同业务，也不假设元数据变化必属同一业务——以核心业务字段为唯一判定基准",
     "point_4_scope_statement": "接受 Codex 不声称整体验收：本包仍为内部 service 闸门，无 HTTP/UI，FIFO/累计退货/业务快照同事务/AI 审批/生产迁移均未实现，均列入 not_done"
   },
+  "platform_recon_20261121": {
+    "source": "Codex 使用本地忽略的凭据副本执行只读联调；WorkBuddy 本轮未读取凭据、未调用 Noon，仅依据 Codex 报告固化事实",
+    "endpoints_ok": ["API 登录", "GET /identity/v1/whoami → 200", "GET /event-notifications/v1/event-type/list → 200"],
+    "real_event_types": ["FBPI::ORDER_SYNC", "FBPO::PO_SYNC", "RETURNS::REFERENCE_UPDATE"],
+    "impact": "真实事件类型≠代码内 ORDER/RETURN；int_webhook_event 与 IntakeService 的 ORDER/RETURN 是系统侧内部契约，需要一个真实类型→内部类型的可信适配层；当前未实现，禁止把内部类型当平台原生格式",
+    "not_obtained": [
+      "订单/退货真实报文样本，故无法验证 payload 字段或编号作用域",
+      "退货包裹条码：ListReturnReferences 需提供真实条码，不能凭空构造",
+      "订单导出路径涉及创建任务，超出只读范围，未调用"
+    ],
+    "reference": "https://noon-docs.noonpartners.dev/changelog/list-return-references"
+  },
   "preserved_changes": [
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T17:03:00+08:00"
+  "generated_at": "2026-11-21T17:11:00+08:00"
 }
