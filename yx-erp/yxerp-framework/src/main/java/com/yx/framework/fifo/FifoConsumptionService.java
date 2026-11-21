@@ -37,13 +37,26 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * 本服务 {@code SALE_DELIVERY} 是<b>系统侧内部契约</b>，不是 Noon 平台原生事件类型；真实类型→内部
  * 类型适配层未实现。事件号只信系统侧 {@code int_webhook_event} 留痕，不因调用方字面非空就通过。
  *
- * <p><b>处理顺序</b>：授权 → 锁父订单行 → 来源证据 → 幂等/冲突前置 → 逐行 FIFO 选批（当前读锁）
- * → 批次剩余量守恒 → 妥投量守恒 → 写 SALE 消耗流水 + 扣批次 + 扣台账 → 审计，全程同事务。
+ * <p><b>处理顺序</b>：授权 → 锁父订单行 → 明细 SKU 绑定父行 → 来源证据 → 幂等/冲突前置 →
+ * 逐行 FIFO 选批（当前读锁） → 批次/台账/妥投量守恒 → 写 SALE 消耗流水 + 扣批次 + 扣台账
+ * + 同步 qty_delivered → 审计，全程同事务。
  *
- * <p><b>守恒契约</b>：FIFO 按 {@code received_at ASC, id ASC} 只选 {@code status='OPEN'} 且
- * {@code qty_remaining>0} 的批次；批次行用 {@code SELECT ... FOR UPDATE} 当前读锁定，避免并发超扣
- * 与 RR 旧快照。扣到 0 关批（status=CLOSED）。每行妥投的累计过账量（当前读行锁 + long 累加）
- * 不得超订单行可投量（qty - qty_cancelled）。台账 qty_available 同步递减，不足隔离。
+ * <p><b>守恒契约（Codex 阶段一静态复核四点已整改）</b>：
+ * <ul>
+ * <li>FIFO 按 {@code received_at ASC, id ASC} 只选<b>请求站点</b>下 {@code status='OPEN'} 且
+ * {@code qty_remaining>0} 的批次（不跨站扣批），批次行 {@code SELECT ... FOR UPDATE} 当前读锁定，
+ * 避免并发超扣与 RR 旧快照；扣到 0 关批（status=CLOSED）。</li>
+ * <li>每条明细 SKU 必须绑定父订单行 {@code parent.skuId()}（单订单行单 SKU），否则 ITEM_MISMATCH 隔离，
+ * 禁止"对订单 A 扣减 SKU B"。</li>
+ * <li>订单行累计妥投以父行 {@code qty_delivered} 当前读为权威（父行已 FOR UPDATE），并与
+ * {@code inv_batch_consumption} 流水累计（sign=1 当前读行锁 + long 累加）逐项核对；两者不等
+ * 说明历史数据不一致，DELIVERED_MISMATCH 隔离，不臆造归属。累计不得超可投量
+ * （qty - qty_cancelled），{@code requested} 用 long 防 int 溢出。</li>
+ * <li>台账按 (sku,warehouse,site) 校验，规划阶段累计本单计划占用，写入按仓聚合一次扣减；
+ * 不足 LEDGER_SHORTAGE 隔离而非异常回滚。</li>
+ * <li>consumption 按 batch 聚合：一次妥投事件一个批次一行（符合 uk_consume_biz_event 语义），
+ * 同批多行合并写入，避免撞唯一键。qty_delivered 与 consumption 同事务同步、数值一致。</li>
+ * </ul>
  * 锁异常由事务整体回滚；调用方有界同键重试（同 ReversalRetryInvoker 范式）；service 不吞异常。
  * DB 唯一键 (biz_event_key,batch_id) + DuplicateKeyException 兜底并发重传。
  *
@@ -117,6 +130,13 @@ public class FifoConsumptionService
         if (!in.siteCode().equals(parent.siteCode()))
             return quarantine(in, "SITE_MISMATCH", "父订单行站点与调用方站点不一致，禁止跨站出库", actor);
 
+        // 2b) 明细 SKU 必须绑定父订单行（单订单行单 SKU），禁止"对订单 A 扣减 SKU B"。
+        for (DeliveryLine line : in.lines())
+            if (line.skuId().longValue() != parent.skuId())
+                return quarantine(in, "ITEM_MISMATCH",
+                        "妥投明细 SKU " + line.skuId() + " 与父订单行 SKU " + parent.skuId()
+                                + " 不一致，禁止跨商品扣减", actor);
+
         // 3) 来源证据绑定。
         String sourceProblem = verifyEvidence(in, parent);
         if (sourceProblem != null)
@@ -127,9 +147,15 @@ public class FifoConsumptionService
         Result idempotent = checkIdempotent(in, parent, bizEventKey, actor);
         if (idempotent != null) return idempotent;
 
-        // 5) 妥投量守恒：该订单行累计已过账 SALE 出库 + 本次 <= 可投量(qty - qty_cancelled)。
-        int requested = in.lines().stream().mapToInt(DeliveryLine::qty).sum();
-        long already = sumPostedOnItem(parent.salOrderId(), in.salOrderItemId());
+        // 5) 妥投量守恒：父行 qty_delivered 为权威累计（已 FOR UPDATE 当前读），与流水累计核对防历史不一致；
+        //    本次用 long 累加防 int 溢出，累计 + 本次 <= 可投量(qty - qty_cancelled)。
+        long requested = in.lines().stream().mapToLong(DeliveryLine::qty).sum();
+        long postedByLedger = sumPostedOnItem(in.salOrderItemId());
+        if (postedByLedger != parent.qtyDelivered())
+            return quarantine(in, "DELIVERED_MISMATCH",
+                    "父订单行 qty_delivered(" + parent.qtyDelivered() + ") 与消耗流水累计("
+                            + postedByLedger + ") 不一致，历史数据无法确证，隔离不臆造", actor);
+        long already = parent.qtyDelivered();
         long deliverable = (long) parent.qty() - parent.qtyCancelled();
         if (longSum(already, requested) > deliverable)
             return quarantine(in, "DELIVERY_EXCEEDS_ORDER",
@@ -142,56 +168,67 @@ public class FifoConsumptionService
         List<Allocation> plan = new ArrayList<>();
         // 同一批次可被多行 FIFO 命中：规划阶段跟踪每批已分配量，避免重复分配超扣。
         java.util.Map<Long, Integer> allocatedPerBatch = new java.util.HashMap<>();
+        // 多行/多批共享同一台账：规划阶段累计本单台账占用，避免逐笔都通过但合计超 avail。
+        java.util.Map<LedgerKey, Integer> allocatedPerLedger = new java.util.LinkedHashMap<>();
         for (DeliveryLine line : in.lines())
         {
-            Result planResult = planOneLine(in, line, actor, plan, allocatedPerBatch);
+            Result planResult = planOneLine(in, line, actor, plan, allocatedPerBatch, allocatedPerLedger);
             if (planResult != null) return planResult; // 写入前的隔离，无部分写入
         }
         if (plan.isEmpty()) throw new IllegalStateException("妥投明细无过账计划，事务应回滚");
 
-        // 7) 统一写入：批次扣减 + 台账扣减 + 消耗流水 + 审计，失败异常则整体回滚。
-        List<Long> entityIds = writePlan(in, parent, bizEventKey, actor, now, plan);
+        // 7) 统一写入：批次扣减 + 台账扣减 + 消耗流水 + 父行 qty_delivered 同步 + 审计，失败异常则整体回滚。
+        List<Long> entityIds = writePlan(in, parent, bizEventKey, actor, now, plan, requested);
         if (entityIds.isEmpty()) throw new IllegalStateException("妥投明细无过账行，事务应回滚");
         audit(null, "POSTED", actor, now,
                 "{\"bizEventKey\":\"" + bizEventKey + "\",\"lines\":" + entityIds.size() + "}");
         return new Result(Outcome.POSTED, entityIds.get(0), null, "POSTED");
     }
 
-    /** 一行分配：按 FIFO 顺序锁 OPEN 批次，逐批分配到满足本行 qty；只规划不写，返回隔离 Result 或 null。 */
+    /** 一行分配：按 FIFO 顺序锁请求站点的 OPEN 批次，逐批分配到满足本行 qty；只规划不写，返回隔离 Result 或 null。 */
     private Result planOneLine(DeliveryInput in, DeliveryLine line, long actor, List<Allocation> plan,
-                               java.util.Map<Long, Integer> allocatedPerBatch)
+                               java.util.Map<Long, Integer> allocatedPerBatch,
+                               java.util.Map<LedgerKey, Integer> allocatedPerLedger)
     {
         int remaining = line.qty();
-        for (Batch batch : openBatches(line.skuId()))
+        for (Batch batch : openBatches(in.siteCode(), line.skuId()))
         {
             if (remaining <= 0) break;
             int freeInBatch = batch.qtyRemaining() - allocatedPerBatch.getOrDefault(batch.id(), 0);
             if (freeInBatch <= 0) continue;
             int take = Math.min(remaining, freeInBatch);
-            // 台账可用量当前读预判（写入前的判定）：不足则整单隔离，无部分写入。
+            // 台账可用量当前读预判（写入前判定）：扣除本单已规划占用后仍不足则整单隔离，无部分写入。
+            LedgerKey key = new LedgerKey(line.skuId(), batch.warehouseId(), in.siteCode());
             Integer avail = jdbc.queryForObject("select qty_available from inv_stock_ledger "
                             + "where sku_id=? and warehouse_id=? and site_code=?",
                     Integer.class, line.skuId(), batch.warehouseId(), in.siteCode());
-            if (avail == null || avail < take)
+            int freeInLedger = (avail == null ? 0 : avail) - allocatedPerLedger.getOrDefault(key, 0);
+            if (freeInLedger < take)
                 return quarantine(in, "LEDGER_SHORTAGE",
                         "SKU " + line.skuId() + " 台账可用量不足（可用 " + (avail == null ? 0 : avail)
+                                + " 减本单已占用 " + allocatedPerLedger.getOrDefault(key, 0)
                                 + " < 本次 " + take + "），事务整体回滚", actor);
             plan.add(new Allocation(batch, line.skuId(), take));
             allocatedPerBatch.merge(batch.id(), take, Integer::sum);
+            allocatedPerLedger.merge(key, take, Integer::sum);
             remaining -= take;
         }
         if (remaining > 0)
             return quarantine(in, "BATCH_QTY_SHORTAGE",
-                    "SKU " + line.skuId() + " 的 OPEN 批次剩余量合计不足以覆盖妥投 " + line.qty()
+                    "站点 " + in.siteCode() + " 的 SKU " + line.skuId()
+                            + " OPEN 批次剩余量合计不足以覆盖妥投 " + line.qty()
                             + "（缺 " + remaining + "），事务整体回滚", actor);
         return null;
     }
 
+    /** 台账聚合键：一次妥投单据内可能多行/多批共享同一 (sku,warehouse,site) 台账，须合并后一次扣减。 */
+    private record LedgerKey(Long skuId, Long warehouseId, String siteCode) { }
+
     /** 统一写入已判定的分配计划；任何 DAO 异常（含并发撞键）整体回滚，不在半途放行。 */
     private List<Long> writePlan(DeliveryInput in, ParentItem parent, String bizEventKey,
-                                 long actor, LocalDateTime now, List<Allocation> plan)
+                                 long actor, LocalDateTime now, List<Allocation> plan, long requested)
     {
-        // 批次扣减按批汇总一次完成（同批可被多行命中），关批用汇总后剩余量显式计算，
+        // 按批汇总一次完成（同批可被多行命中），关批用汇总后剩余量显式计算，
         // 不依赖 SQL 表达式对 qty_remaining 的求值顺序（MySQL SET 左到右读新值、H2 读原值）。
         java.util.Map<Long, Integer> totalPerBatch = new java.util.LinkedHashMap<>();
         java.util.Map<Long, Batch> batchById = new java.util.LinkedHashMap<>();
@@ -212,17 +249,29 @@ public class FifoConsumptionService
                 throw new IllegalStateException("批次 " + batch.id() + " 并发扣减失败，事务整体回滚");
         }
 
-        List<Long> entityIds = new ArrayList<>();
+        // 台账按仓聚合一次扣减：避免同一计划内多分配逐笔判断（首笔过、后笔不足→异常回滚而非准确隔离）。
+        java.util.Map<LedgerKey, Integer> totalPerLedger = new java.util.LinkedHashMap<>();
         for (Allocation a : plan)
+            totalPerLedger.merge(new LedgerKey(a.skuId(), a.batch().warehouseId(), in.siteCode()),
+                    a.qty(), Integer::sum);
+        for (java.util.Map.Entry<LedgerKey, Integer> e : totalPerLedger.entrySet())
         {
-            Batch batch = a.batch();
-            int take = a.qty();
+            LedgerKey k = e.getKey();
+            int totalTake = e.getValue();
             int ledger = jdbc.update("UPDATE inv_stock_ledger SET qty_available=qty_available-? "
                             + "WHERE sku_id=? AND warehouse_id=? AND site_code=? AND qty_available>=?",
-                    take, a.skuId(), batch.warehouseId(), in.siteCode(), take);
+                    totalTake, k.skuId(), k.warehouseId(), k.siteCode(), totalTake);
             if (ledger != 1)
-                throw new IllegalStateException("SKU " + a.skuId() + " 台账并发扣减失败，事务整体回滚");
+                throw new IllegalStateException("SKU " + k.skuId() + " 台账并发扣减失败，事务整体回滚");
+        }
 
+        // consumption 按批聚合：一次妥投事件一个批次一行（uk_consume_biz_event 语义），
+        // 同批多行合并 qty/amount，避免同 (biz_event_key,batch_id) 双插撞唯一键。
+        List<Long> entityIds = new ArrayList<>();
+        for (java.util.Map.Entry<Long, Integer> e : totalPerBatch.entrySet())
+        {
+            Batch batch = batchById.get(e.getKey());
+            int take = e.getValue();
             java.math.BigDecimal amount = batch.unitCost().multiply(java.math.BigDecimal.valueOf(take));
             KeyHolder generated = new GeneratedKeyHolder();
             jdbc.update(connection -> {
@@ -236,7 +285,7 @@ public class FifoConsumptionService
                 ps.setString(3, in.sourceEventId());
                 ps.setLong(4, batch.id());
                 ps.setLong(5, in.salOrderItemId());
-                ps.setLong(6, a.skuId());
+                ps.setLong(6, batch.skuId());
                 ps.setInt(7, take);
                 ps.setBigDecimal(8, batch.unitCost());
                 ps.setBigDecimal(9, amount);
@@ -253,19 +302,26 @@ public class FifoConsumptionService
             if (key == null) throw new IllegalStateException("未取得出库流水 ID");
             entityIds.add(key.longValue());
         }
+
+        // 父行 qty_delivered 权威累计与流水同步：父行已 FOR UPDATE，安全按本次请求量递增。
+        int expected = parent.qtyDelivered() + Math.toIntExact(requested);
+        int delivered = jdbc.update("UPDATE sal_order_item SET qty_delivered=? WHERE id=? AND qty_delivered=?",
+                expected, in.salOrderItemId(), parent.qtyDelivered());
+        if (delivered != 1)
+            throw new IllegalStateException("父订单行 qty_delivered 并发更新失败，事务整体回滚");
         return entityIds;
     }
 
     /** 一条分配：批次 + SKU + 本次扣减量。 */
     private record Allocation(Batch batch, Long skuId, int qty) { }
 
-    /** FIFO 候选批次：status=OPEN、qty_remaining>0，按 received_at,id 排序，FOR UPDATE 当前读锁定。 */
-    private List<Batch> openBatches(Long skuId)
+    /** FIFO 候选批次：仅请求站点、status=OPEN、qty_remaining>0，按 received_at,id 排序，FOR UPDATE 当前读锁定。 */
+    private List<Batch> openBatches(String siteCode, Long skuId)
     {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT id,sku_id,warehouse_id,qty_remaining,unit_cost,received_at FROM inv_batch "
-                        + "WHERE sku_id=? AND status='OPEN' AND qty_remaining>0 "
-                        + "ORDER BY received_at ASC, id ASC FOR UPDATE", skuId);
+                        + "WHERE sku_id=? AND site_code=? AND status='OPEN' AND qty_remaining>0 "
+                        + "ORDER BY received_at ASC, id ASC FOR UPDATE", skuId, siteCode);
         List<Batch> batches = new ArrayList<>();
         for (Map<String, Object> row : rows)
             batches.add(new Batch(((Number) row.get("id")).longValue(),
@@ -295,8 +351,8 @@ public class FifoConsumptionService
                 ((Number) row.get("qty_cancelled")).intValue());
     }
 
-    /** 该订单行累计已过账 SALE 出库数量：当前读行锁 + long 累加（含跨批多行）。 */
-    private long sumPostedOnItem(Long salOrderId, Long salOrderItemId)
+    /** 该订单行累计已过账 SALE 出库数量：当前读行锁 + long 累加（含跨批多行），用于与父行 qty_delivered 核对。 */
+    private long sumPostedOnItem(Long salOrderItemId)
     {
         long total = 0L;
         for (Map<String, Object> row : jdbc.queryForList(
@@ -319,18 +375,29 @@ public class FifoConsumptionService
         return quarantine(in, "SOURCE_CONFLICT", "同源妥投事件但核心业务字段不同，禁止当重传 ACK", actor);
     }
 
+    /**
+     * 幂等完整业务身份（不比事件 ID、不比 raw_payload 元数据）：
+     * ① 所有已入账行的父订单行身份 == 本次；② 按 SKU 聚合的已入账数量 == 本次明细按 SKU 聚合数量。
+     * 仅判"SKU 属于 lines 之一"会把不同数量的同事件误判为 ACK，故按完整数量比对。
+     */
     private static boolean sameDeliveryBusiness(List<Map<String, Object>> rows, ParentItem parent, DeliveryInput in)
     {
-        return !rows.isEmpty() && rows.stream().allMatch(r -> sameBusinessRow(r, parent, in));
-    }
+        if (rows.isEmpty()) return false;
+        long itemId = in.salOrderItemId();
+        for (Map<String, Object> row : rows)
+            if (((Number) row.get("sal_order_item_id")).longValue() != itemId) return false;
 
-    private static boolean sameBusinessRow(Map<String, Object> row, ParentItem parent, DeliveryInput in)
-    {
-        long sku = ((Number) row.get("sku_id")).longValue();
-        long item = ((Number) row.get("sal_order_item_id")).longValue();
-        // 核心业务：订单行身份必须一致，且该行的 SKU 属于本次妥投明细之一。
-        return item == in.salOrderItemId().longValue()
-                && in.lines().stream().anyMatch(l -> l.skuId() != null && l.skuId().longValue() == sku);
+        java.util.Map<Long, Long> posted = new java.util.HashMap<>();
+        for (Map<String, Object> row : rows)
+        {
+            long sku = ((Number) row.get("sku_id")).longValue();
+            long qty = ((Number) row.get("qty")).longValue();
+            posted.merge(sku, qty, Long::sum);
+        }
+        java.util.Map<Long, Long> wanted = new java.util.HashMap<>();
+        for (DeliveryLine line : in.lines())
+            wanted.merge(line.skuId(), (long) line.qty(), Long::sum);
+        return posted.equals(wanted);
     }
 
     /** 来源证据绑定：系统侧事件佐证 + payload 业务字段逐项一致。 */
@@ -450,7 +517,7 @@ public class FifoConsumptionService
         return node.deepCopy();
     }
 
-    private static long longSum(long a, int b) { return a + (long) b; }
+    private static long longSum(long a, long b) { return a + b; }
 
     private static String periodOf(LocalDateTime t)
     {

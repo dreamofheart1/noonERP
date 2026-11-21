@@ -138,11 +138,11 @@ class FifoConsumptionServiceTest
 
     private long seedBatch(String site, long sku, long wh, String receivedAt, int qty, String cost)
     {
+        String batchNo = "B:" + UUID.randomUUID();
         jdbc.update("insert into inv_batch(batch_no,sku_id,warehouse_id,site_code,received_at,qty_in,qty_remaining,"
                 + "unit_cost,status) values (?,?,?,?,?,?,?,?,'OPEN')",
-                "B:" + UUID.randomUUID(), sku, wh, site, Timestamp.valueOf(receivedAt), qty, qty, new BigDecimal(cost));
-        return jdbc.queryForObject("select id from inv_batch where sku_id=? and received_at=?", Long.class,
-                sku, Timestamp.valueOf(receivedAt));
+                batchNo, sku, wh, site, Timestamp.valueOf(receivedAt), qty, qty, new BigDecimal(cost));
+        return jdbc.queryForObject("select id from inv_batch where batch_no=?", Long.class, batchNo);
     }
 
     private void seedLedger(String site, long sku, long wh, int avail)
@@ -167,6 +167,24 @@ class FifoConsumptionServiceTest
     private static DeliveryInput input(String site, String eventId, long itemId, long sku, int qty, String raw)
     {
         return new DeliveryInput(site, eventId, itemId, List.of(new DeliveryLine(sku, qty)), raw);
+    }
+
+    /** 多行 payload：与 DeliveryLine 列表逐项对应，供 verifyEvidence 逐项绑定。 */
+    private static String payloadOf(long itemId, List<DeliveryLine> lines)
+    {
+        StringBuilder sb = new StringBuilder("{\"sal_order_item_id\":").append(itemId).append(",\"lines\":[");
+        for (int i = 0; i < lines.size(); i++)
+        {
+            if (i > 0) sb.append(',');
+            sb.append("{\"sku_id\":").append(lines.get(i).skuId())
+                    .append(",\"qty\":").append(lines.get(i).qty()).append('}');
+        }
+        return sb.append("]}").toString();
+    }
+
+    private static DeliveryInput inputOf(String site, String eventId, long itemId, List<DeliveryLine> lines, String raw)
+    {
+        return new DeliveryInput(site, eventId, itemId, lines, raw);
     }
 
     private int count(String table) { return jdbc.queryForObject("select count(*) from " + table, Integer.class); }
@@ -389,6 +407,179 @@ class FifoConsumptionServiceTest
         login(1L);
         assertTrue(r1.posted() && r2.posted());
         assertEquals(1, count("inv_batch_consumption"), "同事件并发只入账一次");
+    }
+
+    // ---- Codex 阶段一静态复核四点整改反例/正例 ----
+
+    @Test
+    void itemSkuMismatchQuarantined() // 意见2：禁止对订单 A 扣减 SKU B
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10); // 父行 SKU 11
+        seedLedger("AE", 22L, 100L, 20);
+        seedBatch("AE", 22L, 100L, "2026-11-01 00:00:00", 10, "10.0000"); // 另一 SKU 22 有批次
+        String raw = payload(item, 22L, 2); // 明细却是 SKU 22
+        seedEvent("EVT-IM", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-IM", item, 22L, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("ITEM_MISMATCH", r.reasonCode());
+        assertEquals(0, count("inv_batch_consumption"));
+        assertEquals(10, jdbc.queryForObject("select qty_remaining from inv_batch", Integer.class), "SKU22 批次未被扣");
+    }
+
+    @Test
+    void crossSiteSameSkuOnlyConsumesOwnSiteBatch() // 意见1：跨站同 SKU 不扣他站批次
+    {
+        long aeOrder = seedOrder("AE", "O-AE");
+        long aeItem = seedItem(aeOrder, 11L, 10);
+        long saOrder = seedOrder("SA", "O-SA");
+        long saItem = seedItem(saOrder, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedLedger("SA", 11L, 200L, 20);
+        long saBatch = seedBatch("SA", 11L, 200L, "2026-11-01 00:00:00", 5, "10.0000"); // SA 老批更早
+        long aeBatch = seedBatch("AE", 11L, 100L, "2026-11-03 00:00:00", 5, "12.0000"); // AE 批更晚
+        String raw = payload(aeItem, 11L, 3);
+        seedEvent("EVT-XS", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-XS", aeItem, 11L, 3, raw));
+        assertTrue(r.posted(), "AE 请求应只扣 AE 批，不被 SA 老批干扰");
+        assertEquals(5, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, saBatch),
+                "SA 批次不应被扣，剩余量应保持 5");
+        // AE 批扣 3，剩 2；注意 SA 批未动
+        assertEquals(2, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, aeBatch));
+    }
+
+    @Test
+    void saBatchUntouchedWhenAeRequestHasNoAeBatch() // 意见1：AE 请求只有 SA 批 -> 隔离而非扣 SA
+    {
+        long aeOrder = seedOrder("AE", "O-AE");
+        long aeItem = seedItem(aeOrder, 11L, 10);
+        seedLedger("SA", 11L, 200L, 20);
+        seedBatch("SA", 11L, 200L, "2026-11-01 00:00:00", 5, "10.0000");
+        String raw = payload(aeItem, 11L, 2);
+        seedEvent("EVT-XS2", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-XS2", aeItem, 11L, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("BATCH_QTY_SHORTAGE", r.reasonCode(), "AE 站点无可用批次应隔离");
+        assertEquals(5, jdbc.queryForObject("select qty_remaining from inv_batch", Integer.class), "SA 批未被扣");
+    }
+
+    @Test
+    void sameBatchMultipleLinesDoesNotHitUniqueKey() // 意见3：同批多行聚合，不撞 (biz_event_key,batch_id)
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000"); // 单批 10
+        List<DeliveryLine> lines = List.of(new DeliveryLine(11L, 2), new DeliveryLine(11L, 3));
+        String raw = payloadOf(item, lines);
+        seedEvent("EVT-SB", "AE", raw);
+        Result r = service.postDelivery(inputOf("AE", "EVT-SB", item, lines, raw));
+        assertTrue(r.posted());
+        assertEquals(1, count("inv_batch_consumption"), "同批多行应聚合为一行，不撞唯一键");
+        assertEquals(5, jdbc.queryForObject("select qty from inv_batch_consumption", Integer.class));
+        assertEquals(5, jdbc.queryForObject("select qty_remaining from inv_batch", Integer.class));
+        assertEquals(15, jdbc.queryForObject("select qty_available from inv_stock_ledger", Integer.class));
+    }
+
+    @Test
+    void multipleBatchesShareLedgerAccumulatesPlannedUsage() // 意见3：多批同仓，规划累计占用，超额准确隔离
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 4); // 台账仅 4
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 5, "10.0000");
+        seedBatch("AE", 11L, 100L, "2026-11-05 00:00:00", 5, "12.0000");
+        List<DeliveryLine> lines = List.of(new DeliveryLine(11L, 3), new DeliveryLine(11L, 2)); // 合计 5 > 台账 4
+        String raw = payloadOf(item, lines);
+        seedEvent("EVT-LA", "AE", raw);
+        Result r = service.postDelivery(inputOf("AE", "EVT-LA", item, lines, raw));
+        assertFalse(r.posted());
+        assertEquals("LEDGER_SHORTAGE", r.reasonCode(), "两批各够但台账合计不足，应准确隔离而非异常回滚");
+        assertEquals(0, count("inv_batch_consumption"));
+        assertEquals(10, jdbc.queryForObject("select sum(qty_remaining) from inv_batch", Integer.class), "批次未被扣");
+        assertEquals(4, jdbc.queryForObject("select qty_available from inv_stock_ledger", Integer.class), "台账未被扣");
+    }
+
+    @Test
+    void deliveredCountSyncedWithConsumption() // 意见4：qty_delivered 与流水同步一致
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 3);
+        seedEvent("EVT-DS", "AE", raw);
+        assertTrue(service.postDelivery(input("AE", "EVT-DS", item, 11L, 3, raw)).posted());
+        assertEquals(3, jdbc.queryForObject("select qty_delivered from sal_order_item where id=?", Integer.class, item));
+        assertEquals(3, jdbc.queryForObject("select coalesce(sum(qty),0) from inv_batch_consumption", Integer.class));
+        // 第二次累计仍一致，可继续妥投
+        String raw2 = payload(item, 11L, 2);
+        seedEvent("EVT-DS2", "AE", raw2);
+        assertTrue(service.postDelivery(input("AE", "EVT-DS2", item, 11L, 2, raw2)).posted());
+        assertEquals(5, jdbc.queryForObject("select qty_delivered from sal_order_item where id=?", Integer.class, item));
+    }
+
+    @Test
+    void deliveredMismatchQuarantined() // 意见4：父行 qty_delivered 与流水不一致 -> 隔离不臆造
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        jdbc.update("update sal_order_item set qty_delivered=5 where id=?", item); // 历史脏值，流水为 0
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 2);
+        seedEvent("EVT-DM", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-DM", item, 11L, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("DELIVERED_MISMATCH", r.reasonCode());
+        assertEquals(0, count("inv_batch_consumption"));
+    }
+
+    @Test
+    void retransmitDifferentPayloadNotAck() // 意见2：不同明细的 payload 不 ACK（证据闸门先拦）
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        List<DeliveryLine> first = List.of(new DeliveryLine(11L, 2), new DeliveryLine(11L, 3));
+        String raw = payloadOf(item, first);
+        seedEvent("EVT-RD", "AE", raw);
+        assertTrue(service.postDelivery(inputOf("AE", "EVT-RD", item, first, raw)).posted());
+        // 同事件号但明细分布不同（1+4）→ payload 与库内证据不符，证据闸门隔离，绝不 ACK。
+        List<DeliveryLine> changed = List.of(new DeliveryLine(11L, 1), new DeliveryLine(11L, 4));
+        String rawChanged = payloadOf(item, changed);
+        Result r = service.postDelivery(inputOf("AE", "EVT-RD", item, changed, rawChanged));
+        assertFalse(r.posted(), "不同明细分布不应被当重传 ACK");
+        assertEquals(1, count("inv_batch_consumption"));
+    }
+
+    @Test
+    void idempotencyComparesFullQuantityNotJustSku() // 意见2：同键已入账数量与本次明细不同 -> SOURCE_CONFLICT
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        long batch1 = seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        long batch2 = seedBatch("AE", 11L, 100L, "2026-11-05 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 2);
+        seedEvent("EVT-IQ", "AE", raw);
+        assertTrue(service.postDelivery(input("AE", "EVT-IQ", item, 11L, 2, raw)).posted());
+        // 手工注入同 biz_event_key 的另一批 + 不同数量，模拟"同键但核心数量不同"的历史脏行，
+        // 绕过证据闸门直接命中幂等完整比较：应 SOURCE_CONFLICT 而非 ACK。
+        jdbc.update("insert into inv_batch_consumption(consumption_no,biz_event_key,source_event_id,batch_id,"
+                        + "sal_order_item_id,sku_id,qty,unit_cost,amount,consumed_at,move_type,sign,period,"
+                        + "cross_period,created_at) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "FC:manual", "SALE:EVT-IQ", "EVT-IQ", batch2, item, 11L, 9,
+                new BigDecimal("10.0000"), new BigDecimal("90.0000"),
+                Timestamp.valueOf("2026-11-21 00:00:00"), "SALE", 1, "2026-11", 0,
+                Timestamp.valueOf("2026-11-21 00:00:00"));
+        Result r = service.postDelivery(input("AE", "EVT-IQ", item, 11L, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("SOURCE_CONFLICT", r.reasonCode(), "同键数量 9+2 与本次 2 不一致，不 ACK");
+        assertEquals(2, count("inv_batch_consumption"));
+        // batch1 是正常过账批次，扣 2 后剩 8；冲突重传不应再扣
+        assertEquals(8, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, batch1));
     }
 
     @Test

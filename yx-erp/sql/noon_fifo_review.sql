@@ -12,25 +12,31 @@
 -- -----------------------------------------------------------------------------
 -- 输入契约（DeliveryInput）：siteCode / sourceEventId / salOrderItemId / lines(sku_id,qty) /
 --   rawPayload。siteCode 经 SiteAuthGuard 授权；salOrderItemId 指向真实 sal_order_item，
---   其父 sal_order 站点与请求一致，sku 与明细一致。sourceEventId 由系统侧 int_webhook_event
+--   其父 sal_order 站点与请求一致；每条明细 SKU 必须等于父行 sku_id（单订单行单 SKU），
+--   否则 ITEM_MISMATCH 隔离，禁止"对订单 A 扣减 SKU B"。sourceEventId 由系统侧 int_webhook_event
 --   佐证（event_id 相同、站点一致、状态非 FAILED/KILLED、event_type=SALE_DELIVERY、
 --   payload 与请求内容一致且 sal_order_item_id/sku_id/qty 逐项一致）。
 -- 幂等键 biz_event_key='SALE:'+sourceEventId；唯一键 (biz_event_key,batch_id) 阻止重复妥投
---   双计 COGS；同键核心字段不同进 SOURCE_CONFLICT。
+--   双计 COGS；完整业务身份=订单行身份 + 按 SKU 聚合数量（不比事件号/元数据），
+--   同键核心内容不同进 SOURCE_CONFLICT。
 -- -----------------------------------------------------------------------------
--- 守恒（应用层事务，DDL 只保单行/单次幂等）：
---   * FIFO 选批：按 received_at ASC, id ASC 选 status='OPEN' 且 qty_remaining>0 的批次，
---     SELECT ... FOR UPDATE 当前读锁批次行，逐批扣减，累计扣减本行妥投量后关批；
---   * 批次剩余量守恒：每行扣减 <= 该批 qty_remaining，不足则 BATCH_QTY_SHORTAGE 隔离；
---   * 妥投量守恒：该订单行累计已过账妥投 + 本次 <= 订单行 qty - qty_cancelled，
---     超出 DELIVERY_EXCEEDS_ORDER 隔离（当前读行锁，避免 RR 旧快照漏读）；
---   * 台账 qty_available 同步递减且 >=0（DDL CHECK 兜底），不足 LEDGER_SHORTAGE 隔离。
--- 锁序固定：父订单行 → 批次行(id 升序) → 台账行；锁异常事务整体回滚，调用方有界重试。
+-- 守恒（应用层事务，DDL 只保单行/单次幂等；Codex 阶段一复核四点已整改）：
+--   * FIFO 选批：只在请求站点 site_code 内，按 received_at ASC, id ASC 选 status='OPEN'
+--     且 qty_remaining>0 的批次（不跨站扣批），SELECT ... FOR UPDATE 当前读锁批次行；
+--   * 批次剩余量守恒：按批汇总扣减 <= 该批 qty_remaining，不足则 BATCH_QTY_SHORTAGE 隔离；
+--   * 妥投量守恒：父订单行 qty_delivered（FOR UPDATE 当前读）为权威累计，须与消耗流水
+--     累计(sign=1)一致（不一致 DELIVERED_MISMATCH 隔离）；累计 + 本次(long) <=
+--     订单行 qty - qty_cancelled，超出 DELIVERY_EXCEEDS_ORDER 隔离，防 int 溢出；
+--   * 台账 qty_available 按 (sku,warehouse,site) 汇总一次扣减且 >=0（DDL CHECK 兜底），
+--     规划阶段累计本单占用，不足 LEDGER_SHORTAGE 隔离（非异常回滚）；
+--   * consumption 按 batch 聚合一次写入（一次妥投一个批次一行，合 uk_consume_biz_event 语义），
+--     同事务同步父行 qty_delivered=qty_delivered+本次。
+-- 锁序固定：父订单行 → 批次行(id 升序) → 台账行 → 父行 qty_delivered；锁异常事务整体回滚，调用方有界重试。
 -- -----------------------------------------------------------------------------
 -- reason_code 全集：
 --   PARENT_ORDER_ITEM_MISSING / SITE_MISMATCH / ITEM_MISMATCH / DELIVERY_EXCEEDS_ORDER /
 --   SOURCE_UNIDENTIFIABLE / SOURCE_UNVERIFIED / BATCH_QTY_SHORTAGE / LEDGER_SHORTAGE /
---   SOURCE_CONFLICT
+--   SOURCE_CONFLICT / DELIVERED_MISMATCH
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS noon_fifo_review (

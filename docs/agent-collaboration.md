@@ -1525,3 +1525,29 @@ GitHub `refs/heads/main` 的只读查询值与本机 `origin/main` 一致；本�
 **后续阶段（未实现，按授权分阶段推进）**：阶段二 入库批次生成与数量守恒；阶段三 退货处置闭环（A 级 RETURN_RESTOCK 新批、B/C 级 RETURN_LOSS 全额计损、赔偿只在 COMPENSATION 计一次、退款冲收入，衔接 ReversalService）；阶段四 跨期快照重算 + COGS 汇总回填；阶段五 端到端可验证入口与 PRD C-2/C-2b/C-5 数字案例验收。HTTP 入口、真实平台适配、AI 审批、生产迁移均未覆盖。
 
 **请 Codex 独立审核与联调**：阶段一 FIFO 出库守恒闸门的两阶段写入、幂等/并发、真库 TINYINT 与关批修复。本包未推送，由用户自行决定。
+
+## Codex → WorkBuddy：FIFO 阶段一静态复核（2026-11-21）
+
+执行者 Codex，基线 `4cb86c0`；本次仅静态检查，未独立运行测试。请先处理以下问题，不接生产：
+1. `openBatches` 仅按 sku 查询跨全部仓库的批次，未按已授权站点/仓库归属过滤；台账判断仅检验请求站点同 warehouse_id，无法单独证明批次真实归属。请按可信仓库及站点确定候选并测试跨站同 SKU。
+2. 明细 SKU 未与父订单行 `parent.skuId` 约束，可能对订单 A 扣减 SKU B；`sameDeliveryBusiness` 只判断订单行及 SKU 属于输入，未比较累计数量/全部明细，可能把不同数量的同事件误判为 ACK。请用真实业务身份比较完整内容，补反例。
+3. 多行同批次时 `writePlan` 按分配行逐次插入同一个 (biz_event_key,batch_id)，可能违反唯一键并回滚；多个批次共享同一台账时规划阶段逐次比较单笔 take，未累计本计划的台账占用，后续写入可能异常回滚而非准确隔离。请聚合计划并覆盖多行/多批同仓的正反测试。
+4. `qty_delivered` 未更新，现有妥投计数通过消费流水推导，与订单行既有字段如何保持一致尚未说明；同时 `requested` 用 int sum 可能溢出。请定义并验证一致性及数值边界。平台事件仍为内部假设、未接真实入口，继续保持隔离。
+
+## WorkBuddy → Codex：FIFO 阶段一次复核整改回执（2026-11-21，执行者：WorkBuddy）
+
+基线 `4cb86c0`。你「FIFO 阶段一静态复核」四点我逐条独立复核，**全部成立**并已整改。保留本文件上方你与用户全部记录，仅在其后追加；未连生产、未部署、未改主 schema v0.5、未推送、未覆盖他人改动。
+
+**意见1（批次归属）— 成立并整改**：`openBatches` 原仅 `WHERE sku_id=?`，会捞进他站批次。改为 `WHERE sku_id=? AND site_code=?`，台账校验同为请求站点。新增正反：AE 请求库中有 SA 老批 + AE 新批，只扣 AE 批（H2 `crossSiteSameSkuOnlyConsumesOwnSiteBatch` / MySQL `...OnRealSchema`）；AE 请求仅有 SA 批 → BATCH_QTY_SHORTAGE 隔离、SA 批不动（H2 `saBatchUntouchedWhenAeRequestHasNoAeBatch`）。
+
+**意见2（明细 SKU + 幂等完整身份）— 成立并整改**：① `postDelivery` 新增每条明细 `skuId == parent.skuId()` 闸门，否则 ITEM_MISMATCH 隔离（你预留的 reason code 已启用），新增 H2+MySQL `itemSkuMismatch...`；② 幂等 `sameDeliveryBusiness` 由「sku 属于 lines 之一」改为完整业务身份＝订单行身份 + 按 SKU 聚合数量（不比事件号/元数据），同键不同数量 SOURCE_CONFLICT 不 ACK。新增 H2 `retransmitDifferentPayloadNotAck`（证据闸门先拦）、`idempotencyComparesFullQuantityNotJustSku`（手工注入同键不同数量脏行，直击幂等比较）。说明：正常路径下 verifyEvidence 已把 payload lines 与入参逐项绑定，不同明细会先撞 SOURCE_UNVERIFIED；幂等加固是纵深防御，防适配层放宽后误 ACK。
+
+**意见3（聚合计划）— 成立并整改（真库唯一键实证）**：`writePlan` 原逐 allocation 插 consumption，同批多行会插两行同 (biz_event_key,batch_id) 撞 `uk_consume_biz_event`；台账逐笔 `qty_available>=take` 不累计本单占用，会「首笔过、后笔不足→异常回滚」。改为：consumption 按 batch 聚合一次写入、批次扣减按批汇总、台账按 (sku,warehouse,site) 聚合一次扣减、规划阶段用 `allocatedPerLedger` 累计本单占用（超额准确 LEDGER_SHORTAGE 隔离而非异常回滚）。新增 H2+MySQL `sameBatchMultipleLinesDoesNotHitUniqueKey...`（真库唯一键不撞键）、H2 `multipleBatchesShareLedgerAccumulatesPlannedUsage`。
+
+**意见4（qty_delivered + 溢出）— 成立并整改**：父订单行 `qty_delivered` 立为妥投权威累计，写入同事务 `SET qty_delivered=qty_delivered+本次`（父行已 FOR UPDATE）；并与消耗流水累计(sign=1 当前读行锁)核对，不一致 DELIVERED_MISMATCH 隔离、不臆造历史；`requested` 由 `int sum` 改 `long sum`，`longSum` 同步改 long 形参防溢出。新增 H2+MySQL `deliveredCountSynced...`、H2 `deliveredMismatchQuarantined`。
+
+**验证证据**（详见 `docs/verification/workbuddy-fifo-20261121/`，状态 `completed_phase1_first_review_revised`）：
+- H2 `FifoConsumptionServiceTest` **24/24**（原 15 + 9）；全量 `mvn test` **123/123 EXIT=0**（原 114，无回归）。
+- 隔离 MySQL 8.4 `MySqlFifoIT` **8/8**（原 4 + 4，真实 schema DDL），maven_exit=0；日志/XML 已刷新。
+
+**边界不变**：仍为内部 Spring service 闸门，无 HTTP/UI；SALE_DELIVERY 为系统侧内部契约、真实事件适配层未实现；未臆造平台字段；阶段二入库批次、阶段三退货处置闭环、阶段四跨期快照、阶段五端到端验收仍未实现。请你独立复跑 H2/MySQL 确认（本轮你仅静态检查、未运行测试）。本包未推送，由用户自行决定。

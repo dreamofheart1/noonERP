@@ -1,6 +1,6 @@
 {
   "marker": "NOON-20261121-FIFO",
-  "status": "completed_phase1",
+  "status": "completed_phase1_first_review_revised",
   "summary": "库存批次与退货数量业务·阶段一：FIFO 批次出库消耗服务（用户 2026-11-21 授权分阶段开发的首个工作包）。实现内部 Spring service 闸门 FifoConsumptionService.postDelivery：站点授权 + 可信父订单行（sal_order/sal_order_item 真实存在、站点一致）+ 系统侧事件证据绑定 + 幂等键 SALE:sourceEventId + 两阶段先判定后写入 + FIFO 按 received_at/id 选 OPEN 批 FOR UPDATE 当前读 + 批次剩余量守恒 + 妥投量不超订单可投量 + 台账 qty_available 同步递减 + 写 SALE 消耗流水(sign=+1) + 不可变审计同事务。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。SALE_DELIVERY 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
   "files": [
     "yx-erp/sql/noon_fifo_review.sql",
@@ -18,19 +18,19 @@
     {
       "name": "H2 默认单元测试",
       "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='FifoConsumptionServiceTest' -Dsurefire.failIfNoSpecifiedTests=false test",
-      "result": "15/15 PASS（正向 FIFO/授权/父行/证据/幂等/冲突/守恒/并发/审计）",
+      "result": "24/24 PASS（正向 FIFO/授权/父行/证据/幂等/冲突/守恒/并发/审计 + Codex 复核整改 9 项：ITEM_MISMATCH/跨站同SKU/同批多行聚合/台账本单占用累计/qty_delivered 同步/DELIVERED_MISMATCH/幂等完整数量比较）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
     },
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-fifo-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=4 errors=0 failures=0 skipped=0（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚）",
+      "result": "maven_exit=0；MySQL JUnit tests=8 errors=0 failures=0 skipped=0（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚 + Codex 复核整改 4 项：跨站同SKU只扣本站、ITEM_MISMATCH 隔离、qty_delivered 真库同步、同批多行不撞唯一键）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/mysql-it.log"
     },
     {
       "name": "全量默认测试无回归",
       "command": "mvn test",
-      "result": "EXIT=0；114 tests / 0 failures / 0 errors（原 99 + FIFO 15）",
+      "result": "EXIT=0；123 tests / 0 failures / 0 errors（原 114 + Codex 复核整改 9）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
     }
   ],
@@ -46,8 +46,26 @@
       "台账同步：qty_available 按批次仓库递减且 >=0（条件 UPDATE 防并发超扣），不足 LEDGER_SHORTAGE 隔离",
       "两阶段先判定后写入：所有守恒/来源判定在写入前完成，任何隔离都无部分写入；写入阶段异常整体回滚、不在半途放行",
       "写入：sign=+1 的 SALE 消耗流水（金额=数量×单位成本），批次扣减、台账扣减、不可变审计同事务",
-      "并发：同事件双线程只入账一次（唯一键 (biz_event_key,batch_id) + 幂等）"
+      "并发：同事件双线程只入账一次（唯一键 (biz_event_key,batch_id) + 幂等）",
+      "【Codex 阶段一复核整改】站点归属：FIFO 候选批次与台账均限定请求 site_code，跨站同 SKU 不扣他站批次",
+      "【Codex 阶段一复核整改】明细 SKU 绑定父订单行 sku_id，跨商品扣减 ITEM_MISMATCH 隔离",
+      "【Codex 阶段一复核整改】幂等完整业务身份=订单行身份+按 SKU 聚合数量（不比事件号/元数据），不同数量 SOURCE_CONFLICT 不 ACK",
+      "【Codex 阶段一复核整改】consumption 按批聚合一次写入（同批多行不撞 uk_consume_biz_event）；台账按 (sku,warehouse,site) 聚合一次扣减且规划阶段累计本单占用",
+      "【Codex 阶段一复核整改】父订单行 qty_delivered 同事务同步、与流水累计核对（不一致 DELIVERED_MISMATCH 隔离），requested 用 long 防 int 溢出"
     ],
+    "first_review_20261121": {
+      "baseline": "4cb86c0",
+      "reviewer": "Codex 静态复核四点（仅静态检查，未独立运行测试）",
+      "findings_all_confirmed": true,
+      "changes": [
+        "意见1 openBatches 跨全部仓库/站点无归属过滤 → 加 site_code 过滤，台账校验同站点；新增跨站同 SKU 正反测试（H2+MySQL）",
+        "意见2 明细 SKU 未绑定父行 + sameDeliveryBusiness 只判 sku 属于 lines 之一 → 加 ITEM_MISMATCH 闸门 + 按 SKU 聚合数量完整比较；新增跨商品扣减、不同数量冲突测试",
+        "意见3 writePlan 逐 allocation 插 consumption 撞 (biz_event_key,batch_id) 唯一键 + 台账逐笔不累计 → consumption 按批聚合、台账按仓聚合、规划阶段累计本单占用；新增同批多行、多批同仓测试（H2+MySQL）",
+        "意见4 qty_delivered 未更新且 requested int sum 溢出 → qty_delivered 同事务同步+与流水核对(DELIVERED_MISMATCH)、requested 改 long；新增 qty_delivered 同步/脏值隔离测试（H2+MySQL）"
+      ],
+      "verification": "H2 单测 24/24、全量 123/123、隔离 MySQL 8/8；证据 XML/日志已刷新",
+      "not_run_by_codex": "Codex 本轮未独立运行测试，请其复跑确认"
+    },
     "not_done": [
       "HTTP/Controller 与管理 UI 入口（本包为内部 service 闸门，非业务闭环）",
       "真实平台事件类型→内部类型适配层：SALE_DELIVERY 为系统侧内部契约，真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现；真实妥投事件号来源待联调",
@@ -69,5 +87,5 @@
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T18:40:00+08:00"
+  "generated_at": "2026-11-21T19:13:35+08:00"
 }

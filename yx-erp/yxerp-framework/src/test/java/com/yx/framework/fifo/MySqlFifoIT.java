@@ -171,6 +171,23 @@ class MySqlFifoIT
         return new DeliveryInput(site, eventId, itemId, List.of(new DeliveryLine(sku, qty)), raw);
     }
 
+    private static String payloadOf(long itemId, List<DeliveryLine> lines)
+    {
+        StringBuilder sb = new StringBuilder("{\"sal_order_item_id\":").append(itemId).append(",\"lines\":[");
+        for (int i = 0; i < lines.size(); i++)
+        {
+            if (i > 0) sb.append(',');
+            sb.append("{\"sku_id\":").append(lines.get(i).skuId())
+                    .append(",\"qty\":").append(lines.get(i).qty()).append('}');
+        }
+        return sb.append("]}").toString();
+    }
+
+    private static DeliveryInput inputOf(String site, String eventId, long itemId, List<DeliveryLine> lines, String raw)
+    {
+        return new DeliveryInput(site, eventId, itemId, lines, raw);
+    }
+
     private int count(String table) { return jdbc.queryForObject("select count(*) from " + table, Integer.class); }
 
     @Test
@@ -232,6 +249,71 @@ class MySqlFifoIT
         assertTrue(r1.posted() && r2.posted());
         assertEquals(2, jdbc.queryForObject("select coalesce(sum(qty),0) from inv_batch_consumption", Integer.class),
                 "同事件并发只扣一次，不双计");
+    }
+
+    @Test
+    void crossSiteSameSkuOnlyConsumesOwnSiteBatchOnRealSchema()
+    {
+        long aeOrder = seedOrder("AE", "O-AE");
+        long aeItem = seedItem(aeOrder, 11L, 10);
+        long saOrder = seedOrder("SA", "O-SA");
+        long saItem = seedItem(saOrder, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedLedger("SA", 11L, 200L, 20);
+        long saBatch = seedBatch("SA", 11L, 200L, "2026-11-01 00:00:00", 5, "10.0000");
+        long aeBatch = seedBatch("AE", 11L, 100L, "2026-11-03 00:00:00", 5, "12.0000");
+        String raw = payload(aeItem, 11L, 3);
+        seedEvent("EVT-RX", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-RX", aeItem, 11L, 3, raw));
+        assertTrue(r.posted(), "真库 AE 请求应只扣 AE 批");
+        assertEquals(5, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, saBatch),
+                "SA 批次不应被扣，剩余量应保持 5");
+        assertEquals(2, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, aeBatch));
+    }
+
+    @Test
+    void itemSkuMismatchQuarantinedOnRealSchema()
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 22L, 100L, 20);
+        seedBatch("AE", 22L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 22L, 2);
+        seedEvent("EVT-RI", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-RI", item, 22L, 2, raw));
+        assertFalse(r.posted());
+        assertEquals("ITEM_MISMATCH", r.reasonCode());
+        assertEquals(0, count("inv_batch_consumption"));
+    }
+
+    @Test
+    void deliveredCountSyncedOnRealSchema()
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 3);
+        seedEvent("EVT-RD2", "AE", raw);
+        assertTrue(service.postDelivery(input("AE", "EVT-RD2", item, 11L, 3, raw)).posted());
+        assertEquals(3, jdbc.queryForObject("select qty_delivered from sal_order_item where id=?", Integer.class, item));
+        assertEquals(3, jdbc.queryForObject("select coalesce(sum(qty),0) from inv_batch_consumption", Integer.class));
+    }
+
+    @Test
+    void sameBatchMultipleLinesNoUniqueKeyOnRealSchema()
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        List<DeliveryLine> lines = List.of(new DeliveryLine(11L, 2), new DeliveryLine(11L, 3));
+        String raw = payloadOf(item, lines);
+        seedEvent("EVT-RS", "AE", raw);
+        Result r = service.postDelivery(inputOf("AE", "EVT-RS", item, lines, raw));
+        assertTrue(r.posted(), "真库同批多行应聚合为一行过账");
+        assertEquals(1, count("inv_batch_consumption"), "真库唯一键 (biz_event_key,batch_id) 不应被双插撞键");
+        assertEquals(5, jdbc.queryForObject("select qty from inv_batch_consumption", Integer.class));
     }
 
     @Test
