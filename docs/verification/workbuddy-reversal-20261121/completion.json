@@ -1,7 +1,7 @@
 {
   "marker": "NOON-20261121-REVERSAL",
-  "status": "completed_fifth_review_revised",
-  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒 + 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。二次复核：幂等前置/FOR UPDATE 当前读/sign 显式校验+long。三次复核：可控同步双连接测试（innodb_trx LOCK WAIT + 快照读 0/当前读 3 硬证据）+ 调用方重试契约 + 锁序断言收敛。四次复核：新增幂等迁移 noon_reversal_idx_migration.sql、真库 IT 改用实际 schema DDL+迁移、重试提升为正式组件 ReversalRetryInvoker + 真实故障注入、修复 sign TINYINT(1)→Boolean 两个生产缺陷。五次复核（本版）：针对 Codex 指出「重试组件未保证事务外、若外层已有事务 REQUIRED 会加入并在已回滚事务里重试；迁移按索引名判断、同名错列会静默跳过，回滚注释缺分号、SHOW CREATE TABLE 只备份结构」，(1) ReversalRetryInvoker 入口显式检测 TransactionSynchronizationManager.isActualTransactionActive()，已有事务则 fail-fast 抛 IllegalStateException（不盲目 REQUIRES_NEW、不改 service REQUIRED），补外层事务调用/失败回滚/重试/耗尽真库测试；(2) 迁移加列定义校验（GROUP_CONCAT 列序列，同名错列走 ADD INDEX 触发 Duplicate key name 明确报错），新增幂等回滚脚本 noon_reversal_idx_rollback.sql，修正备份措辞（SHOW CREATE TABLE 仅结构，数据用 mysqldump）与回滚语句分号，真库验证回滚/重跑恢复；(3) 可控同步测试加固消除 LOCK WAIT 观察偶发竞态。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。RETURN_REVERSAL 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
+  "status": "completed_sixth_review_revised",
+  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒 + 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。二次复核：幂等前置/FOR UPDATE 当前读/sign 显式校验+long。三次复核：可控同步双连接测试（innodb_trx LOCK WAIT + 快照读 0/当前读 3 硬证据）+ 调用方重试契约 + 锁序断言收敛。四次复核：新增幂等迁移 noon_reversal_idx_migration.sql、真库 IT 改用实际 schema DDL+迁移、重试提升为正式组件 ReversalRetryInvoker + 真实故障注入、修复 sign TINYINT(1)→Boolean 两个生产缺陷。五次复核（本版）：针对 Codex 指出「重试组件未保证事务外、若外层已有事务 REQUIRED 会加入并在已回滚事务里重试；迁移按索引名判断、同名错列会静默跳过，回滚注释缺分号、SHOW CREATE TABLE 只备份结构」，(1) ReversalRetryInvoker 入口显式检测 TransactionSynchronizationManager.isActualTransactionActive()，已有事务则 fail-fast 抛 IllegalStateException（不盲目 REQUIRES_NEW、不改 service REQUIRED），补外层事务调用/失败回滚/重试/耗尽真库测试；(2) 迁移加列定义校验（GROUP_CONCAT 列序列，同名错列走 ADD INDEX 触发 Duplicate key name 明确报错），新增幂等回滚脚本 noon_reversal_idx_rollback.sql，修正备份措辞（SHOW CREATE TABLE 仅结构，数据用 mysqldump）与回滚语句分号，真库验证回滚/重跑恢复；(3) 可控同步测试加固消除 LOCK WAIT 观察偶发竞态。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。RETURN_REVERSAL 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。 六次复核（本版）：针对 Codex「迁移前须核对同名索引完整属性（前缀/唯一性/可见性/类型）、回滚仅按名删可能误删既有索引」，迁移/回滚加 ownership（INDEX_COMMENT=owner:NOON-20261121-REVERSAL:v1）+ 完整定义指纹校验：不存在则建（带标记）、非本包索引报 NOT_OWNED 拒绝接管/删除、本包定义被改报 DEFINITION_MISMATCH、只安全删本包且定义匹配者；真库正反 3 项验证（ownership 写入、非本包拒绝、定义被改拒绝），报复用不存在 database 回显原因码。可控同步测试观察改 innodb_trx.LOCK WAIT 与 performance_schema.data_lock_waits 双通道 + sleep 400ms 消除偶发，连续两次 21/21。",
   "files": [
     "yx-erp/sql/noon_reversal_review.sql",
     "yx-erp/sql/noon_reversal_idx_migration.sql",
@@ -27,7 +27,7 @@
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-reversal-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=18 errors=0 failures=0 skipped=0（四次复核 15 → 五次复核 18，新增迁移同名错列校验、回滚/重跑恢复、外层事务边界拒绝；连续两次独立运行均 18/18）。全部基于实际 schema DDL + 迁移脚本",
+      "result": "maven_exit=0；MySQL JUnit tests=21 errors=0 failures=0 skipped=0（五次复核 18 → 六次复核 21，新增 ownership 写入正向 + 非本包拒绝 + 定义被改拒绝 3 项；连续两次独立运行稳定）。全部基于实际 schema DDL + 迁移脚本",
       "evidence": "docs/verification/workbuddy-reversal-20261121/mysql-it.log"
     },
     {
@@ -91,7 +91,8 @@
       "红冲写入：sign=-1、金额=数量×单位成本（正值）、关联原行与父退货、确定性业务键",
       "事务：红冲写入与不可变审计同事务，失败整体回滚",
       "待核对层 noon_reversal_review + append-only 审计 noon_reversal_audit（独立文件，不改入账隔离层）",
-      "调用方重试 ReversalRetryInvoker 事务边界（五次复核）：入口显式检测活动 Spring 事务并 fail-fast 拒绝，保证每次 postReversal 由 service 代理各开独立事务、失败那次整体回滚后才重试；不盲目 REQUIRES_NEW（避免破坏未来调用方业务原子性）、不改 service 默认 REQUIRED"
+      "调用方重试 ReversalRetryInvoker 事务边界（五次复核）：入口显式检测活动 Spring 事务并 fail-fast 拒绝，保证每次 postReversal 由 service 代理各开独立事务、失败那次整体回滚后才重试；不盲目 REQUIRES_NEW（避免破坏未来调用方业务原子性）、不改 service 默认 REQUIRED",
+      "索引迁移 ownership 与完整定义校验（六次复核）：idx_sal_return 带 INDEX_COMMENT 归属标记，迁移/回滚核对列序/唯一性/可见性/前缀/排序/类型/表达式完整指纹；非本包索引拒绝接管与删除、本包定义被改明确报错，回滚只安全删本包且定义匹配者，绝不按名盲删"
     ],
     "not_done": [
       "HTTP/Controller 与管理 UI 入口（本包为内部 service 闸门，非业务闭环）",
@@ -101,7 +102,7 @@
       "真实退货包裹条码/编号作用域与 webhook 报文样本（ListReturnReferences 需真实条码，不臆造；订单导出需创建任务，超只读范围）",
       "AI 隔离审批、业务快照同事务、数据库最小权限、受控归档与生产迁移",
       "未连接生产、未部署",
-      "【四次复核已处理但不在本包改主 schema】真实 schema inv_batch_consumption 无 sal_return_id 索引致当前读全表扫描、跨原行并发可死锁：已提供幂等迁移脚本 yx-erp/sql/noon_reversal_idx_migration.sql（五次复核加列定义校验：同名错列明确报错）+ 幂等回滚脚本 noon_reversal_idx_rollback.sql（含部署顺序/结构数据备份区分/EXPLAIN 验证/回滚分号），真库 IT 用实际 schema DDL+迁移验证幂等、执行计划、回滚/重跑恢复；脚本本身未部署到任何生产/共享库，是否执行由运维在维护窗口按说明决定",
+      "【已处理但不在本包改主 schema】真实 schema inv_batch_consumption 无 sal_return_id 索引致当前读全表扫描、跨原行并发可死锁：提供幂等迁移 noon_reversal_idx_migration.sql（ownership + 完整定义校验）+ 安全回滚 noon_reversal_idx_rollback.sql（只删本包且定义匹配者），真库 IT 用实际 schema DDL+迁移验证幂等/执行计划/ownership 正反/回滚重跑；脚本未部署任何生产/共享库，是否执行由运维在维护窗口决定",
       "调用方重试已实现为正式组件 ReversalRetryInvoker（入口显式拒绝已有 Spring 事务保证每次调用独立事务、有界、同键）+ 真库故障注入与外层事务边界验证；但 HTTP/Controller 接入入口仍未实现，组件尚未在真实接入链路调用，不宣称接入层已实现",
       "索引不保证绝无死锁：service 保留锁异常事务整体回滚；调用方须用 ReversalRetryInvoker 或有界同键重试兜底"
     ]
@@ -187,5 +188,18 @@
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T18:18:00+08:00"
+  "generated_at": "2026-11-21T18:33:00+08:00",
+  "sixth_review_20261121": {
+    "baseline": "a63ca7b",
+    "reviewer": "Codex",
+    "findings": [
+      {
+        "issue": "上线迁移前须核对同名索引完整属性（前缀 SUB_PART、唯一性 NON_UNIQUE、可见性 IS_VISIBLE、类型 INDEX_TYPE、排序/表达式），当前仅比较列名；回滚脚本仅按名称删除，若同名原是其他定义，回滚可能误删既有索引。要求明确 ownership 与完整定义校验及错定义回滚安全，不在生产执行",
+        "fix": "迁移/回滚脚本加 ownership（INDEX_COMMENT=owner:NOON-20261121-REVERSAL:v1）+ 完整定义指纹（GROUP_CONCAT 列序|唯一性|前缀|排序|类型|可见性|表达式）。迁移：不存在则建（写 ownership）、ownership 不符报 NOT_OWNED 拒绝接管、定义被改报 DEFINITION_MISMATCH、正确则 DO 0；回滚：只 DROP ownership+定义均匹配者，非本包/定义被改报错拒绝，不存在则 DO 0。报错用 PREPARE 执行不存在 database 回显原因码。真库新增 3 项：ownership 写入正向、非本包索引迁移/回滚均拒绝且不改动、本包定义被改迁移/回滚均拒绝且不误删。两份脚本均未部署生产。"
+      }
+    ],
+    "stability_fix": "可控同步测试观察 LOCK WAIT 偶发：innodb_trx.trx_state 为瞬时状态易被采样错过。改双通道（innodb_trx.LOCK WAIT 或 performance_schema.data_lock_waits）+ sleep 400ms + 15s 窗口，连续两次 21/21。",
+    "verification": "H2 99/99（ReversalServiceTest 25/25 不变）；隔离 MySQL 21/21（五次 18 → 21，连续两次稳定）；全量 mvn test EXIT=0（99 tests）。证据日志与 XML 已刷新。",
+    "push": "用户明确由用户自行推送；本包未推送。"
+  }
 }

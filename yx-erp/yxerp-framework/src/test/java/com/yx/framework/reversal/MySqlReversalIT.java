@@ -630,21 +630,25 @@ class MySqlReversalIT
                 assertNotNull(lockOne(xa, "select qty from sal_return where id=" + returnId + " for update"));
 
                 assertTrue(bAboutToLockParent.await(20, TimeUnit.SECONDS), "B 应到达即将锁父退货行处");
-                // B 已发出"即将锁父退货行"，但真正发起 for update 并进入 LOCK WAIT 有微小调度延迟；
-                // 稍等再开始轮询，避免首帧观察过早（偶发竞态加固）。
-                Thread.sleep(200);
-                // 观察锁等待：轮询 innodb_trx，直到出现 LOCK WAIT 状态事务。
+                // B 已发出"即将锁父退货行"，但真正发起 for update 并进入阻塞有调度延迟；稍等再观察。
+                Thread.sleep(400);
+                // 观察锁等待：innodb_trx.trx_state='LOCK WAIT' 是瞬时状态、易被采样错过；
+                // performance_schema.data_lock_waits 在阻塞期间持续有行，更稳。两者任一命中即算观察到。
                 boolean observed = false;
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
                 while (System.nanoTime() < deadline)
                 {
-                    Integer waits = jdbc.queryForObject(
+                    Integer trxWait = jdbc.queryForObject(
                             "select count(*) from information_schema.innodb_trx where trx_state='LOCK WAIT'",
                             Integer.class);
-                    if (waits != null && waits > 0) { observed = true; break; }
+                    Integer dlWait = jdbc.queryForObject(
+                            "select count(*) from performance_schema.data_lock_waits", Integer.class);
+                    if ((trxWait != null && trxWait > 0) || (dlWait != null && dlWait > 0))
+                    { observed = true; break; }
                     Thread.sleep(50);
                 }
-                assertTrue(observed, "必须从 information_schema.innodb_trx 观察到真实 LOCK WAIT（B 等待 A 持有的父退货行锁）");
+                assertTrue(observed, "必须从 innodb_trx.LOCK WAIT 或 performance_schema.data_lock_waits "
+                        + "观察到真实锁等待（B 等待 A 持有的父退货行锁）");
                 assertEquals("NOT_RUN", bOutcome.get(), "A 提交前 B 不应拿到父退货行锁");
 
                 // A 当前读守恒：原行 A 已冲回 0、父退货已冲回 0，3<=10 且 3<=5 → 放行。
@@ -775,8 +779,8 @@ class MySqlReversalIT
 
     /**
      * 五次复核意见 2·同名错列校验：先删掉 setUp 建立的正确 idx_sal_return，改建成同名但错列
-     * （batch_id）的索引，再跑迁移脚本——列定义校验必须【明确报错】（走 ADD INDEX 触发
-     * Duplicate key name），绝不静默跳过错列索引。
+     * （batch_id）的索引（且无本包 ownership 标记），再跑迁移脚本——必须【明确报错】，绝不静默跳过。
+     * 六次复核：此处同时命中 ownership 缺失（NOT_OWNED），语义由下方专项测试精确覆盖。
      */
     @Test
     void idxMigrationRejectsSameNamedWrongColumnIndexOnRealMySql()
@@ -788,12 +792,97 @@ class MySqlReversalIT
                 + "and index_name='idx_sal_return' and column_name='sal_return_id'", Integer.class);
         assertEquals(0, salCount, "错列索引不应包含 sal_return_id 列");
 
-        // 同名索引列不匹配 -> 迁移脚本应明确报错（Duplicate key name），不静默跳过。
         RuntimeException ex = assertThrows(RuntimeException.class, this::applyIdxMigration,
-                "同名错列索引必须导致迁移明确失败");
-        String msg = String.valueOf(ex.getMessage()) + " / " + String.valueOf(ex.getCause());
-        assertTrue(msg.contains("Duplicate") || msg.contains("idx_sal_return"),
-                "报错应指出索引冲突，实际：" + msg);
+                "同名错列/非本包索引必须导致迁移明确失败");
+        String msg = causeChain(ex);
+        assertTrue(msg.toLowerCase().contains("not_owned") || msg.toLowerCase().contains("definition_mismatch")
+                        || msg.contains("Duplicate"),
+                "报错应指出 ownership/定义冲突，实际：" + msg);
+    }
+
+    // ---------- 六次复核意见：ownership 归属 + 完整定义校验 + 安全回滚 ----------
+
+    private static final String IDX_OWNER = "owner:NOON-20261121-REVERSAL:v1";
+
+    private String idxComment()
+    {
+        String c = jdbc.queryForObject("select index_comment from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return' and seq_in_index=1", String.class);
+        return c == null ? "" : c;
+    }
+
+    /**
+     * 正向：setUp 迁移建立的索引必须带本包 ownership COMMENT，且完整定义（非唯一/BTREE/可见/
+     * 无前缀/升序/单列）符合指纹；重复迁移幂等不改动注释与定义；EXPLAIN 仍走索引。
+     */
+    @Test
+    void idxMigrationWritesOwnershipAndFullDefinitionOnRealMySql()
+    {
+        assertEquals(IDX_OWNER, idxComment(), "迁移创建时必须写入本包 ownership 标记");
+        Map<String, Object> row = jdbc.queryForMap("select non_unique, index_type, is_visible, collation, "
+                + "ifnull(sub_part,'FULL') sub_part, column_name from information_schema.statistics "
+                + "where table_schema=database() and table_name='inv_batch_consumption' "
+                + "and index_name='idx_sal_return' and seq_in_index=1");
+        assertEquals("1", String.valueOf(row.get("non_unique")), "应为非唯一索引");
+        assertEquals("BTREE", String.valueOf(row.get("index_type")));
+        assertEquals("YES", String.valueOf(row.get("is_visible")), "应可见");
+        assertEquals("A", String.valueOf(row.get("collation")), "应升序");
+        assertEquals("FULL", String.valueOf(row.get("sub_part")), "应无前缀");
+        assertEquals("sal_return_id", String.valueOf(row.get("column_name")));
+
+        assertDoesNotThrow(this::applyIdxMigration, "带正确 ownership + 定义的索引重复迁移应幂等");
+        assertEquals(IDX_OWNER, idxComment(), "重复迁移不得改动 ownership");
+        assertEquals(1, idxSalCount());
+    }
+
+    /**
+     * 反面 1·非本包索引：把同名索引换成他人创建（无 ownership COMMENT），迁移必须报 NOT_OWNED
+     * 且【不改动该索引】（不删、不覆盖、不接管）；回滚同样必须拒绝删除他人索引。
+     */
+    @Test
+    void foreignSameNameIndexIsNeitherTakenOverNorDroppedOnRealMySql()
+    {
+        jdbc.execute("alter table inv_batch_consumption drop index idx_sal_return");
+        jdbc.execute("alter table inv_batch_consumption add index idx_sal_return (sal_return_id)");
+        assertEquals("", idxComment(), "他人索引无 ownership 标记");
+
+        RuntimeException migrateEx = assertThrows(RuntimeException.class, this::applyIdxMigration,
+                "迁移遇非本包同名索引必须明确报错");
+        assertTrue(causeChain(migrateEx).toLowerCase().contains("not_owned"),
+                "应报 NOT_OWNED：" + causeChain(migrateEx));
+        assertEquals("", idxComment(), "迁移失败不得给他人索引写入 ownership");
+        assertEquals(1, idxSalCount(), "迁移失败不得删除/改动他人索引");
+
+        RuntimeException rollbackEx = assertThrows(RuntimeException.class, this::applyIdxRollback,
+                "回滚遇非本包同名索引必须明确拒绝");
+        assertTrue(causeChain(rollbackEx).toLowerCase().contains("not_owned"),
+                "回滚应报 NOT_OWNED：" + causeChain(rollbackEx));
+        assertEquals(1, idxSalCount(), "回滚失败不得误删他人索引");
+    }
+
+    /**
+     * 反面 2·本包 ownership 但定义被篡改：把本包索引改成唯一索引，迁移与回滚都必须报
+     * DEFINITION_MISMATCH，且不得静默跳过或误删（需人工核对）。
+     */
+    @Test
+    void ownedIndexWithAlteredDefinitionIsRejectedByMigrationAndRollbackOnRealMySql()
+    {
+        jdbc.execute("alter table inv_batch_consumption drop index idx_sal_return");
+        jdbc.execute("alter table inv_batch_consumption add unique index idx_sal_return (sal_return_id) "
+                + "comment '" + IDX_OWNER + "'");
+        assertEquals(IDX_OWNER, idxComment(), "ownership 完好但定义被改（唯一）");
+
+        RuntimeException migrateEx = assertThrows(RuntimeException.class, this::applyIdxMigration,
+                "本包索引定义被改后迁移必须明确报错");
+        assertTrue(causeChain(migrateEx).toLowerCase().contains("definition_mismatch"),
+                "应报 DEFINITION_MISMATCH：" + causeChain(migrateEx));
+
+        RuntimeException rollbackEx = assertThrows(RuntimeException.class, this::applyIdxRollback,
+                "本包索引定义被改后回滚必须明确拒绝");
+        assertTrue(causeChain(rollbackEx).toLowerCase().contains("definition_mismatch"),
+                "回滚应报 DEFINITION_MISMATCH：" + causeChain(rollbackEx));
+        assertEquals(1, idxSalCount(), "定义不匹配时回滚不得误删");
     }
 
     /**
@@ -824,6 +913,15 @@ class MySqlReversalIT
                 + "where table_schema=database() and table_name='inv_batch_consumption' "
                 + "and index_name='idx_sal_return'", Integer.class);
         return n == null ? 0 : n;
+    }
+
+    /** 拼接异常完整 cause 链消息，便于断言脚本伪装报错中回显的原因码（如 NOT_OWNED）。 */
+    private static String causeChain(Throwable t)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable cur = t; cur != null; cur = cur.getCause())
+            sb.append(String.valueOf(cur.getMessage())).append(" / ");
+        return sb.toString();
     }
 
     /**

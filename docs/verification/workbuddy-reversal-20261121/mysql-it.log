@@ -1,15 +1,15 @@
 NOON-20261121-REVERSAL 隔离 MySQL 集成验证（opt-in）
-执行时间：2026-11-21 18:18 +08:00（五次复核修订版；连续两次 18/18 稳定通过）
+执行时间：2026-11-21 18:33 +08:00（六次复核修订版；连续两次 21/21 稳定通过）
 命令：python3 scripts/verify-reversal-runtime.py \
         --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
         --maven /tmp/apache-maven-3.9.11/bin/mvn \
         --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
 
-隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-f245hfmd（末次）
-MySQL JUnit: tests=18 errors=0 failures=0 skipped=0
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-okt9vo4l（末次）
+MySQL JUnit: tests=21 errors=0 failures=0 skipped=0
 maven_exit=0
-证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-f245hfmd
-稳定性：连续两次独立运行均 18/18（g0netagu、f245hfmd），消除 LOCK WAIT 观察偶发竞态。
+证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-okt9vo4l
+稳定性：连续两次独立运行均 21/21（gzitfr90、okt9vo4l）。
 
 【本轮关键变更：所有用例改用【实际主 schema v0.5】DDL + 【实际迁移脚本】建表】
 - setUp 从 docs/noon-erp-schema-v0.5.sql 提取 inv_batch_consumption 真实 DDL（含全部 CHECK、
@@ -51,6 +51,14 @@ maven_exit=0
   18)【五次复核·事务边界】retryInvokerRejectsCallInsideActiveTransactionOnRealMySql：
       外层有活动事务时调用 ReversalRetryInvoker 被显式拒绝（IllegalStateException，含"事务外"），
       外层事务未被污染为 rollback-only、无 service 写入；事务外相同入参仍能正常过账（fail-fast 不破坏功能）。
+  19)【六次复核·正向 ownership】idxMigrationWritesOwnershipAndFullDefinitionOnRealMySql：
+      迁移创建的 idx_sal_return 带 INDEX_COMMENT=owner:NOON-20261121-REVERSAL:v1，完整属性
+      （非唯一/BTREE/可见/升序/无前缀/单列 sal_return_id）全部符合指纹；重复迁移幂等不改 ownership。
+  20)【六次复核·反面·非本包索引】foreignSameNameIndexIsNeitherTakenOverNorDroppedOnRealMySql：
+      同名索引无 ownership 标记（他人创建）→ 迁移报 NOT_OWNED、回滚报 NOT_OWNED，
+      均不删不改该索引（防误删既有索引）。
+  21)【六次复核·反面·定义被改】ownedIndexWithAlteredDefinitionIsRejectedByMigrationAndRollbackOnRealMySql：
+      本包 ownership 完好但索引被改成唯一 → 迁移/回滚均报 DEFINITION_MISMATCH、不静默跳过不误删。
 
 真实 schema 实证发现（四次复核改用真实 DDL 后暴露并修复）：
   A) sign 列 TINYINT(1) 被 MySQL JDBC 映射为 Boolean：原 lockOriginal 用 ((Number)row.get("sign"))
@@ -61,17 +69,20 @@ maven_exit=0
   生产兼容缺陷，已修复并双库回归。
 
 迁移/回滚脚本与部署：
-  - yx-erp/sql/noon_reversal_idx_migration.sql：幂等 + 列定义校验（GROUP_CONCAT 列序列），
-    同名错列走 ADD INDEX 触发 Duplicate key name 明确报错；动态 DDL ALGORITHM=INPLACE LOCK=NONE；
-    头部含部署顺序、结构/数据备份区分（SHOW CREATE TABLE 仅结构，数据用 mysqldump）、EXPLAIN 验证、
-    灰度观察、回滚语句（每条带分号）。
-  - yx-erp/sql/noon_reversal_idx_rollback.sql：幂等回滚（有索引才 DROP），回滚后重跑迁移可恢复（已验证）。
+  - yx-erp/sql/noon_reversal_idx_migration.sql：幂等 + ownership（INDEX_COMMENT=owner:NOON-20261121-REVERSAL:v1）
+    + 完整定义校验（GROUP_CONCAT 指纹：列序/唯一性/前缀/排序/INDEX_TYPE/IS_VISIBLE/EXPRESSION）；
+    不存在→建（带 ownership）、ownership 不符→报 NOT_OWNED 拒绝接管、定义被改→报 DEFINITION_MISMATCH、
+    均正确→DO 0；动态 DDL ALGORITHM=INPLACE LOCK=NONE；头部含部署顺序、结构/数据备份区分、
+    EXPLAIN 验证、灰度观察、回滚说明。
+  - yx-erp/sql/noon_reversal_idx_rollback.sql：安全回滚——只 DROP【ownership 匹配 + 完整定义匹配】的索引，
+    非本包/定义被改均报错拒绝，绝不按名称盲删（防误删既有索引）；不存在则 DO 0 幂等。
+  报错机制：PREPARE 执行 `SELECT * FROM \`NOON_ABORT_<原因>\`.t`，MySQL 回显 Unknown database 带原因码。
   索引不保证绝无死锁；service 保留锁异常事务整体回滚 + 调用方有界同键重试（ReversalRetryInvoker，
-  入口显式拒绝已有 Spring 事务，fail-fast 保证每次调用独立事务，不盲目 REQUIRES_NEW）。
+  入口显式拒绝已有 Spring 事务）。
 
-稳定性加固（五次复核）：可控同步双连接测试曾偶发观察不到 LOCK WAIT（B 发出 latch 后真正进入
-  for update 等待有调度延迟，且前序故障注入用例调整 global innodb_lock_wait_timeout 有残留）。
-  加固：B 连接显式 set session innodb_lock_wait_timeout=30，B 发 latch 后主线程 sleep 200ms 再轮询；
-  连续两次独立运行均 18/18，未改被测 service 逻辑。
+稳定性加固（六次复核）：可控同步双连接测试曾偶发观察不到 LOCK WAIT（innodb_trx.trx_state 是瞬时状态、
+  采样易错过；B 真正进入 for update 有调度延迟）。加固：B 连接显式 set session innodb_lock_wait_timeout=30，
+  B 发 latch 后主线程 sleep 400ms；观察改为 innodb_trx.LOCK WAIT 或 performance_schema.data_lock_waits
+  双通道任一命中（后者在阻塞期间持续有行），窗口 15s；连续两次独立运行均 21/21，未改被测 service 逻辑。
 
 说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。
