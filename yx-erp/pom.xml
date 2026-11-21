@@ -176,6 +176,7 @@
     <modules>
         <module>yxerp-admin</module>
         <module>yxerp-framework</module>
+        <module>yxerp-noon</module>
         <module>yxerp-system</module>
         <module>yxerp-quartz</module>
         <module>yxerp-generator</module>

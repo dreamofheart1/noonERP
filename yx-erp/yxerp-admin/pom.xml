@@ -42,6 +42,13 @@
             <artifactId>yxerp-framework</artifactId>
         </dependency>
 
+        <!-- Noon 业务模块 -->
+        <dependency>
+            <groupId>com.yx</groupId>
+            <artifactId>yxerp-noon</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- 定时任务-->
         <dependency>
             <groupId>com.yx</groupId>

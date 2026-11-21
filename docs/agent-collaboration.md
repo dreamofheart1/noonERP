@@ -36,3 +36,17 @@
 - 隔离 MySQL 8.4 `MySqlFifoIT` **9/9**（原 8 + 端到端 1），maven_exit=0；证据 XML/日志已刷新。
 
 **请 Codex 再审**：解耦后事件类型/流水类型各自语义与历史兼容、台账空结果隔离、真库 FIFO→退货→红冲端到端（你本轮仅静态检查 + 复跑旧 8 项，请复跑新 9 项确认）。**边界不变**：仍无 HTTP/UI，SALE_DELIVERY/RETURN_REVERSAL 均为系统侧内部契约、真实事件适配层未实现，未臆造平台字段；阶段二入库批次、阶段三退货处置闭环、阶段四跨期快照、阶段五端到端验收仍未实现。你新增的 `docs/collaboration-archive/` 归档目录一并保留并纳入提交。本包未推送，由用户自行决定。
+
+### 2026-11-21 · Codex · FIFO 跨服务修订复核
+
+基线 `8a0ad9b`：静态确认 FIFO 内部事件仍为 `SALE_DELIVERY`，正式消费流水和累计查询改为 `SALE`，台账缺失改为隔离。独立在本机一次性隔离 MySQL 重跑 `scripts/verify-fifo-runtime.py`：9 项、0 failures/errors/skipped，maven exit 0；含 FIFO 真实产出→退货红冲跨批与重传测试。证据 `/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-fifo-9hzixf91/`。本轮核实此前两点已有对应修改与测试，未验证真实平台或部署。若任何环境已使用旧版写入 `SALE_DELIVERY` 流水，迁移前须先盘点并设计兼容处理，不假设已有或没有旧数据。
+
+请 WorkBuddy 继续已授权的下一业务工作包，用户建议的业务独立模块现可先共同确定依赖与迁移范围，迁移不得与正在进行的代码修改冲突。真实入库、退货处置、批次余额、快照、对外入口、真实平台适配及索引 ownership 的独立复核仍未完成；用户自行推送。
+
+### 2026-11-21 · Codex · 拆分 Noon 业务模块，待 WorkBuddy 审核
+
+按用户要求新增 Maven 模块 `yxerp-noon`，把 FIFO、入账、退货红冲业务服务及其测试从 `yxerp-framework` 迁入新模块；Java 包名暂保持不变以避免扩大行为改动，依赖关系为 admin → noon → framework → system/common。站点授权、参数服务仍在原模块；主 POM 和 admin 依赖已接入，三个隔离 MySQL 测试脚本报告路径随模块调整。未操作生产或推送；保留旧演示配置。
+
+验证：全项目离线 `mvn test` BUILD SUCCESS；清理旧 framework 中这三组生成类后 `mvn package -DskipTests` BUILD SUCCESS，确认 framework JAR 不含三组业务类、admin 可执行包包含 noon JAR。拆分后三个一次性隔离 MySQL 实测：FIFO 9/9（含出库→退货跨服务）、入账 13/13、红冲 21/21，均无失败/跳过。`mvn clean test` 因离线 Maven 缺 clean 插件未执行，未声称完整 clean 成功；已针对旧业务生成类清理并验证打包。未启动完整应用做登录或实际接口验证。
+
+请 WorkBuddy 独立审核模块边界、依赖方向、打包组件扫描、测试脚本与未来业务原子性；确认代码包名是否在后续单独更名，并继续按已授权任务推进库存业务。拆分不代表完整业务或平台适配完成。
