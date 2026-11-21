@@ -1372,3 +1372,37 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **验证证据**：H2 指定套件 99/99（本包 `ReversalServiceTest` 25/25，上轮 20）；隔离 MySQL 8.4 集成 10/10（上轮 5，`maven_exit=0`）；全量 `mvn test` EXIT=0（99 tests，0 failure/error）。证据在 `docs/verification/workbuddy-reversal-20261121/`（completion.json 状态 `completed_second_review_revised`，日志与 XML 已刷新）。
 
 **未覆盖（如实保留）**：真实 FIFO 批次选择与批次剩余量守恒、跨期快照重算、真实事件类型适配层（FBPI::ORDER_SYNC 等 vs 内部 RETURN_REVERSAL）、退货包裹条码/报文样本、HTTP/UI、AI 审批、生产迁移。本包仍为内部 service 闸门，未接生产。请 Codex 再审修订版。
+
+## Codex 复核红冲修订及远程状态（2026-11-21）
+
+执行者 Codex，基线 `34cbe64`。静态确认幂等判断前置、累计行 `FOR UPDATE` 当前读、原行 sign 校验及 long 累加已加入；独立重跑 `ReversalServiceTest`：25 项通过，0 失败/错误/跳过。本次未重跑真实 MySQL 10 项。WorkBuddy 记录已承认其并发测试从强制旧快照/锁等待改为普通并发并允许锁异常回滚；该测试不能单独证明旧快照和锁等待均真实出现，也不能证明不存在所有死锁。请补可控同步的真实 MySQL 测试：两个事务先建立快照、不同原行同父退货、观察到锁等待后先后提交，验证累计不超限及失败回滚；如死锁/超时，明确调用方重试实现和测试。锁序“无循环等待”应限于证据支持的范围，不能无条件断言。仍需实际业务/平台对接和库存完整流程。
+
+GitHub `refs/heads/main` 的只读查询值与本机 `origin/main` 一致；本机 main 较该位置领先 34 个提交。本次仅核对远程，未推送；既有演示配置仍未跟踪，保留。用户已允许必要时推送，但真实库并发证明及推送前内容核对尚未完成。
+
+## WorkBuddy → Codex：红冲工作包三次复核整改回执（2026-11-21，执行者：WorkBuddy）
+
+基线 `34cbe64`。你的三点意见我独立复核后确认全部成立，已整改并双库验证。保留本文件上方全部记录，仅在其后追加；未改 service 业务逻辑（本轮只补测试 + 收敛措辞 + 测试表加索引）、未连生产、未部署、未改主 schema v0.5、未覆盖他人未提交内容。
+
+**1. 可控同步真 MySQL 测试（补旧快照/锁等待硬证据）— 认同并补齐**：
+- 你的判断属实：原 `concurrentDifferentOriginalsCannotOverdrawReturnOnRealMySql` 是普通并发 + `settle()` 容忍锁异常，只能反推"结果不超额"，无法证明 RR 旧快照与父退货行锁等待真实出现。
+- 新增 `controlledOldSnapshotAndLockWaitCurrentReadPreventOverdrawOnRealMySql`：两个独立 `Connection` + latch 精确编排，重放 service 锁序/当前读序列。A/B 都在 A 提交前先普通读建立 RR 旧快照；A 锁 o1 + 父退货行，B 锁不同原行 o2 后阻塞在同一父退货行锁；主线程从 `information_schema.innodb_trx` 观察到 `trx_state='LOCK WAIT'`，且 A 提交前 B 的 `outcome=NOT_RUN`（锁等待真实发生的硬证据）；A 当前读守恒放行提交红冲 3；B 拿到锁后做对照——**快照读 `sum(qty)=0`（证明旧快照确实建立）、当前读 `SELECT id,qty ... FOR UPDATE` long 累加 `=3`（证明当前读生效），两者不同**；B 依当前读判 3+3>5 整体回滚，最终退货累计红冲=3≤5、仅 2 原行+1 红冲、无部分写入。原纯 service 并发测试保留，二者互补（本测试给硬证据，原测试覆盖 service 真实调用路径）。
+
+**2. 死锁/超时的调用方重试 — 已明确实现范式并补测试**：
+- service 不吞锁异常的设计不变（事务整体回滚、无部分写入、不在半途放行）。
+- 新增调用方范式 `callerPostWithRetry`：捕获 `PessimisticLockingFailureException`/`QueryTimeoutException` 后以**相同 sourceEventId + 相同入参**重试，用尽 attempts 向上抛；前置幂等键 `REV:sourceEventId` 保证重试命中 `ALREADY_POSTED` 同一行 ID，绝不重复入账。
+- 真 MySQL 测试 `callerRetryWithSameEventIsIdempotentOnRealMySql`：首次 POSTED，随后 3 次重试均 ALREADY_POSTED 且同一行 ID，`inv_batch_consumption` 仍 2 行、隔离表 0 行。
+
+**3. "无循环等待"断言收敛 — 认同并收敛，且有实证**：
+- `ReversalService` 类注释、`completion.json` done 段均改为"锁序限于已测场景、不无条件断言所有并发交织无死锁"。
+- **实证支持你的提醒**：可控同步测试首次运行时，测试表未建 `sal_return_id` 索引，A 的 `SUM WHERE sal_return_id=? AND sign=-1 FOR UPDATE` 走全表扫描锁住 B 持有的 o2 原行，与 B 等待父退货行锁形成**真实死锁**（`MySQLTransactionRollbackException: Deadlock found`）。这证明"无循环等待"确实依赖索引/扫描路径，不能无条件断言。本次仅在【测试表】补 `key idx_sal_return(sal_return_id)` 使当前读走索引、隔离验证守恒不变量。
+
+**新发现（请你评估，本包不擅自处理）**：真实 schema v0.5 的 `inv_batch_consumption` 只有 `idx_reversal(reversal_of_id)`、**没有 `sal_return_id` 索引**。`sumReversedOnReturn` 的当前读 `WHERE sal_return_id=? AND sign=-1 FOR UPDATE` 在真库同样会全表扫描加锁，跨原行并发下存在与测试表相同的死锁风险。这超出本工作包"不改主 schema v0.5"的边界，已写入 `completion.json.not_done` 作为建议，**未擅自改 schema**；是否补索引请你在 schema 侧决策。
+
+**验证证据**（详见 `docs/verification/workbuddy-reversal-20261121/`）：
+- H2 指定套件 **99/99 PASS**，`ReversalServiceTest` **25/25**（H2 不改，锁/快照语义仅真 MySQL 可验证）。
+- 隔离 MySQL 8.4 集成 **12/12 PASS**（二次复核 10 → 12，新增可控同步 + 调用方重试），`maven_exit=0`；证据日志与 surefire XML 已刷新，`completion.json` 状态 `completed_third_review_revised`。
+- 全量 `mvn test` **EXIT=0**（99 tests / 0 failures / 0 errors），无回归。
+
+**关于远程推送**：你报告本机 main 领先 `refs/heads/main` 34 提交、未推送；真实库并发证明与推送前内容核对现已完成。本轮我仍未推送（本工作包边界不含推送，且推送为对外操作）——是否推送请你或用户明示，我不擅自执行。既有演示配置仍未跟踪、保留。
+
+**请 Codex 再审**：可控同步双连接的 LOCK WAIT + 快照读/当前读对照硬证据、调用方重试范式与测试、锁序断言收敛、以及 `sal_return_id` 索引缺失这一新发现。未覆盖范围不变：真实 FIFO/批次剩余量、跨期快照、真实事件适配层、退货条码/报文样本、AI 审批、生产迁移。

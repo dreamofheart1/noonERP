@@ -3,6 +3,10 @@ package com.yx.framework.reversal;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -10,6 +14,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -88,6 +94,7 @@ class MySqlReversalIT
                 + "sal_return_id bigint, period char(7), cross_period tinyint not null default 0, "
                 + "raw_payload json, created_at datetime(3) not null, "
                 + "unique key(consumption_no), unique key(biz_event_key,batch_id), "
+                + "key idx_reversal (reversal_of_id), key idx_sal_return (sal_return_id), "
                 + "check (qty > 0 and amount >= 0), check (sign in (-1,1)))");
 
         service = context.getBean(ReversalService.class);
@@ -351,6 +358,239 @@ class MySqlReversalIT
                     || name.contains("PessimisticLocking") || name.contains("QueryTimeout"))
                 return null;
             throw e;
+        }
+    }
+
+    // ---------- 三次复核意见：可控同步双连接，证明旧快照与父退货行锁等待真实出现 ----------
+
+    /**
+     * 调用方重试范式（service 不吞锁异常，重试在调用方）：捕获锁等待超时/死锁异常后，以
+     * <b>相同 sourceEventId 与相同入参</b>重试；service 前置幂等键保证重试命中 ALREADY_POSTED
+     * 返回同一行 ID，不重复入账。用尽 attempts 仍失败则向上抛，由调用方决定隔离/告警。
+     */
+    private Result callerPostWithRetry(ReversalInput in, int attempts)
+    {
+        for (int i = 1; i <= attempts; i++)
+        {
+            try { return service.postReversal(in); }
+            catch (org.springframework.dao.PessimisticLockingFailureException
+                    | org.springframework.dao.QueryTimeoutException lockEx)
+            {
+                if (i == attempts) throw lockEx;
+            }
+        }
+        throw new IllegalStateException("unreachable");
+    }
+
+    @Test
+    void callerRetryWithSameEventIsIdempotentOnRealMySql()
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 3);
+        long originalId = seedConsumption(16L, 11L, 100L, 3, "10.0000");
+        String raw = payload(returnId, originalId, 3, 11L);
+        seedEvent("EVT-CALLER-RETRY", "AE", raw, "PROCESSED");
+        var in = input("AE", "EVT-CALLER-RETRY", returnId, originalId, 3, raw);
+
+        Result first = callerPostWithRetry(in, 3);
+        assertTrue(first.posted());
+        // 模拟调用方未收到首次响应，按相同入参重试 3 次。
+        for (int k = 0; k < 3; k++)
+        {
+            Result retry = callerPostWithRetry(in, 3);
+            assertTrue(retry.posted());
+            assertEquals("ALREADY_POSTED", retry.reasonCode());
+            assertEquals(first.entityId(), retry.entityId(), "重试必须返回同一行 ID");
+        }
+        assertEquals(2, count("inv_batch_consumption"), "重试不得新增红冲行");
+        assertEquals(0, count("noon_reversal_review"));
+    }
+
+    /**
+     * 可控同步双连接测试（Codex 三次复核意见）：此前并发测试用普通并发 + 容忍锁异常，
+     * 无法证明 MySQL RR 下旧快照与父退货行锁等待<b>真实出现</b>。本测试用两个真实独立连接
+     * + latch 精确编排，重放 service 的锁序/当前读序列：
+     * <ol>
+     *   <li>A、B 都在 A 提交前先做普通读建立 RR 旧快照；</li>
+     *   <li>A 锁原行 o1 + 父退货行；B 锁不同原行 o2 后阻塞在同一父退货行锁上；</li>
+     *   <li>主线程从 information_schema.innodb_trx 观察到 LOCK WAIT（锁等待真实发生）；</li>
+     *   <li>A 当前读守恒放行并提交；B 拿到锁后做快照读/当前读对照；</li>
+     *   <li>B 依当前读判定 3+3&gt;5 超额 → 整体回滚，无部分写入。</li>
+     * </ol>
+     * 硬证据：B 事务内普通快照读=0（看不到 A 已提交行，证明旧快照确实建立），当前读
+     * FOR UPDATE=3（看到 A 已提交行，证明当前读生效）——两者不同，才能证明"必须用当前读
+     * SUM 避免旧快照超额"这一不变量，而非仅靠结果不超额的反推。
+     */
+    @Test
+    void controlledOldSnapshotAndLockWaitCurrentReadPreventOverdrawOnRealMySql() throws Exception
+    {
+        long returnId = seedReturn("AE", 11L, 100L, 5);
+        long o1 = seedConsumption(20L, 11L, 100L, 10, "10.0000");
+        long o2 = seedConsumption(21L, 11L, 100L, 10, "10.0000");
+
+        DataSource ds = context.getBean(DataSource.class);
+        AtomicReference<Throwable> bError = new AtomicReference<>();
+        AtomicReference<String> bOutcome = new AtomicReference<>("NOT_RUN");
+        AtomicReference<Long> bStaleSum = new AtomicReference<>();
+        AtomicReference<Long> bFreshSum = new AtomicReference<>();
+        CountDownLatch bAboutToLockParent = new CountDownLatch(1);
+        CountDownLatch aCommitted = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Future<?> bFuture = null;
+
+        try (Connection xa = ds.getConnection(); Connection xb = ds.getConnection())
+        {
+            xa.setAutoCommit(false);
+            xb.setAutoCommit(false);
+            try
+            {
+                bFuture = pool.submit(() -> {
+                    try
+                    {
+                        // B 的第一次普通读：A 提交前建立 RR 旧快照（快照里没有 A 的红冲行）。
+                        assertEquals(5, queryInt(xb, "select qty from sal_return where id=" + returnId));
+                        // B 锁自己的原行 o2（与 o1 不同，不冲突）。
+                        assertNotNull(lockOne(xb, "select id from inv_batch_consumption where id=" + o2 + " for update"));
+                        bAboutToLockParent.countDown();
+                        // B 尝试锁同一父退货行 —— A 持有，B 在此阻塞。
+                        assertNotNull(lockOne(xb, "select qty from sal_return where id=" + returnId + " for update"));
+                        aCommitted.await(20, TimeUnit.SECONDS);
+
+                        // 对照 1：快照读（普通 SELECT）—— B 旧快照看不到 A 已提交的红冲行。
+                        long stale = sumPlain(xb, "select coalesce(sum(qty),0) from inv_batch_consumption "
+                                + "where sal_return_id=" + returnId + " and sign=-1");
+                        bStaleSum.set(stale);
+                        // 对照 2：当前读（FOR UPDATE + Java long 累加），与 service sumReversedOnReturn 同构。
+                        long fresh = sumLocked(xb, "select id,qty from inv_batch_consumption "
+                                + "where sal_return_id=" + returnId + " and sign=-1 order by id for update");
+                        bFreshSum.set(fresh);
+                        if (fresh + 3 > 5)
+                        {
+                            xb.rollback(); // 超额：模拟 service 隔离，事务整体回滚。
+                            bOutcome.set("ROLLED_BACK_EXCEEDS_RETURN");
+                        }
+                        else
+                        {
+                            insertRed(xb, 21L, "REV:EVT-LW-B", "EVT-LW-B", returnId, o2, 3);
+                            xb.commit();
+                            bOutcome.set("POSTED_OVERDRAW"); // 走到这里说明当前读失效，测试将失败。
+                        }
+                    }
+                    catch (Throwable t)
+                    {
+                        bError.set(t);
+                        try { xb.rollback(); } catch (Exception ignore) { }
+                    }
+                });
+
+                // ---- A 事务（主线程）----
+                assertEquals(5, queryInt(xa, "select qty from sal_return where id=" + returnId)); // A 建立旧快照
+                assertNotNull(lockOne(xa, "select id from inv_batch_consumption where id=" + o1 + " for update"));
+                assertNotNull(lockOne(xa, "select qty from sal_return where id=" + returnId + " for update"));
+
+                assertTrue(bAboutToLockParent.await(20, TimeUnit.SECONDS), "B 应到达即将锁父退货行处");
+                // 观察锁等待：轮询 innodb_trx，直到出现 LOCK WAIT 状态事务。
+                boolean observed = false;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (System.nanoTime() < deadline)
+                {
+                    Integer waits = jdbc.queryForObject(
+                            "select count(*) from information_schema.innodb_trx where trx_state='LOCK WAIT'",
+                            Integer.class);
+                    if (waits != null && waits > 0) { observed = true; break; }
+                    Thread.sleep(50);
+                }
+                assertTrue(observed, "必须从 information_schema.innodb_trx 观察到真实 LOCK WAIT（B 等待 A 持有的父退货行锁）");
+                assertEquals("NOT_RUN", bOutcome.get(), "A 提交前 B 不应拿到父退货行锁");
+
+                // A 当前读守恒：原行 A 已冲回 0、父退货已冲回 0，3<=10 且 3<=5 → 放行。
+                assertEquals(0L, sumLocked(xa, "select id,qty from inv_batch_consumption "
+                        + "where reversal_of_id=" + o1 + " and sign=-1 order by id for update"));
+                assertEquals(0L, sumLocked(xa, "select id,qty from inv_batch_consumption "
+                        + "where sal_return_id=" + returnId + " and sign=-1 order by id for update"));
+                insertRed(xa, 20L, "REV:EVT-LW-A", "EVT-LW-A", returnId, o1, 3);
+                xa.commit();
+                aCommitted.countDown();
+
+                bFuture.get(20, TimeUnit.SECONDS);
+                assertNull(bError.get(), "B 线程不应异常：" + bError.get());
+                assertEquals("ROLLED_BACK_EXCEEDS_RETURN", bOutcome.get());
+                assertEquals(0L, bStaleSum.get(), "B 的 RR 旧快照应看不到 A 已提交的红冲行（证明旧快照确实建立）");
+                assertEquals(3L, bFreshSum.get(), "B 的当前读 FOR UPDATE 应看到 A 已提交的 3 件（证明当前读生效）");
+                assertTrue(bStaleSum.get() < bFreshSum.get(), "快照读与当前读必须不同，否则无法证明旧快照场景成立");
+
+                Integer reversed = jdbc.queryForObject(
+                        "select coalesce(sum(qty),0) from inv_batch_consumption where sal_return_id=? and sign=-1",
+                        Integer.class, returnId);
+                assertEquals(3, reversed, "最终退货累计红冲只能是 A 的 3，不得超过 5");
+                assertEquals(3, count("inv_batch_consumption"), "2 原行 + 1 红冲；B 整体回滚无部分写入");
+            }
+            finally
+            {
+                aCommitted.countDown(); // 主线程断言失败时也不让 B 永久阻塞。
+                pool.shutdownNow();
+                if (bFuture != null)
+                    try { bFuture.get(5, TimeUnit.SECONDS); } catch (Exception ignore) { }
+            }
+        }
+    }
+
+    private static Integer queryInt(Connection c, String sql) throws Exception
+    {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql))
+        {
+            return rs.next() ? ((Number) rs.getObject(1)).intValue() : null;
+        }
+    }
+
+    private static Object lockOne(Connection c, String sql) throws Exception
+    {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql))
+        {
+            return rs.next() ? rs.getObject(1) : null;
+        }
+    }
+
+    private static long sumPlain(Connection c, String sql) throws Exception
+    {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql))
+        {
+            rs.next();
+            return ((Number) rs.getObject(1)).longValue();
+        }
+    }
+
+    private static long sumLocked(Connection c, String sql) throws Exception
+    {
+        long total = 0L;
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql))
+        {
+            while (rs.next()) total += ((Number) rs.getObject("qty")).longValue();
+        }
+        return total;
+    }
+
+    private static void insertRed(Connection c, long batchId, String bizKey, String srcEvent,
+                                  long returnId, long origId, int qty) throws Exception
+    {
+        try (PreparedStatement ps = c.prepareStatement(
+                "insert into inv_batch_consumption(consumption_no,biz_event_key,source_event_id,batch_id,"
+                        + "sal_order_item_id,sku_id,qty,unit_cost,amount,consumed_at,move_type,sign,"
+                        + "reversal_of_id,sal_return_id,period,cross_period,raw_payload,created_at) "
+                        + "values (?,?,?,?,?,?,?,?,?,current_timestamp(3),'RETURN_REVERSAL',-1,?,?,'2026-11',0,?,current_timestamp(3))"))
+        {
+            ps.setString(1, "CN:" + UUID.randomUUID());
+            ps.setString(2, bizKey);
+            ps.setString(3, srcEvent);
+            ps.setLong(4, batchId);
+            ps.setLong(5, 100L);
+            ps.setLong(6, 11L);
+            ps.setInt(7, qty);
+            ps.setBigDecimal(8, new BigDecimal("10.0000"));
+            ps.setBigDecimal(9, new BigDecimal("10.0000").multiply(BigDecimal.valueOf(qty)));
+            ps.setLong(10, origId);
+            ps.setLong(11, returnId);
+            ps.setString(12, "{}");
+            assertEquals(1, ps.executeUpdate());
         }
     }
 

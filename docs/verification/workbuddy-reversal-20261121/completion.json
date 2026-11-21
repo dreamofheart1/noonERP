@@ -1,7 +1,7 @@
 {
   "marker": "NOON-20261121-REVERSAL",
-  "status": "completed_second_review_revised",
-  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒 + 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。针对 Codex 二次复核 3 点意见整改：(1) 幂等/冲突判定前置到累计守恒之前，原消耗/退货已用满时合法重传正确 ACK 而非误判超限；(2) 累计 SUM 改用 SELECT id,qty ... FOR UPDATE 当前读（按 id 升序固定锁序 + Java 端 long 累加），避免 MySQL RR 旧快照下不同原行同父退货超额；(3) lockOriginal 显式读取并校验 sign=+1（DDL 允许 SALE+sign=-1），算术用 long 防溢出。全程使用系统内部构造的测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。明确 RETURN_REVERSAL 为系统侧内部事件契约而非 Noon 平台原生类型（真实类型为 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
+  "status": "completed_third_review_revised",
+  "summary": "库存/累计退货红冲守恒安全工作包（独立新工作包，用户 2026-11-21 明确授权启动）。实现内部 Spring service 闸门 ReversalService：站点授权 + 可信父退货 + 可信原消耗行 + 系统侧事件证据绑定 + 累计红冲守恒 + 幂等键 REV:sourceEventId 去重 + 同键冲突隔离 + 并发唯一键兜底 + 事务回滚 + 不可变审计。二次复核整改：(1) 幂等/冲突前置；(2) SUM 改 FOR UPDATE 当前读 + long 累加；(3) lockOriginal 显式校验 sign=+1。三次复核整改（本版）：针对 Codex 指出此前并发测试为普通并发+容忍锁异常、无法证明 RR 旧快照与父退货行锁等待真实出现，补可控同步双连接测试（latch 编排 + innodb_trx LOCK WAIT 观察 + 快照读 0 / 当前读 3 对照硬证据 + 失败回滚），补调用方重试契约测试（锁异常后相同入参重试命中 ALREADY_POSTED 同一行 ID），并把'无循环等待'断言收敛为'限于已测场景、不无条件断言'。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。RETURN_REVERSAL 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
   "files": [
     "yx-erp/sql/noon_reversal_review.sql",
     "yx-erp/yxerp-framework/src/main/java/com/yx/framework/reversal/ReversalService.java",
@@ -24,7 +24,13 @@
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-reversal-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=10 errors=0 failures=0 skipped=0（上轮 5，新增已用满重传 ACK×3、RR 旧快照不同原行并发不超额、负 sign 隔离）",
+      "result": "maven_exit=0；MySQL JUnit tests=12 errors=0 failures=0 skipped=0（二次复核 10 → 三次复核 12，新增可控同步双连接测试 + 调用方重试幂等）",
+      "evidence": "docs/verification/workbuddy-reversal-20261121/mysql-it.log"
+    },
+    {
+      "name": "三次复核·可控同步快照/锁等待硬证据",
+      "command": "MySqlReversalIT.controlledOldSnapshotAndLockWaitCurrentReadPreventOverdrawOnRealMySql",
+      "result": "PASS：innodb_trx 观察到 trx_state=LOCK WAIT（A 提交前 B outcome=NOT_RUN）；B 事务内快照读 sum=0、当前读 FOR UPDATE sum=3（二者不同→旧快照与当前读均实证）；B 依当前读判 3+3>5 整体回滚，最终退货累计红冲=3<=5、无部分写入",
       "evidence": "docs/verification/workbuddy-reversal-20261121/mysql-it.log"
     },
     {
@@ -46,7 +52,7 @@
       "可信父退货存在性：站点/SKU/订单行/数量只取 sal_return 数据库真实值，跨站隔离",
       "可信原消耗行：FOR UPDATE 当前读取实际 sign，显式校验 sign=+1 且 move_type=SALE（DDL 允许 SALE+sign=-1，不能只看类型），SKU/订单行必须与父退货一致",
       "系统侧事件证据绑定：event_id/站点非空且相等/状态非失败/event_type=RETURN_REVERSAL/payload 与请求一致/sal_return_id·reversal_of_id·qty·sku_id 逐项一致",
-      "累计守恒：SELECT id,qty ... FOR UPDATE 当前读锁原消耗行/父退货红冲行（id 升序固定锁序），Java 端 long 累加防溢出；已冲回+本次同时不超过原消耗 qty 与父退货 qty。当前读避免 RR 旧快照下不同原行同父退货超额",
+      "累计守恒：SELECT id,qty ... FOR UPDATE 当前读锁原消耗行/父退货红冲行（id 升序锁序，限于已测场景、不无条件断言所有交织无死锁），Java 端 long 累加防溢出；已冲回+本次同时不超过原消耗 qty 与父退货 qty。当前读避免 RR 旧快照下不同原行同父退货超额（可控同步双连接测试实证快照读=0/当前读=3）",
       "幂等/冲突【前置】：先于累计守恒判定，biz_event_key=REV:sourceEventId + (biz_event_key,batch_id) 唯一键，核心字段相同 ACK 同一行 ID，不同 SOURCE_CONFLICT；原消耗/退货已用满的合法重传正确 ACK 而非误判超限",
       "并发：同源并发唯一键兜底只入账一次，两独立事件并发不得超额（后到者隔离或锁异常整体回滚，无部分写入）",
       "红冲写入：sign=-1、金额=数量×单位成本（正值）、关联原行与父退货、确定性业务键",
@@ -60,7 +66,9 @@
       "真实平台事件类型→内部类型适配层：真实事件为 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，RETURN_REVERSAL 为系统侧内部契约；RETURNS::REFERENCE_UPDATE 语义为退货参考更新，不必然等于退货创建入账，禁止直接映射",
       "真实退货包裹条码/编号作用域与 webhook 报文样本（ListReturnReferences 需真实条码，不臆造；订单导出需创建任务，超只读范围）",
       "AI 隔离审批、业务快照同事务、数据库最小权限、受控归档与生产迁移",
-      "未连接生产、未部署"
+      "未连接生产、未部署",
+      "【三次复核新发现·未处理，超出不改主 schema v0.5 边界】真实 schema inv_batch_consumption 仅有 idx_reversal(reversal_of_id)、无 sal_return_id 索引：sumReversedOnReturn 的 WHERE sal_return_id=? AND sign=-1 FOR UPDATE 在无索引时全表扫描加锁，跨原行并发下可致死锁（本次可控同步测试在测试表未建 idx_sal_return 时实证 MySQLTransactionRollbackException: Deadlock found）。测试表已补 key idx_sal_return 隔离验证守恒不变量；建议后续 schema 变更评估为 sal_return_id 建索引，本包不擅自改主 schema",
+      "调用方重试封装仅在测试范式 callerPostWithRetry 中演示（捕获锁异常+相同入参重试），未做成 service API 或 HTTP 层；service 仍不吞锁异常"
     ]
   },
   "second_review_20261121": {
@@ -82,10 +90,31 @@
     ],
     "note": "三点均已复现并整改；真 MySQL 初始用例曾因测试脚本手动事务与 service 并发交织出现死锁，改为纯 service 并发 + 容忍锁异常后通过。锁顺序固定（原消耗行→父退货行→红冲汇总行 id 升序），锁异常由事务整体回滚，调用方重试，service 不吞异常、不在半途放行。平台事件身份/FIFO/批次剩余量仍未实现，未接生产。"
   },
+  "third_review_20261121": {
+    "baseline": "34cbe64",
+    "reviewer": "Codex",
+    "findings": [
+      {
+        "issue": "此前并发测试 concurrentDifferentOriginalsCannotOverdrawReturnOnRealMySql 为普通并发 + settle() 容忍锁异常，不能证明 MySQL RR 旧快照与父退货行锁等待真实出现，也不能证明不存在所有死锁",
+        "fix": "新增 controlledOldSnapshotAndLockWaitCurrentReadPreventOverdrawOnRealMySql：两个独立 Connection + latch 编排重放 service 锁序/当前读；A/B 在 A 提交前先普通读建旧快照；A 锁 o1+父退货行，B 锁 o2 后阻塞于同父退货行；主线程从 information_schema.innodb_trx 观察 trx_state=LOCK WAIT 且 A 提交前 B outcome=NOT_RUN（锁等待硬证据）；A 当前读守恒提交红冲 3；B 拿到锁后快照读 sum=0、当前读 FOR UPDATE sum=3（二者不同→旧快照与当前读均实证）；B 判 3+3>5 整体回滚，最终累计=3<=5、无部分写入。原纯 service 并发测试保留，二者互补"
+      },
+      {
+        "issue": "如死锁/超时，需明确调用方重试实现和测试",
+        "fix": "service 不吞锁异常（设计不变）；新增调用方范式 callerPostWithRetry：捕获 PessimisticLockingFailureException/QueryTimeoutException 后以相同入参重试，用尽 attempts 向上抛。真 MySQL 测试 callerRetryWithSameEventIsIdempotentOnRealMySql：首次 POSTED，随后 3 次重试均 ALREADY_POSTED 且同一行 ID、inv_batch_consumption 仍 2 行、隔离表 0 行"
+      },
+      {
+        "issue": "锁序'无循环等待'应限于证据支持范围，不能无条件断言",
+        "fix": "ReversalService 类注释、completion.json done 段均改为'限于已测场景、不无条件断言所有交织无死锁'。实证：可控同步测试首次在测试表缺 sal_return_id 索引时确实触发真实死锁，证明该断言依赖索引/扫描路径"
+      }
+    ],
+    "new_risk_found": "真实 schema v0.5 inv_batch_consumption 无 sal_return_id 索引，sumReversedOnReturn 当前读在无索引时全表扫描加锁，跨原行并发可致死锁。超出不改主 schema 边界，仅作为建议回执 Codex，未擅自改 schema。",
+    "verification": "H2 指定套件 99/99（ReversalServiceTest 25/25 不变）；隔离 MySQL 12/12（上轮 10，新增 2 项）；全量 mvn test EXIT=0（99 tests）。证据日志与 XML 已刷新。",
+    "note": "本轮不改 service 业务逻辑，仅补测试 + 收敛措辞 + 测试表加索引；未连生产、未部署。GitHub 远程状态由 Codex 报告本机 main 领先 34 提交、未推送；本包仍未推送，推送前内容核对与真实库并发证明已完成，是否推送待用户决定。"
+  },
   "platform_recon_reference": "真实事件类型来自 Codex 2026-11-21 只读联调，固化于 ../workbuddy-return-20261121/completion.json 的 platform_recon_20261121；本包未读取凭据、未调用 Noon",
   "preserved_changes": [
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T17:26:00+08:00"
+  "generated_at": "2026-11-21T17:43:00+08:00"
 }

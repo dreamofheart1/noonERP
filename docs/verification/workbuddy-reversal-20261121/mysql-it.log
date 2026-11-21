@@ -1,16 +1,16 @@
 NOON-20261121-REVERSAL 隔离 MySQL 集成验证（opt-in）
-执行时间：2026-11-21 17:31 +08:00（二次复核修订版）
+执行时间：2026-11-21 17:43 +08:00（三次复核修订版）
 命令：python3 scripts/verify-reversal-runtime.py \
         --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
         --maven /tmp/apache-maven-3.9.11/bin/mvn \
         --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
 
-隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-6ywpbb3a
-MySQL JUnit: tests=10 errors=0 failures=0 skipped=0
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-6knq95lk
+MySQL JUnit: tests=12 errors=0 failures=0 skipped=0
 maven_exit=0
-证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-6ywpbb3a
+证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-6knq95lk
 
-10 项真库覆盖（上轮 5，新增 5）：
+12 项真库覆盖（二次复核 10 → 三次复核 12，新增 2）：
   1) 原始 noon_reversal_review.sql 的 CHECK 在真实 MySQL 生效：非法 entity_type 被拒；
      RESOLVED 但缺 resolved_by/resolved_at 被 chk_reversal_resolution 拒绝。
   2) 可信父退货 + 系统事件佐证的红冲过账：sign=-1、金额=数量×成本、无隔离。
@@ -24,6 +24,26 @@ maven_exit=0
   9) 【意见2】父退货 qty=5、两个不同原行各红冲 3（合计 6>5）真实 MySQL 并发：
      最多一笔入账，退货累计红冲<=5，无部分写入（当前读守恒生效；容忍锁异常=整体回滚）。
   10)【意见3】SALE+sign=-1 原行真实 MySQL 被 ORIGINAL_NOT_SALE 隔离，不写正式表。
-踩坑：意见2 初始测试用两手动事务连接建旧快照，与 service 并发事务交织触发死锁；
-     改为纯 service 并发 + settle() 容忍锁异常（视为事务整体回滚）后通过，核心不变量"不超额"不变。
+  11)【三次复核·调用方重试】callerPostWithRetry 捕获锁异常后以相同入参重试：首次过账 POSTED，
+     随后 3 次重试均 ALREADY_POSTED 且返回同一行 ID，inv_batch_consumption 仍 2 行、隔离表 0 行。
+  12)【三次复核·可控同步】controlledOldSnapshotAndLockWaitCurrentReadPreventOverdrawOnRealMySql：
+     两个独立 Connection + latch 精确编排，A/B 均在 A 提交前先普通读建立 RR 旧快照；
+     A 锁 o1+父退货行，B 锁不同原行 o2 后阻塞在同一父退货行锁；
+     主线程从 information_schema.innodb_trx 观察到 trx_state='LOCK WAIT'（锁等待真实出现，
+     且 A 提交前 B 的 outcome 仍为 NOT_RUN）；A 当前读守恒放行并提交红冲 3；
+     B 拿到锁后：快照读 coalesce(sum(qty))=0（证明旧快照确实建立）、
+     当前读 SELECT id,qty ... FOR UPDATE long 累加=3（证明当前读生效），二者不同；
+     B 依当前读判 3+3>5 整体回滚，最终退货累计红冲=3<=5、仅 2 原行+1 红冲、无部分写入。
+
+踩坑与真实发现（三次复核新增，须回执 Codex）：
+  可控同步测试首次运行时，测试表 inv_batch_consumption 未建 sal_return_id 索引，
+  A 的 SUM WHERE sal_return_id=? AND sign=-1 FOR UPDATE 走全表扫描加锁，锁住 B 持有的 o2 原行，
+  与 B 等待父退货行锁形成真实死锁（MySQLTransactionRollbackException: Deadlock found）。
+  这实证了 Codex 的提醒——"锁序无循环等待"不能无条件断言，取决于索引/扫描路径。
+  本次仅在【测试表】补 key idx_sal_return(sal_return_id) 使当前读走索引、隔离验证守恒不变量；
+  真实 schema v0.5 的 inv_batch_consumption 只有 idx_reversal(reversal_of_id)、无 sal_return_id 索引，
+  同样存在跨原行并发死锁风险——超出本工作包"不改主 schema v0.5"边界，作为建议回执，不擅自改。
+  另有纯 service 并发测试 concurrentDifferentOriginalsCannotOverdrawReturnOnRealMySql
+  用 settle() 容忍锁异常（视为事务整体回滚），核心不变量"不超额"不变；
+  两项互补：可控同步测试给出快照/锁等待/当前读的硬证据，纯 service 测试覆盖 service 真实调用路径。
 说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。

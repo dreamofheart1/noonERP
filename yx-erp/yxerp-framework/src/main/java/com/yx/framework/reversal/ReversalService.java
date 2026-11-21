@@ -48,9 +48,14 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * <p><b>累计守恒契约</b>：schema v0.5 明确 DDL 只负责单次幂等（uk_consume_biz_event），
  * 累计守恒须应用层事务。以 {@code SELECT ... FOR UPDATE} 锁住原消耗行与父退货行使同组串行；
  * 两次 SUM 一律用 {@code FOR UPDATE} <b>当前读</b>（Codex 二次复核意见 2），避免 MySQL
- * REPEATABLE READ 下上游普通读先建快照导致 SUM 看不到已提交红冲行而超额。锁顺序固定为
- * 原消耗行 → 父退货行 → 汇总行（按 id 升序），全程当前读、无循环等待；撞锁异常由事务
- * 整体回滚，调用方重试（本 service 不吞锁异常、不在半途放行）。确认"已冲回 + 本次 qty"
+ * REPEATABLE READ 下上游普通读先建快照导致 SUM 看不到已提交红冲行而超额。受控测试采用的锁序为
+ * 原消耗行 → 父退货行 → 汇总行（按 id 升序），在<b>受控双连接 + 可观察锁等待</b>场景下未观察到
+ * 死锁；此结论<b>限于已测场景</b>，不无条件断言所有并发交织下均无循环等待（Codex 三次复核意见）。
+ * 撞锁等待超时/死锁异常时事务整体回滚、无部分写入；<b>调用方重试契约</b>：捕获
+ * {@code CannotAcquireLockException}/{@code PessimisticLockingFailureException} 等锁异常后，以
+ * <b>相同 sourceEventId 与相同入参</b>重试，前置幂等判定（biz_event_key=REV:sourceEventId +
+ * (biz_event_key,batch_id) 唯一键）保证重试要么命中 ALREADY_POSTED 返回同一行 ID、要么正确
+ * 过账，绝不重复入账。本 service 不吞锁异常、不在半途放行。确认"已冲回 + 本次 qty"
  * 同时不超过原消耗 qty 与父退货 qty（long 防溢出）才过账；任一超限进待核对，不写正式表。
  * DB 唯一键 + DuplicateKeyException 兜底并发重传。
  *
