@@ -103,7 +103,7 @@ def main():
         if args.maven_repo:
             command += ["-Dmaven.repo.local=" + str(args.maven_repo)]
         command += ["-Dtest=MySqlReversalIT", "-Dsurefire.failIfNoSpecifiedTests=false", "test"]
-        report = ROOT / "yx-erp/yxerp-noon/target/surefire-reports/TEST-com.yx.framework.reversal.MySqlReversalIT.xml"
+        report = ROOT / "yx-erp/yxerp-noon/target/surefire-reports/TEST-com.yx.noon.reversal.MySqlReversalIT.xml"
         report.unlink(missing_ok=True)
         with (work / "mysql-maven.log").open("w") as log:
             result = subprocess.run(command, cwd=ROOT / "yx-erp", env=runtime_env,

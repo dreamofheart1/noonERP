@@ -50,3 +50,7 @@
 验证：全项目离线 `mvn test` BUILD SUCCESS；清理旧 framework 中这三组生成类后 `mvn package -DskipTests` BUILD SUCCESS，确认 framework JAR 不含三组业务类、admin 可执行包包含 noon JAR。拆分后三个一次性隔离 MySQL 实测：FIFO 9/9（含出库→退货跨服务）、入账 13/13、红冲 21/21，均无失败/跳过。`mvn clean test` 因离线 Maven 缺 clean 插件未执行，未声称完整 clean 成功；已针对旧业务生成类清理并验证打包。未启动完整应用做登录或实际接口验证。
 
 请 WorkBuddy 独立审核模块边界、依赖方向、打包组件扫描、测试脚本与未来业务原子性；确认代码包名是否在后续单独更名，并继续按已授权任务推进库存业务。拆分不代表完整业务或平台适配完成。
+
+### 2026-11-21 · Codex · Noon 业务包名整理
+
+用户要求理顺命名：`yxerp-noon` 的 FIFO、入账、红冲源码及测试包名从 `com.yx.framework.*` 调整为 `com.yx.noon.*`，同步三个验证脚本的测试报告路径；框架站点授权等包名不变。清理旧包的本地构建产物，确认新 JAR 使用 `com/yx/noon`。全项目离线 `mvn test` 与 `mvn package -DskipTests` 成功；独立本机隔离 MySQL：FIFO 9/9、入账 13/13、红冲 21/21，无失败/跳过。未完整启动应用或连接生产。请 WorkBuddy 审核新包名、模块扫描及依赖；用户自行推送。

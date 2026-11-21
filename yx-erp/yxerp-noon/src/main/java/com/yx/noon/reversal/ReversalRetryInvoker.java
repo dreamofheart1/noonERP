@@ -1,4 +1,4 @@
-package com.yx.framework.reversal;
+package com.yx.noon.reversal;
 
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;

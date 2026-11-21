@@ -1,4 +1,4 @@
-package com.yx.framework.fifo;
+package com.yx.noon.fifo;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -31,11 +31,11 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 
 import com.yx.common.core.domain.entity.SysUser;
 import com.yx.common.core.domain.model.LoginUser;
-import com.yx.framework.fifo.FifoConsumptionService.DeliveryInput;
-import com.yx.framework.fifo.FifoConsumptionService.DeliveryLine;
-import com.yx.framework.fifo.FifoConsumptionService.Result;
-import com.yx.framework.reversal.ReversalService;
-import com.yx.framework.reversal.ReversalService.ReversalInput;
+import com.yx.noon.fifo.FifoConsumptionService.DeliveryInput;
+import com.yx.noon.fifo.FifoConsumptionService.DeliveryLine;
+import com.yx.noon.fifo.FifoConsumptionService.Result;
+import com.yx.noon.reversal.ReversalService;
+import com.yx.noon.reversal.ReversalService.ReversalInput;
 import com.yx.framework.security.site.SiteAuthGuard;
 import com.yx.system.mapper.SysUserSiteMapper;
 

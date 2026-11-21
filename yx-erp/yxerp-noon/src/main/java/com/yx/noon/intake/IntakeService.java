@@ -1,4 +1,4 @@
-package com.yx.framework.intake;
+package com.yx.noon.intake;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;

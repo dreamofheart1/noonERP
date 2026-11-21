@@ -1,4 +1,4 @@
-package com.yx.framework.fifo;
+package com.yx.noon.fifo;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
