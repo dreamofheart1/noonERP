@@ -1329,3 +1329,22 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 - 这是**独立新工作包**（此前已列入 `completion.json.not_done`），按项目约定「协作记录中的待办不自动授权超出用户当前要求的操作」，需用户一句确认后开工。
 
 **请用户确认**：是否启动上述库存/累计退货可验证工作包（推荐按上述边界执行），或仅固化联调发现后暂缓。
+
+## WorkBuddy 交付：NOON-20261121-REVERSAL 库存/累计退货红冲守恒安全工作包（2026-11-21，执行者：WorkBuddy）
+
+用户已明确确认启动（选择「启动（推荐）」）。按上一条评估边界实现，标记 `NOON-20261121-REVERSAL`。全程系统内部构造的测试夹具，未读凭据、未调用 Noon、未连生产、未部署、未改主 schema v0.5、未覆盖他人未提交内容。
+
+**交付内容**：
+- `yx-erp/sql/noon_reversal_review.sql`：独立隔离层 `noon_reversal_review`（entity_type 固定 REVERSAL、resolution CHECK、原因码全集）+ append-only `noon_reversal_audit`。不改入账隔离层 noon_intake_review.sql。
+- `yx-erp/yxerp-framework/src/main/java/com/yx/framework/reversal/ReversalService.java`：内部 service 闸门。步骤：站点授权 → 校验入参 → **FOR UPDATE 锁原消耗行** → 父退货/原消耗行/一致性校验 → 系统侧事件证据绑定 → **累计守恒**（SUM 已冲回，已冲回+本次同时≤原消耗 qty 且≤父退货 qty，超限隔离）→ 幂等键 `REV:sourceEventId` + `(biz_event_key,batch_id)` 唯一键去重（核心字段相同 ACK、不同 SOURCE_CONFLICT）→ 写入（sign=-1、金额=数量×成本）→ 事务性审计。并发由 FOR UPDATE + DB 唯一键兜底。
+- 事件类型 `RETURN_REVERSAL` 明确为**系统侧内部契约**，非平台原生类型；真实事件适配层未实现（平台事实边界见 completion.json.platform_recon_20261121）。
+
+**验证证据**（详见 `docs/verification/workbuddy-reversal-20261121/`）：
+- H2 默认单测 **94/94 PASS**，本包 `ReversalServiceTest` **20/20**：正向过账、站点拒绝、父/原行缺失、跨站/错配隔离、来源四类反例、单次与累计守恒双重超限、幂等/冲突、同源并发同 ID、并发不超额、审计回滚、入参/SQL 契约。
+- 隔离 MySQL 8.4 集成 **5/5 PASS**，`maven_exit=0`：原始 SQL CHECK/resolution CHECK 在真库生效、真事务下过账与累计守恒、父缺失/无佐证隔离；脚本自建临时库仅连 127.0.0.1。
+- 全量 `mvn test` **EXIT=0**（94 tests / 0 failures / 0 errors），无回归。
+- `completion.json`（marker=NOON-20261121-REVERSAL，status=completed）列明 done/not_done；not_done 如实保留：HTTP/UI、真实 FIFO 批次选择与批次剩余量守恒、跨期快照重算、真实事件类型适配层、退货包裹条码/编号作用域/样本、AI 审批、生产迁移。
+
+**踩坑与处置**：H2 2.4 对跨内存库 CHECK 常量比较存在全局缓存缺陷，H2 内联建表曾触发假性 CHECK 违反；按 intake 工作包既定做法，H2 表只保留唯一键，单行 CHECK/resolution CHECK 真实性改由 MySqlReversalIT 用原始 DDL 在真 MySQL 验证。
+
+**请 Codex 再审**：`ReversalService` 的累计守恒闸门（FOR UPDATE 锁原行 + SUM）、幂等/冲突语义、隔离层原因码契约、20 项 H2 + 5 项真 MySQL 证据，以及 not_done 中真实事件适配层/批次剩余量守恒等未覆盖边界。本包仍为内部 service 闸门，未开 HTTP/UI、未接生产。

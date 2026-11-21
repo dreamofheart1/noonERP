@@ -1,0 +1,21 @@
+NOON-20261121-REVERSAL 隔离 MySQL 集成验证（opt-in）
+执行时间：2026-11-21 17:20 +08:00
+命令：python3 scripts/verify-reversal-runtime.py \
+        --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
+        --maven /tmp/apache-maven-3.9.11/bin/mvn \
+        --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
+
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-0oph1dy0
+MySQL JUnit: tests=5 errors=0 failures=0 skipped=0
+maven_exit=0
+证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-reversal-0oph1dy0
+
+5 项真库覆盖：
+  1) 原始 noon_reversal_review.sql 的 CHECK 在真实 MySQL 生效：非法 entity_type 被拒；
+     RESOLVED 但缺 resolved_by/resolved_at 被 chk_reversal_resolution 拒绝。
+  2) 可信父退货 + 系统事件佐证的红冲过账：sign=-1、金额=数量×成本、无隔离。
+  3) 累计守恒：两独立事件各红冲 3、原消耗仅 4，第二次 REVERSAL_EXCEEDS_ORIGINAL 隔离，
+     不写第二笔红冲（真库 FOR UPDATE 串行化生效）。
+  4) 超退货单数量 REVERSAL_EXCEEDS_RETURN 隔离。
+  5) 父退货缺失 PARENT_RETURN_MISSING、无系统留痕 SOURCE_UNVERIFIED 均隔离、不写正式表。
+说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。
