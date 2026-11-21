@@ -1,7 +1,7 @@
 {
   "marker": "NOON-20261121-RETURN",
-  "status": "completed_second_review_revised",
-  "summary": "订单/退货正式入账安全工作包（二次复核修订版）。按 Codex 2026-11-21 二次静态复核四点逐条整改：①回读改用完整业务键（订单 site+order_no，退货 site+order_no+source_return_no）并直接返回同一行 ID，移除按单字段取第一条的 idOf；补 H2 与真 MySQL 跨站同号、AE先插/SA先插两种顺序的反例。②来源可信升级为证据绑定：int_webhook_event 同 event_id、站点一致、状态非失败、event_type 匹配、payload_raw 与请求报文一致且业务字段逐项相符，否则 SOURCE_UNIDENTIFIABLE/SOURCE_UNVERIFIED；补借用同站事件、错事件类型、伪造门店金额、空报文反例；明确本包只覆盖有 webhook 留痕的记录，不假定所有订单都有事件。③订单 ACK 比较服务端业务指纹（站点+订单号+门店+商品+金额+数量+币种+报文摘要），不再只比 raw_payload；同号不同可信内容 SOURCE_CONFLICT 不覆盖；并发唯一键竞争后 FOR UPDATE 当前读回读 ACK，首次存在性检查改普通读以避免 MySQL gap lock 死锁；JSON 报文按键规范化消除 MySQL JSON 列字段重排差异。④金额允许合法 0（须由可信 payload 佐证），只拒缺失/负数/与证据不符。仍为内部 service 闸门，无 HTTP/UI、非闭环、未连生产、未部署、未改主 schema v0.5、未覆盖他人改动。",
+  "status": "completed_third_review_revised",
+  "summary": "订单/退货正式入账安全工作包（三次复核修订版）。基线 844792c。按 Codex 2026-11-21 第三次独立复核四点整改：①loadEvidence 要求事件 site_code 非空且等于请求站点，空站点证据不再放行；②partner_sku 绑定进可信 payload 逐项校验并纳入服务端业务指纹，补同报文换 partnerSku 被拒与重传误 ACK 反例；③新增本地主数据映射闸门（md_store 经 md_site 归属站点、md_sku 存在、md_partner_sku 的 partnerSku↔sku↔站点映射 ACTIVE），无映射隔离 MASTER_DATA_UNVERIFIED，不把平台数字当系统内部 ID；④订单业务指纹去掉整份报文、只含核心业务字段，事件元数据变化仍 ACK；退货业务键去掉 eventId，按站点+订单号+退货号+父行锚定，不同事件佐证同一退货仍 ACK。明确 int_webhook_event 的 ORDER/RETURN 与 payload 字段是系统侧入口契约而非 Noon 平台事实，真实样本/事件类型语义/退货 event ID 作用域待只读联调核实。前两轮整改（完整键回读、证据绑定、零金额合法、并发锁读）全部保持。仍为内部 service 闸门，无 HTTP/UI、非闭环、未连生产、未部署、未改主 schema v0.5、未覆盖他人改动。",
   "files": [
     "yx-erp/sql/noon_intake_review.sql",
     "yx-erp/yxerp-framework/src/main/java/com/yx/framework/intake/IntakeService.java",
@@ -17,30 +17,30 @@
     {
       "name": "H2 默认单元测试",
       "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='IntakeServiceTest,BusinessTimestampTest,SiteAuthorizationTest,EffectiveConfigResolverTest,VersionedConfigReaderTest,ConfigIntervalPolicyTest' -Dsurefire.failIfNoSpecifiedTests=false test",
-      "result": "63/63 PASS（本工作包 IntakeServiceTest 34/34，首次复核 24→34）",
+      "result": "70/70 PASS（本工作包 IntakeServiceTest 41/41，二轮 34→三轮 41）",
       "evidence": "docs/verification/workbuddy-return-20261121/unit-tests.log"
     },
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-intake-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=9 errors=0 failures=0 skipped=0（首次复核 5→9）",
+      "result": "maven_exit=0；MySQL JUnit tests=11 errors=0 failures=0 skipped=0（二轮 9→三轮 11）",
       "evidence": "docs/verification/workbuddy-return-20261121/mysql-it.log"
     },
     {
       "name": "全量默认测试无回归",
       "command": "mvn test",
-      "result": "EXIT=0；63 tests / 0 failures / 0 errors",
+      "result": "EXIT=0；70 tests / 0 failures / 0 errors",
       "evidence": "docs/verification/workbuddy-return-20261121/unit-tests.log"
     },
     {
       "name": "原始 SQL 文件结构校验",
       "command": "IntakeServiceTest.reviewSqlFileContainsRequiredColumnsAndConstraints",
-      "result": "PASS：关键列/chk_intake_entity/chk_intake_resolution/noon_intake_audit 齐备；原因码 SOURCE_UNVERIFIED/MASTER_DATA_INCOMPLETE/SOURCE_CONFLICT 齐备；不臆造 biz_return_key",
+      "result": "PASS：关键列/chk_intake_entity/chk_intake_resolution/noon_intake_audit 齐备；原因码 SOURCE_UNVERIFIED/MASTER_DATA_INCOMPLETE/MASTER_DATA_UNVERIFIED/SOURCE_CONFLICT 齐备；不臆造 biz_return_key",
       "evidence": "docs/verification/workbuddy-return-20261121/IntakeServiceTest.xml"
     },
     {
-      "name": "二次复核四点行为断言",
-      "result": "完整键跨站同号 ACK 返回本站行 ID（两种插入顺序）/并发订单唯一键竞争只入账一次/事件类型与字段绑定/借用事件与伪造主数据隔离/空报文隔离/业务指纹冲突/合法零金额入账/真 MySQL JSON 字段顺序归一，全部 PASS",
+      "name": "三次复核四点行为断言",
+      "result": "空站点事件隔离/partnerSku 证据绑定与重传冲突/本地主数据映射缺失与错配隔离/事件元数据变化仍 ACK/不同事件同退货仍 ACK 且 ID 一致，H2 与真 MySQL 双验全部 PASS",
       "evidence": "docs/verification/workbuddy-return-20261121/IntakeServiceTest.xml 与 mysql-it.log"
     }
   ],
@@ -48,12 +48,13 @@
     "done": [
       "站点授权闸门（复用 SiteAuthGuard，声明站点与父记录真实站点双重校验）",
       "可信父记录存在性（退货必须引用真实订单行，父订单站点与 sku_id 取数据库真实值，sku_id 非 NULL）",
-      "来源证据绑定：系统事件 ID/站点/状态/event_type/报文内容/订单号/退货号/门店/商品/金额/数量逐项核验；无事件即待核对，不臆造身份",
-      "正式表零占位：门店/商品为正且有证据；金额可合法为 0 但必须被可信 payload 佐证；缺字段 MASTER_DATA_INCOMPLETE，与证据不符 SOURCE_UNVERIFIED",
-      "服务端现算业务指纹与内容摘要（SHA-256，JSON 按键规范化），不信自报值；ACK 比较完整业务内容而非仅报文",
+      "来源证据绑定：event_id/站点非空且相等/状态/event_type/payload/订单号/退货号/门店/商品/Partner SKU/金额/数量逐项核验；无事件即待核对",
+      "本地主数据映射：md_store 经 md_site 归属请求站点、md_sku 存在、md_partner_sku 映射 ACTIVE；无映射 MASTER_DATA_UNVERIFIED 隔离",
+      "正式表零占位：门店/商品为正且有证据；金额可合法为 0 但必须被可信 payload 佐证",
+      "服务端现算业务指纹（站点+订单号+门店+商品+Partner SKU+金额+数量+币种），不含整份报文，事件元数据变化不误判冲突",
       "完整业务键回读 + 唯一键冲突后 FOR UPDATE 当前读，ACK 直接返回同一行 ID，跨站同号不误返",
-      "同键不同可信内容进 SOURCE_CONFLICT 隔离，不误判为重传 ACK、不覆盖已入账记录",
-      "并发重复提交由 DB 唯一键 + DuplicateKeyException 兜底；首次存在性普通读避免 gap lock 死锁",
+      "退货业务键锚定站点+订单号+平台退货号+父订单行，不含 eventId，不同事件佐证同一退货按幂等 ACK",
+      "同键不同可信业务内容进 SOURCE_CONFLICT 隔离，不覆盖已入账记录；并发由 DB 唯一键兜底",
       "来源不可识别/不可核验进 NEEDS_REVIEW 待核对层，不生成平台事件号/退货号/业务幂等键",
       "同事务正式入账/隔离写入 + 不可变审计（noon_intake_audit append-only）",
       "人工解析仅超管、须显式提供已核实业务键，无自动过账"
@@ -63,22 +64,23 @@
       "FIFO/退货累计红冲守恒与并发行锁（属独立工作包，schema 已备幂等键与触发器）",
       "业务与可信参数快照同事务落库/重算",
       "AI 隔离审批服务、规则真实命中与全局开关",
-      "数据库最小权限、受控归档、真实平台事件身份样本与生产迁移",
+      "数据库最小权限、受控归档与生产迁移",
+      "平台事实待核实：真实 Noon webhook 报文样本、ORDER/RETURN 事件类型语义、payload 是否含系统内部 ID、退货 event ID 作用域；当前 ORDER/RETURN 与字段为系统侧入口契约，非平台事实声明",
       "Noon 是否存在无 webhook 的真实订单须按平台实际能力核实；本包对无事件记录一律待核对",
       "未连接生产、未部署"
     ]
   },
   "review_response": {
     "codex_review_date": "2026-11-21",
-    "round": "二次静态复核",
-    "point_1_full_key_readback": "修复：移除 idOf 单字段回读，订单/退货 ACK 与并发回读均按完整业务键查询并直接返回回读行 ID；补 H2 与真 MySQL 跨站同号两种插入顺序测试",
-    "point_2_evidence_binding": "修复：webhook 事件类型/站点/状态/payload/业务字段逐项绑定；借用同站无关事件、伪造主数据、空报文均隔离；明确不假定所有订单都有 webhook",
-    "point_3_ack_content": "修复：服务端业务指纹比较全部可信字段；不同可信内容 SOURCE_CONFLICT；并发唯一键竞争 FOR UPDATE 当前读；首次普通读避免死锁；JSON 键序规范化",
-    "point_4_zero_amount": "修复：金额 0 不再等同缺失，须有可信 payload 佐证；补有证据零金额正向与缺金额/金额不符反向测试"
+    "round": "第三次独立复核（基线 844792c）",
+    "point_1_event_site": "修复：loadEvidence 要求事件 site_code 非空且等于请求站点，空站点证据直接 SOURCE_UNVERIFIED；补 AE 请求 + null 站点事件反例（H2 与真 MySQL）",
+    "point_2_partner_sku": "修复：payload 绑定 partner_sku 并逐项校验；纳入 orderBusinessFingerprint；补同报文换值被拒、本地映射存在时重传改值 SOURCE_CONFLICT 反例",
+    "point_3_master_mapping": "修复：新增 verifyMasterDataRefs 校验 md_store/md_site/md_sku/md_partner_sku 映射且 ACTIVE；无映射 MASTER_DATA_UNVERIFIED；明确事件类型/payload 非平台事实，真实样本待联调",
+    "point_4_idempotent_semantics": "修复：订单指纹去掉整份报文只含核心字段；退货 biz_return_key 去掉 eventId 改锚定站点+订单号+退货号+父行；补事件元数据变化与不同事件同退货仍 ACK 测试"
   },
   "preserved_changes": [
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T16:49:31+08:00"
+  "generated_at": "2026-11-21T16:57:00+08:00"
 }

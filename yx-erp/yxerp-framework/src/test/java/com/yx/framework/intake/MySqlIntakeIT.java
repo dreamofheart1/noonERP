@@ -98,6 +98,23 @@ class MySqlIntakeIT
                 + "status varchar(24), raw_payload json, created_at datetime(3), "
                 + "unique key(biz_return_key), unique key(site_code,order_no,source_return_no))");
 
+        // 本地主数据映射（三次复核意见 3）。
+        jdbc.execute("create table md_store (id bigint auto_increment primary key, store_no varchar(64) not null, "
+                + "partner_id bigint not null, status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_site (id bigint auto_increment primary key, site_code varchar(16) not null, "
+                + "store_id bigint not null, currency char(3) not null, status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_sku (id bigint auto_increment primary key, sku_code varchar(64) not null, "
+                + "status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, "
+                + "partner_sku varchar(128) not null, sku_id bigint not null, site_code varchar(16) not null, "
+                + "business_model varchar(24) not null default 'noon', status varchar(16) not null default 'ACTIVE')");
+        jdbc.update("insert into md_store(id,store_no,partner_id,status) values (7,'STORE-AE',1,'ACTIVE')");
+        jdbc.update("insert into md_site(id,site_code,store_id,currency,status) values "
+                + "(1,'AE',7,'AED','ACTIVE'),(2,'SA',7,'SAR','ACTIVE')");
+        jdbc.update("insert into md_sku(id,sku_code,status) values (11,'SKU-11','ACTIVE')");
+        jdbc.update("insert into md_partner_sku(id,partner_sku,sku_id,site_code,business_model,status) values "
+                + "(1,'SKU',11,'AE','noon','ACTIVE'),(2,'SKU',11,'SA','noon','ACTIVE')");
+
         service = context.getBean(IntakeService.class);
         login(1L);
     }
@@ -144,9 +161,15 @@ class MySqlIntakeIT
 
     private static String orderPayload(String no, long store, long sku, String amount, int qty, String currency)
     {
+        return orderPayload(no, store, sku, amount, qty, currency, "SKU");
+    }
+
+    private static String orderPayload(String no, long store, long sku, String amount, int qty,
+            String currency, String partnerSku)
+    {
         return "{\"order_no\":\"" + no + "\",\"store_id\":" + store + ",\"sku_id\":" + sku
-                + ",\"gross_amount\":\"" + amount + "\",\"qty\":" + qty
-                + ",\"currency\":\"" + currency + "\"}";
+                + ",\"partner_sku\":\"" + partnerSku + "\",\"gross_amount\":\"" + amount
+                + "\",\"qty\":" + qty + ",\"currency\":\"" + currency + "\"}";
     }
 
     private static String returnPayload(String orderNo, String returnNo, int qty, long itemId)
@@ -347,6 +370,54 @@ class MySqlIntakeIT
             pool.shutdownNow();
             login(1L);
         }
+    }
+
+    @Test
+    void nullSiteEventAndMissingMasterMappingQuarantinedOnRealMySql()
+    {
+        seedWebhook("EVT-NULL-MY", null, "ORDER",
+                orderPayload("MX-NULL", 7L, 11L, "88.5000", 1, "AED"), "RECEIVED");
+        Result nullSite = service.postOrder(order("MX-NULL", "EVT-NULL-MY"));
+        assertFalse(nullSite.posted());
+        assertEquals("SOURCE_UNVERIFIED", nullSite.reasonCode());
+
+        seedWebhook("EVT-NOMASTER-MY", "AE", "ORDER",
+                orderPayload("MX-NM", 999L, 11L, "88.5000", 1, "AED"), "RECEIVED");
+        Result noMaster = service.postOrder(new OrderInput("AE", "MX-NM", "WEBHOOK", "EVT-NOMASTER-MY", null,
+                "SKU", 999L, 11L, new BigDecimal("88.5000"), 1, "AED",
+                orderPayload("MX-NM", 999L, 11L, "88.5000", 1, "AED")));
+        assertFalse(noMaster.posted());
+        assertEquals("MASTER_DATA_UNVERIFIED", noMaster.reasonCode());
+        assertEquals(0, count("sal_order"));
+    }
+
+    @Test
+    void differentEventSameReturnAndMetadataChangeAckOnRealMySql()
+    {
+        long itemId = seedParentAt("MR-EVR", "AE");
+        seedReturnEvent("EVT-EVR1-MY", "AE", "MR-EVR", "SR-EVR", 1, itemId);
+        Result first = service.postReturn(ret("AE", "MR-EVR", "EVT-EVR1-MY", "SR-EVR", itemId));
+        assertTrue(first.posted());
+        // 不同事件佐证同一退货业务：eventId 不进入幂等键，仍 ACK。
+        seedReturnEvent("EVT-EVR2-MY", "AE", "MR-EVR", "SR-EVR", 1, itemId);
+        Result second = service.postReturn(ret("AE", "MR-EVR", "EVT-EVR2-MY", "SR-EVR", itemId));
+        assertTrue(second.posted());
+        assertEquals("ALREADY_POSTED", second.reasonCode());
+        assertEquals(first.entityId(), second.entityId());
+
+        // 订单核心业务字段不变、仅多一个事件元数据字段 → ACK 而非冲突。
+        String base = orderPayload("MX-META", 7L, 11L, "88.5000", 1, "AED");
+        seedWebhook("EVT-META1-MY", "AE", "ORDER", base, "RECEIVED");
+        assertTrue(service.postOrder(order("MX-META", "EVT-META1-MY")).posted());
+        String changed = base.substring(0, base.length() - 1) + ",\"event_status\":\"PROCESSED\"}";
+        seedWebhook("EVT-META2-MY", "AE", "ORDER", changed, "PROCESSED");
+        Result again = service.postOrder(new OrderInput("AE", "MX-META", "WEBHOOK", "EVT-META2-MY", null,
+                "SKU", 7L, 11L, new BigDecimal("88.5000"), 1, "AED", changed));
+        assertTrue(again.posted());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        // MR-EVR 父订单 + MX-META 订单；退货只入账一次
+        assertEquals(2, count("sal_order"));
+        assertEquals(1, count("sal_return"));
     }
 
     @Configuration

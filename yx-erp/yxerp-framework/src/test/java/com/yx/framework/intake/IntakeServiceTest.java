@@ -98,6 +98,23 @@ class IntakeServiceTest
                 + "status varchar(24), raw_payload varchar(4000), created_at timestamp, "
                 + "unique key(biz_return_key), unique key(site_code,order_no,source_return_no))");
 
+        // 本地主数据映射（三次复核意见 3）：store/site/sku/partner_sku 必须真实存在且 ACTIVE。
+        jdbc.execute("create table md_store (id bigint auto_increment primary key, store_no varchar(64) not null, "
+                + "partner_id bigint not null, status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_site (id bigint auto_increment primary key, site_code varchar(16) not null, "
+                + "store_id bigint not null, currency char(3) not null, status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_sku (id bigint auto_increment primary key, sku_code varchar(64) not null, "
+                + "status varchar(16) not null default 'ACTIVE')");
+        jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, "
+                + "partner_sku varchar(128) not null, sku_id bigint not null, site_code varchar(16) not null, "
+                + "business_model varchar(24) not null default 'noon', status varchar(16) not null default 'ACTIVE')");
+        jdbc.update("insert into md_store(id,store_no,partner_id,status) values (7,'STORE-AE',1,'ACTIVE')");
+        jdbc.update("insert into md_site(id,site_code,store_id,currency,status) values "
+                + "(1,'AE',7,'AED','ACTIVE'),(2,'SA',7,'SAR','ACTIVE')");
+        jdbc.update("insert into md_sku(id,sku_code,status) values (11,'SKU-11','ACTIVE')");
+        jdbc.update("insert into md_partner_sku(id,partner_sku,sku_id,site_code,business_model,status) values "
+                + "(1,'SKU',11,'AE','noon','ACTIVE'),(2,'SKU',11,'SA','noon','ACTIVE')");
+
         service = context.getBean(IntakeService.class);
         login(1L); // 默认超管
     }
@@ -147,9 +164,15 @@ class IntakeServiceTest
 
     private static String orderPayload(String no, long store, long sku, String amount, int qty, String currency)
     {
+        return orderPayload(no, store, sku, amount, qty, currency, "SKU");
+    }
+
+    private static String orderPayload(String no, long store, long sku, String amount, int qty,
+            String currency, String partnerSku)
+    {
         return "{\"order_no\":\"" + no + "\",\"store_id\":" + store + ",\"sku_id\":" + sku
-                + ",\"gross_amount\":\"" + amount + "\",\"qty\":" + qty
-                + ",\"currency\":\"" + currency + "\"}";
+                + ",\"partner_sku\":\"" + partnerSku + "\",\"gross_amount\":\"" + amount
+                + "\",\"qty\":" + qty + ",\"currency\":\"" + currency + "\"}";
     }
 
     private static String returnPayload(String orderNo, String returnNo, int qty, long itemId)
@@ -636,6 +659,112 @@ class IntakeServiceTest
         assertEquals(4, count("sal_return"));
     }
 
+    // ---------- 三次复核：站点/Partner SKU/主数据映射/幂等语义 ----------
+
+    @Test
+    void eventWithNullSiteCannotCorroborateOrder()
+    {
+        // 事件站点为空：不能证明属于请求站点，禁止直接正式入账。
+        seedWebhook("EVT-NULLSITE", null, "ORDER",
+                orderPayload("O-NS", 7L, 11L, "88.5000", 1, "AED"), "RECEIVED");
+        Result r = service.postOrder(order("AE", "O-NS", "EVT-NULLSITE"));
+        assertFalse(r.posted());
+        assertEquals("SOURCE_UNVERIFIED", r.reasonCode());
+        assertEquals(0, count("sal_order"));
+    }
+
+    @Test
+    void partnerSkuNotBackedByEventPayloadIsRejected()
+    {
+        seedOrderEvent("EVT-PS1", "AE", "O-PS1");
+        // 报文仍绑定 partner_sku="SKU"，入参却换成 DIFF：证据未绑定该值。
+        OrderInput in = new OrderInput("AE", "O-PS1", "WEBHOOK", "EVT-PS1", null, "DIFF",
+                7L, 11L, new BigDecimal("88.5000"), 1, "AED",
+                orderPayload("O-PS1", 7L, 11L, "88.5000", 1, "AED"));
+        Result r = service.postOrder(in);
+        assertFalse(r.posted());
+        assertEquals("SOURCE_UNVERIFIED", r.reasonCode());
+        assertEquals(0, count("sal_order"));
+    }
+
+    @Test
+    void partnerSkuChangeOnRetryIsConflictNotAck()
+    {
+        seedOrderEvent("EVT-PS2", "AE", "O-PS2");
+        assertTrue(service.postOrder(order("AE", "O-PS2", "EVT-PS2")).posted());
+        // 种本地 OTHER 映射 + 独立事件：核心字段 partnerSku 改变 → 指纹不同，不能 ACK。
+        jdbc.update("insert into md_partner_sku(id,partner_sku,sku_id,site_code,business_model,status) "
+                + "values (3,'OTHER',11,'AE','noon','ACTIVE')");
+        String changed = orderPayload("O-PS2", 7L, 11L, "88.5000", 1, "AED", "OTHER");
+        seedWebhook("EVT-PS2B", "AE", "ORDER", changed, "RECEIVED");
+        Result conflict = service.postOrder(new OrderInput("AE", "O-PS2", "WEBHOOK", "EVT-PS2B", null, "OTHER",
+                7L, 11L, new BigDecimal("88.5000"), 1, "AED", changed));
+        assertFalse(conflict.posted());
+        assertEquals("SOURCE_CONFLICT", conflict.reasonCode());
+        assertEquals(1, count("sal_order"));
+    }
+
+    @Test
+    void missingLocalStoreMappingIsQuarantined()
+    {
+        seedWebhook("EVT-MM1", "AE", "ORDER",
+                orderPayload("O-MM1", 999L, 11L, "88.5000", 1, "AED"), "RECEIVED");
+        Result r = service.postOrder(new OrderInput("AE", "O-MM1", "WEBHOOK", "EVT-MM1", null, "SKU",
+                999L, 11L, new BigDecimal("88.5000"), 1, "AED",
+                orderPayload("O-MM1", 999L, 11L, "88.5000", 1, "AED")));
+        assertFalse(r.posted());
+        assertEquals("MASTER_DATA_UNVERIFIED", r.reasonCode());
+        assertEquals(0, count("sal_order"));
+    }
+
+    @Test
+    void partnerSkuWrongSkuMappingIsQuarantined()
+    {
+        jdbc.update("insert into md_sku(id,sku_code,status) values (12,'SKU-12','ACTIVE')");
+        String payload = orderPayload("O-MM2", 7L, 12L, "88.5000", 1, "AED");
+        seedWebhook("EVT-MM2", "AE", "ORDER", payload, "RECEIVED");
+        Result r = service.postOrder(new OrderInput("AE", "O-MM2", "WEBHOOK", "EVT-MM2", null, "SKU",
+                7L, 12L, new BigDecimal("88.5000"), 1, "AED", payload));
+        assertFalse(r.posted());
+        assertEquals("MASTER_DATA_UNVERIFIED", r.reasonCode());
+        assertEquals(0, count("sal_order"));
+    }
+
+    @Test
+    void eventMetadataChangeIsIdempotentAck()
+    {
+        // 同一订单核心业务字段不变、第二条事件仅多一个元数据字段 → ACK，不判冲突。
+        seedOrderEvent("EVT-META1", "AE", "O-META");
+        assertTrue(service.postOrder(order("AE", "O-META", "EVT-META1")).posted());
+        String base = orderPayload("O-META", 7L, 11L, "88.5000", 1, "AED");
+        String changed = base.substring(0, base.length() - 1) + ",\"event_status\":\"PROCESSED\"}";
+        seedWebhook("EVT-META2", "AE", "ORDER", changed, "PROCESSED");
+        Result again = service.postOrder(new OrderInput("AE", "O-META", "WEBHOOK", "EVT-META2", null, "SKU",
+                7L, 11L, new BigDecimal("88.5000"), 1, "AED", changed));
+        assertTrue(again.posted());
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(1, count("sal_order"));
+        assertEquals(0, count("noon_intake_review"));
+    }
+
+    @Test
+    void differentEventSameReturnStillIdempotentAck()
+    {
+        long oid = seedOrder("O-EVR", "AE");
+        long itemId = seedItem(oid, "O-EVR");
+        seedReturnEvent("EVT-EVR1", "AE", "O-EVR", "SR-EVR", 1, itemId);
+        Result first = service.postReturn(ret("AE", "O-EVR", "EVT-EVR1", "SR-EVR", itemId));
+        assertTrue(first.posted());
+        // 不同事件佐证同一退货业务：payload 相同、eventId 不同 → 仍按幂等 ACK。
+        seedReturnEvent("EVT-EVR2", "AE", "O-EVR", "SR-EVR", 1, itemId);
+        Result second = service.postReturn(ret("AE", "O-EVR", "EVT-EVR2", "SR-EVR", itemId));
+        assertTrue(second.posted());
+        assertEquals("ALREADY_POSTED", second.reasonCode());
+        assertEquals(first.entityId(), second.entityId());
+        assertEquals(1, count("sal_return"));
+        assertEquals(0, count("noon_intake_review"));
+    }
+
     // ---------- 事务回滚 ----------
 
     @Test
@@ -689,7 +818,8 @@ class IntakeServiceTest
         assertTrue(ddl.contains("chk_intake_resolution"), "缺解析完整性约束");
         assertTrue(ddl.contains("noon_intake_audit"), "缺审计表");
         // 复核新增原因码须在契约文件中声明
-        for (String code : List.of("SOURCE_UNVERIFIED", "MASTER_DATA_INCOMPLETE", "SOURCE_CONFLICT"))
+        for (String code : List.of("SOURCE_UNVERIFIED", "MASTER_DATA_INCOMPLETE",
+                "MASTER_DATA_UNVERIFIED", "SOURCE_CONFLICT"))
             assertTrue(ddl.contains(code), "待核对契约缺原因码: " + code);
         assertFalse(ddl.contains("GENERATED ALWAYS") && ddl.contains("biz_return_key"),
                 "待核对表不应臆造业务幂等键");

@@ -31,7 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.yx.framework.security.site.SiteAuthGuard;
 
 /**
- * NOON-20261121-RETURN：订单/退货正式入账安全闸门（二次复核修订版）。
+ * NOON-20261121-RETURN：订单/退货正式入账安全闸门（三次复核修订版）。
  *
  * <p><b>职责边界（务必先读）</b>：这是一个<b>内部 Spring service 闸门</b>，不是完整订单/退货业务闭环。
  * 它没有 HTTP/用户入口、没有管理 UI、不连生产、不自动过账 FIFO、不生成平台事件身份、
@@ -48,14 +48,24 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * <b>本包只覆盖有系统侧 webhook 留痕的订单/退货</b>；Noon 是否存在无 webhook 的真实订单
  * 须按平台实际能力核实，不得假定全部订单都有事件——无事件即待核对，不臆造身份。
  *
- * <p><b>主数据契约（意见 1 / 意见 4）</b>：门店/商品必须由调用方从已核验主数据提供且为正；
- * 金额允许为零（如全折扣、样品单），但必须非空且必须被可信 payload 佐证，不得把合法零金额
- * 一律当作缺失。任一主数据缺字段或与事件证据不符 → 隔离，绝不把 0/NULL 占位写进正式表。
+ * <p><b>主数据契约（三次复核意见 3）</b>：门店/商品/Partner SKU 不仅要在可信 payload 中一致，
+ * 还必须在本地主数据中存在且映射正确——{@code md_store} 通过 {@code md_site} 归属请求站点、
+ * {@code md_sku} 存在、{@code md_partner_sku} 的 partner_sku↔sku_id↔站点映射存在且 ACTIVE。
+ * 未建立可信映射一律隔离（MASTER_DATA_UNVERIFIED），不把平台数字当系统内部 ID。
+ * 金额允许为零（如全折扣、样品单），但必须非空且必须被可信 payload 佐证。
  * 退货商品从可信父订单行取真实 sku_id，不臆造、不写 NULL。
  *
- * <p><b>幂等/回读契约（意见 1 / 意见 3）</b>：同站同号 ACK 使用完整业务键 + 锁读回读，
- * 直接返回该行 ID（不再按单字段取第一条）；订单比较服务端业务指纹（含数量/门店/商品/金额/币种/
- * 报文摘要），退货比较报文、数量、父行与业务键。空报文不构成已证明重传；不同可信内容冲突隔离。
+ * <p><b>幂等/回读契约（三次复核意见 4）</b>：同站同号 ACK 使用完整业务键 + 锁读回读，
+ * 直接返回该行 ID；订单业务指纹<b>只含核心业务字段</b>（站点/订单号/门店/商品/Partner SKU/
+ * 金额/数量/币种），不含整份报文，事件元数据变化不致误判冲突；退货业务键锚定站点+订单号+
+ * 平台退货号+父订单行，<b>不含事件 ID</b>，不同事件佐证同一退货业务仍按幂等 ACK。
+ * 字段冲突语义：核心业务字段不同 → SOURCE_CONFLICT 隔离，不覆盖已入账记录；仅报文元数据/
+ * 格式变化 → ACK。空报文不构成已证明重传。
+ *
+ * <p><b>平台事实边界（三次复核意见 3）</b>：{@code int_webhook_event.event_type} 的
+ * ORDER/RETURN 取值及 payload 字段是本工作包的<b>系统侧可信入口契约</b>，不是对 Noon 原始
+ * webhook 格式或事件类型语义的声明；真实平台报文样本、事件元数据字段、退货 event ID 作用域
+ * 仍待只读联调/平台文档核实，未核实前不把自定义测试报文当平台事实。
  *
  * <p>站点授权：调用方声明站点必须先经 {@link SiteAuthGuard#requireSite}；不信任声明本身；
  * 退货站点只取父订单数据库真实值。事务：正式入账/隔离写入各自与不可变审计同事务，失败整体回滚。
@@ -80,8 +90,9 @@ public class IntakeService
     /**
      * 订单入账输入。
      * sourceEventId 必须对应系统侧已接收的 ORDER 事件，且事件 payload 与 rawPayload 内容一致、
-     * 其中的订单号/门店/商品/金额/数量/币种与入参一致；storeId/skuId/grossAmount 必须是
-     * 调用方从已核验主数据/平台报文取得的真实值（金额可为零但不可缺），服务不猜、不补、不填占位。
+     * 其中的订单号/门店/商品/Partner SKU/金额/数量/币种与入参一致；storeId/skuId/partnerSku
+     * 还必须在本地主数据中映射正确（见 verifyMasterDataRefs）。金额可为零但不可缺，
+     * 服务不猜、不补、不填占位。
      */
     public record OrderInput(
             String siteCode,
@@ -146,7 +157,14 @@ public class IntakeService
             return quarantine(in.siteCode(), in.orderNo(), null, in.sourceEventId(), "ORDER",
                     sourceProblem, "订单来源证据不足或与请求绑定不一致，禁止臆造身份", in.rawPayload(), actor);
 
-        // 4) 幂等 + 冲突：完整业务键锁读回读，直接返回同一行 ID；比较服务端业务指纹而非仅报文。
+        // 4) 本地主数据映射：store 归属站点、sku 存在、partnerSku↔sku↔站点映射 ACTIVE。
+        String masterProblem = verifyMasterDataRefs(in);
+        if (masterProblem != null)
+            return quarantine(in.siteCode(), in.orderNo(), null, in.sourceEventId(), "ORDER",
+                    masterProblem, "本地主数据映射不存在或与站点/Partner SKU 不匹配，禁止入账",
+                    in.rawPayload(), actor);
+
+        // 5) 幂等 + 冲突：完整业务键锁读回读，直接返回同一行 ID；比较服务端业务指纹。
         String businessFingerprint = orderBusinessFingerprint(in);
         // 首次存在性检查用普通读，避免对不存在的唯一键加 gap lock 与并发 INSERT 死锁；
         // 唯一键冲突后的回读用 FOR UPDATE 当前读，确保读到最新已提交行（见 resolveConcurrentOrder）。
@@ -249,7 +267,7 @@ public class IntakeService
                     sourceProblem, "退货来源证据不足或与请求绑定不一致", in.rawPayload(), actor);
 
         // 4) 幂等 + 冲突：完整业务键锁读回读，直接返回同一行 ID。
-        String bizKey = returnBizKey(in);
+        String bizKey = returnBizKey(parent, in);
         // 同上：首次存在性检查普通读，唯一键冲突回读才锁读，避免 gap lock 死锁。
         List<Map<String, Object>> existing = jdbc.queryForList(
                 "SELECT id,raw_payload,qty,sal_order_item_id,biz_return_key FROM sal_return "
@@ -265,7 +283,7 @@ public class IntakeService
             return same
                     ? new Result(Outcome.POSTED, ((Number) row.get("id")).longValue(), null, "ALREADY_POSTED")
                     : quarantine(parent.siteCode(), parent.orderNo(), in.sourceReturnNo(), in.sourceEventId(), "RETURN",
-                            "SOURCE_CONFLICT", "同源退货号但报文/数量/父行/事件不同，禁止当重传 ACK", in.rawPayload(), actor);
+                            "SOURCE_CONFLICT", "同源退货号但数量/父行/站点不同，禁止当重传 ACK", in.rawPayload(), actor);
         }
         LocalDateTime now = now();
         KeyHolder generated = new GeneratedKeyHolder();
@@ -312,7 +330,7 @@ public class IntakeService
                 && sameContent(rows.get(0).get("raw_payload"), in.rawPayload())
                 && ((Number) rows.get(0).get("qty")).intValue() == in.qty()
                 && ((Number) rows.get(0).get("sal_order_item_id")).longValue() == in.salOrderItemId()
-                && returnBizKey(in).equals(rows.get(0).get("biz_return_key")))
+                && returnBizKey(parent, in).equals(rows.get(0).get("biz_return_key")))
             return new Result(Outcome.POSTED, ((Number) rows.get(0).get("id")).longValue(), null, "ALREADY_POSTED");
         return quarantine(parent.siteCode(), parent.orderNo(), in.sourceReturnNo(), in.sourceEventId(), "RETURN",
                 "SOURCE_CONFLICT", "并发退货提交撞唯一键且业务内容不一致", in.rawPayload(), actor);
@@ -338,8 +356,9 @@ public class IntakeService
         Map<String, Object> row = rows.get(0);
         String status = (String) row.get("status");
         if ("FAILED".equals(status) || "KILLED".equals(status)) return new EvidenceResult(null, "SOURCE_UNVERIFIED");
+        // 空站点证据不能证明属于请求站点，必须与已鉴权站点明确相等（三次复核意见 1）。
         String eventSite = (String) row.get("site_code");
-        if (eventSite != null && !eventSite.equals(siteCode)) return new EvidenceResult(null, "SOURCE_UNVERIFIED");
+        if (!hasText(eventSite) || !eventSite.equals(siteCode)) return new EvidenceResult(null, "SOURCE_UNVERIFIED");
         if (!expectedType.equals(row.get("event_type"))) return new EvidenceResult(null, "SOURCE_UNVERIFIED");
         String eventPayload = textOf(row.get("payload_raw"));
         if (!sameContent(eventPayload, rawPayload)) return new EvidenceResult(null, "SOURCE_UNVERIFIED");
@@ -357,6 +376,7 @@ public class IntakeService
         if (!matchesText(p, "order_no", in.orderNo())
                 || !matchesLong(p, "store_id", in.storeId())
                 || !matchesLong(p, "sku_id", in.skuId())
+                || !matchesText(p, "partner_sku", in.partnerSku())
                 || !matchesAmount(p, "gross_amount", in.grossAmount())
                 || !matchesLong(p, "qty", in.qty())
                 || !matchesText(p, "currency", in.currency()))
@@ -376,6 +396,29 @@ public class IntakeService
                 || !matchesLong(p, "item_id", in.salOrderItemId()))
             return "SOURCE_UNVERIFIED";
         return null;
+    }
+
+    /**
+     * 本地主数据映射（三次复核意见 3）：store 必须存在且通过 md_site 归属请求站点，
+     * sku 必须存在，partnerSku 必须映射到该站点同一 sku，且相关记录 ACTIVE。
+     * 无映射 → MASTER_DATA_UNVERIFIED；不把平台报文里的数字直接当系统内部 ID。
+     */
+    private String verifyMasterDataRefs(OrderInput in)
+    {
+        List<Map<String, Object>> storeRows = jdbc.queryForList(
+                "SELECT s.id FROM md_store s JOIN md_site site ON site.store_id=s.id "
+                        + "WHERE s.id=? AND s.status='ACTIVE' AND site.site_code=? AND site.status='ACTIVE'",
+                in.storeId(), in.siteCode());
+        if (storeRows.isEmpty()) return "MASTER_DATA_UNVERIFIED";
+
+        List<Map<String, Object>> skuRows = jdbc.queryForList(
+                "SELECT id FROM md_sku WHERE id=? AND status='ACTIVE'", in.skuId());
+        if (skuRows.isEmpty()) return "MASTER_DATA_UNVERIFIED";
+
+        List<Map<String, Object>> partnerRows = jdbc.queryForList(
+                "SELECT id FROM md_partner_sku WHERE partner_sku=? AND sku_id=? AND site_code=? AND status='ACTIVE'",
+                in.partnerSku(), in.skuId(), in.siteCode());
+        return partnerRows.isEmpty() ? "MASTER_DATA_UNVERIFIED" : null;
     }
 
     /** 父订单行信息：只从数据库真实记录取站点、订单号、商品。 */
@@ -488,22 +531,23 @@ public class IntakeService
     }
 
     /**
-     * 服务端业务指纹：站点 + 订单号 + 门店 + 商品 + 金额 + 数量 + 币种 + 报文摘要。
-     * ACK 必须比较全部可信业务内容，不能只比 raw_payload（二次复核意见 3）。
+     * 服务端业务指纹：站点 + 订单号 + 门店 + 商品 + Partner SKU + 金额 + 数量 + 币种。
+     * 不含整份报文与事件元数据：同一订单的状态变化/报文格式变化不应被误判为不同业务（三次复核意见 4）。
      */
     private static String orderBusinessFingerprint(OrderInput in)
     {
         String amount = in.grossAmount() == null ? "" : in.grossAmount().stripTrailingZeros().toPlainString();
         String canonical = String.join("|", nz(in.siteCode()), nz(in.orderNo()),
-                String.valueOf(in.storeId()), String.valueOf(in.skuId()), amount,
-                String.valueOf(in.qty()), nz(in.currency()), contentDigest(in.rawPayload()));
+                String.valueOf(in.storeId()), String.valueOf(in.skuId()), nz(in.partnerSku()), amount,
+                String.valueOf(in.qty()), nz(in.currency()));
         return contentDigest(canonical);
     }
 
-    /** 退货业务键锚定已佐证事件 + 平台退货号 + 父订单行。 */
-    private static String returnBizKey(ReturnInput in)
+    /** 退货业务键锚定站点 + 订单号 + 平台退货号 + 父订单行；不含事件 ID，避免不同事件误判为不同业务。 */
+    private static String returnBizKey(ParentInfo parent, ReturnInput in)
     {
-        return "RET:" + in.sourceEventId() + ":" + in.sourceReturnNo() + ":" + in.salOrderItemId();
+        return "RET:" + parent.siteCode() + ":" + parent.orderNo() + ":"
+                + in.sourceReturnNo() + ":" + in.salOrderItemId();
     }
 
     private static String nz(String value) { return value == null ? "" : value; }

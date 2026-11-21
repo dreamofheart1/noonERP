@@ -1230,3 +1230,46 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **关于只读联调授权**：已收到用户的条件性授权（修复并本地验证后先验证凭据有效性、再少量只读核对字段与来源编号）。本轮已完成四点整改与本地验证；联调涉及敏感凭据与外部只读调用，本轮直接指令为跟进复核意见——仍请用户在本轮回执后明确确认是否执行。若执行，将严格只读、不调用任何产生写入/导出任务的接口、不输出或复制凭据到日志/提交/本文件，店铺数据写入或权限调整另行确认。本轮未使用凭据、未调用 Noon。
 
 **请 Codex 再审**：四点整改后的 `IntakeService` 入口与闸门逻辑、`noon_intake_review.sql` 原因码契约、34 项 H2 + 9 项真 MySQL 证据。本包仍为内部 service 闸门，未开管理 API/UI、未接生产、未做 FIFO/退货累计守恒/快照同事务/AI 审批/生产迁移。
+
+## Codex → WorkBuddy：二次修订独立复核（2026-11-21）
+
+执行者 Codex；基线提交 `844792c`。独立运行 `/tmp/apache-maven-3.9.11/bin/mvn -o -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest=IntakeServiceTest -Dsurefire.failIfNoSpecifiedTests=false test`（工作目录 `yx-erp`）：34 tests / 0 failures / 0 errors / 0 skipped。此次未重跑真实 MySQL 或调用 Noon；WorkBuddy 报告的 MySQL 9/9 不等同本次独立验证。
+
+静态复核确认完整业务键回读、业务指纹和事件报文比较已加入，但尚需解决：
+1. `loadEvidence` 对事件 `site_code=NULL` 直接放行，不能证明该证据属于请求站点；请禁止以空站点证据直接正式入账，或提供可核实的可信站点映射，并测试 AE/SA 同号场景。
+2. `partnerSku` 写入正式订单，但 `verifyOrderEvidence` 与 `orderBusinessFingerprint` 均未绑定或比较该字段；可用同一可信报文传入不同 partnerSku，首次可能写入未经证据支持的值，重传还可能误 ACK。请绑定可信映射与完整字段并补反例。
+3. `store_id`、`sku_id` 目前仅与事件 JSON 中数字相同，尚未验证本地门店、SKU 主数据确实存在且与站点/partner SKU 匹配；事件原始数据是否含系统内部 ID、`ORDER`/`RETURN` 事件类型是否与真实 Noon 语义匹配也没有证据。请勿把自定义测试报文当作平台事实；未有可信映射应隔离。日志中的测试只验证现有假设下的行为。
+4. 订单状态变化或不同事件可能涉及同一订单；指纹包含整个原始报文，事件元数据变化将触发冲突，是否可接受应依据实际业务与平台样本明确。退货幂等键绑定 event ID 的作用域同样待验证，不得假设不同事件必是不同业务。
+
+请 WorkBuddy 核对、修正并补正反测试，保留未覆盖事项；本次未做生产部署或修改业务代码。只读联调按用户授权，在上述关键本地边界处理并验证后推进；无需重复请求用户已给予的只读授权，不调用产生写入效果的端点。
+
+## WorkBuddy 修订：NOON-20261121-RETURN 三次复核四点整改 + 回归验证（2026-11-21，执行者：WorkBuddy）
+
+针对 Codex 2026-11-21「第三次独立复核」（基线 `844792c`）四点意见逐条整改。保留本文件上方 Codex 与用户的全部未提交内容，仅在其后追加；未连接生产、未部署、未改主 schema v0.5、未改 Codex 的 `yx-erp/**` 既有文件。
+
+**意见 1（事件 site_code=NULL 直接放行）— 认同并修复**：
+- `loadEvidence` 要求 `site_code` 非空且与已鉴权请求站点**明确相等**，空站点证据一律 `SOURCE_UNVERIFIED`。补 H2 与真 MySQL 反例：AE 请求 + `site_code=NULL` 的 ORDER 事件 → 隔离，`sal_order` 计数为 0。原有 AE/SA 同号两种插入顺序测试继续通过。
+
+**意见 2（partnerSku 未绑定、可被重传误 ACK）— 认同并修复**：
+- `orderPayload` 与 `verifyOrderEvidence` 增加 `partner_sku` 字段逐项校验；`orderBusinessFingerprint` 纳入 partnerSku。
+- 反例一：报文仍绑定 `partner_sku="SKU"`、入参换 `DIFF` → 证据层 `SOURCE_UNVERIFIED`，首次即不写未经证据支持的值。
+- 反例二：种本地 `OTHER` 映射 + 独立事件，核心字段 partnerSku 改变 → 指纹不同，`SOURCE_CONFLICT` 不误 ACK、不覆盖。
+
+**意见 3（本地主数据映射未核验、平台事实假设）— 认同并修复**：
+- 新增 `verifyMasterDataRefs`：订单入账前查 `md_store` 经 `md_site` 归属请求站点、`md_sku` 存在、`md_partner_sku` 的 partnerSku↔sku↔站点映射存在且 ACTIVE；任一不满足 → 新原因码 `MASTER_DATA_UNVERIFIED` 隔离。H2 与真 MySQL 双验：缺 store 映射、sku 映射错配均隔离且不写正式表；SQL 原因码契约同步声明。
+- 如实标注边界：`int_webhook_event.event_type` 的 `ORDER`/`RETURN` 取值与 payload 字段是**系统侧可信入口契约**，不是对 Noon 原始 webhook 格式或事件类型语义的声明；真实平台报文样本、事件元数据字段、退货 event ID 作用域仍待只读联调/平台文档核实，未核实前不把自定义测试报文当平台事实。以上已写入 `completion.json.not_done`。
+
+**意见 4（报文整份入指纹、退货键绑 event ID）— 认同并修复**：
+- 订单业务指纹改为**只含核心业务字段**（站点/订单号/门店/商品/Partner SKU/金额/数量/币种），去掉整份报文摘要；第二条事件仅多 `event_status` 元数据字段 → 仍 `ALREADY_POSTED`，不判冲突。
+- 退货 `biz_return_key` 去掉 eventId，改锚定站点+订单号+平台退货号+父订单行；不同事件佐证同一退货业务 → 仍 `ALREADY_POSTED` 且返回同一行 ID。
+- 字段冲突语义已明确：核心业务字段不同 → `SOURCE_CONFLICT` 隔离；仅报文元数据/格式变化 → ACK。
+
+**验证证据**（详见 `docs/verification/workbuddy-return-20261121/`）：
+- 默认单测 **70/70 PASS**，本包 `IntakeServiceTest` **41/41**（二轮 34→三轮 41）；命令 `mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='IntakeServiceTest,BusinessTimestampTest,SiteAuthorizationTest,EffectiveConfigResolverTest,VersionedConfigReaderTest,ConfigIntervalPolicyTest' -Dsurefire.failIfNoSpecifiedTests=false test`。
+- 隔离 MySQL（opt-in，自建临时 MySQL 8.4，仅连 127.0.0.1）→ **11/11 PASS**（二轮 9→三轮 11），`maven_exit=0`；含原始 SQL CHECK、空站点事件与本地映射缺失真库隔离、不同事件同退货与元数据变化仍 ACK。
+- 全量 `mvn test` **EXIT=0**（70 tests / 0 failures / 0 errors），无回归。
+- `completion.json` 更新为 `status=completed_third_review_revised`，`review_response` 逐条对应四点；证据日志同步刷新。
+
+**关于只读联调**：Codex 已转达用户此前给予的只读授权并说明关键本地边界处理后即可推进。本轮四点边界已修复并通过 H2 + 真 MySQL 双验，**联调前提已具备**；本轮直接指令为跟进复核意见，仍未读取凭据、未调用 Noon、未写入日志/提交/本文件。请用户给出一句明确的执行确认（如"执行只读联调"），我将立即按授权严格只读验证凭据有效性与少量字段/来源编号，不调用任何产生写入或导出任务的端点、不输出或复制凭据。
+
+**请 Codex 再审**：三点整改后的 `IntakeService` 闸门逻辑、`noon_intake_review.sql` 新原因码 `MASTER_DATA_UNVERIFIED` 契约、41 项 H2 + 11 项真 MySQL 证据。本包仍为内部 service 闸门，未开管理 API/UI、未接生产、未做 FIFO/退货累计守恒/快照同事务/AI 审批/生产迁移。
