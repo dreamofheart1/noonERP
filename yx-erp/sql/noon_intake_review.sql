@@ -20,8 +20,12 @@
 --     （合法零金额须有证据），缺字段进 MASTER_DATA_INCOMPLETE，与证据不符进 SOURCE_UNVERIFIED。
 --     门店/商品/Partner SKU 还须在本地 md_store/md_site/md_sku/md_partner_sku 映射存在且 ACTIVE，
 --     无映射进 MASTER_DATA_UNVERIFIED；平台数字不直接当系统内部 ID。
---   * 冲突语义：核心业务字段（站点/订单号/门店/商品/Partner SKU/金额/数量/币种）不同进
+--   * 冲突语义（四次复核统一两入口）：订单核心业务字段（站点/订单号/门店/商品/Partner SKU/
+--     金额/数量/币种）、退货核心业务字段（站点/订单号/平台退货号/父订单行/数量）不同进
 --     SOURCE_CONFLICT，禁止误当重传 ACK；仅事件元数据或报文格式变化按幂等 ACK。
+--     退货正常重复 postReturn 与并发回读 resolveConcurrentReturn 共用 sameReturnBusiness 判定，
+--     均不比较整份 raw_payload，语义一致；字段已落在 sal_return 的 biz_return_key/qty/
+--     sal_order_item_id 列上。raw_payload 仅作证据绑定与待核对原样留痕，不参与幂等判定。
 --     reason_code 全集：PARENT_MISSING/SITE_MISMATCH/ITEM_PARENT_MISMATCH/
 --     SOURCE_UNIDENTIFIABLE/SOURCE_UNVERIFIED/MASTER_DATA_INCOMPLETE/
 --     MASTER_DATA_UNVERIFIED/SOURCE_CONFLICT。

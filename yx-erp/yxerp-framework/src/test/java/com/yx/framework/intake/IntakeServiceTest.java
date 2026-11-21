@@ -181,6 +181,14 @@ class IntakeServiceTest
                 + "\",\"qty\":" + qty + ",\"item_id\":" + itemId + "}";
     }
 
+    /** 退货报文带事件元数据字段：核心业务字段不变，仅多一个元数据字段（四次复核）。 */
+    private static String returnPayloadWithMeta(String orderNo, String returnNo, int qty, long itemId, String status)
+    {
+        return "{\"order_no\":\"" + orderNo + "\",\"return_no\":\"" + returnNo
+                + "\",\"qty\":" + qty + ",\"item_id\":" + itemId
+                + ",\"event_status\":\"" + status + "\"}";
+    }
+
     private long seedOrder(String orderNo, String site)
     {
         jdbc.update("insert into sal_order(order_no,site_code,store_id,partner_sku,qty,gross_amount,currency,status,state_version,created_at) "
@@ -763,6 +771,111 @@ class IntakeServiceTest
         assertEquals(first.entityId(), second.entityId());
         assertEquals(1, count("sal_return"));
         assertEquals(0, count("noon_intake_review"));
+    }
+
+    // ---------- 四次复核：退货幂等核心字段语义（两入口一致） ----------
+
+    @Test
+    void returnMetadataChangeIsIdempotentAck()
+    {
+        // 正常入口 postReturn：核心字段相同、仅事件元数据字段变化 → ACK，不得 SOURCE_CONFLICT。
+        long oid = seedOrder("O-RMETA", "AE");
+        long itemId = seedItem(oid, "O-RMETA");
+        seedReturnEvent("EVT-RM1", "AE", "O-RMETA", "SR-RMETA", 1, itemId);
+        Result first = service.postReturn(ret("AE", "O-RMETA", "EVT-RM1", "SR-RMETA", itemId));
+        assertTrue(first.posted());
+        String changed = returnPayloadWithMeta("O-RMETA", "SR-RMETA", 1, itemId, "PROCESSED");
+        seedWebhook("EVT-RM2", "AE", "RETURN", changed, "PROCESSED");
+        Result again = service.postReturn(new ReturnInput("AE", "O-RMETA", "EVT-RM2", "SR-RMETA", itemId, 1, changed));
+        assertTrue(again.posted(), "仅元数据变化应幂等 ACK");
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(first.entityId(), again.entityId());
+        assertEquals(1, count("sal_return"));
+        assertEquals(0, count("noon_intake_review"));
+    }
+
+    @Test
+    void returnCoreFieldChangeDespiteSameMetaIsConflictNotAck()
+    {
+        // 反例：元数据一致但核心字段（数量）变化 → 两入口都不得 ACK，必须隔离。
+        long oid = seedOrder("O-RCORE", "AE");
+        long itemId = seedItem(oid, "O-RCORE");
+        seedReturnEvent("EVT-RC1", "AE", "O-RCORE", "SR-RCORE", 1, itemId);
+        service.postReturn(ret("AE", "O-RCORE", "EVT-RC1", "SR-RCORE", itemId));
+        String changed = returnPayload("O-RCORE", "SR-RCORE", 7, itemId);
+        seedWebhook("EVT-RC2", "AE", "RETURN", changed, "RECEIVED");
+        Result conflict = service.postReturn(new ReturnInput("AE", "O-RCORE", "EVT-RC2", "SR-RCORE", itemId, 7, changed));
+        assertFalse(conflict.posted());
+        assertEquals("SOURCE_CONFLICT", conflict.reasonCode());
+        assertEquals(1, count("sal_return"));
+        assertEquals(1, count("noon_intake_review"));
+    }
+
+    @Test
+    void concurrentReturnWithMetadataChangeIsIdempotentAck() throws Exception
+    {
+        // 并发回读入口 resolveConcurrentReturn：两事件仅元数据不同、核心字段相同 → 同一行 ACK。
+        long oid = seedOrder("O-RCONC", "AE");
+        long itemId = seedItem(oid, "O-RCONC");
+        String base = returnPayload("O-RCONC", "SR-RCONC", 1, itemId);
+        String withMeta = returnPayloadWithMeta("O-RCONC", "SR-RCONC", 1, itemId, "PROCESSED");
+        seedWebhook("EVT-RCONC1", "AE", "RETURN", base, "PROCESSED");
+        seedWebhook("EVT-RCONC2", "AE", "RETURN", withMeta, "PROCESSED");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try
+        {
+            ReturnInput a = new ReturnInput("AE", "O-RCONC", "EVT-RCONC1", "SR-RCONC", itemId, 1, base);
+            ReturnInput b = new ReturnInput("AE", "O-RCONC", "EVT-RCONC2", "SR-RCONC", itemId, 1, withMeta);
+            Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(a); });
+            Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(b); });
+            start.countDown();
+            Result r1 = f1.get();
+            Result r2 = f2.get();
+            assertTrue(r1.posted());
+            assertTrue(r2.posted());
+            assertEquals(r1.entityId(), r2.entityId(), "并发元数据变化应 ACK 同一行 ID");
+            assertEquals(1, count("sal_return"), "并发同源退货只入账一次");
+            assertEquals(0, count("noon_intake_review"));
+        }
+        finally
+        {
+            pool.shutdownNow();
+            login(1L);
+        }
+    }
+
+    @Test
+    void concurrentReturnWithCoreFieldChangeIsConflictNotAck() throws Exception
+    {
+        // 并发回读入口反例：元数据格式不同且核心字段数量不同 → 不得当重传 ACK。
+        long oid = seedOrder("O-RCCORE", "AE");
+        long itemId = seedItem(oid, "O-RCCORE");
+        String base = returnPayload("O-RCCORE", "SR-RCCORE", 1, itemId);
+        String changed = returnPayloadWithMeta("O-RCCORE", "SR-RCCORE", 5, itemId, "PROCESSED");
+        seedWebhook("EVT-RCC1", "AE", "RETURN", base, "PROCESSED");
+        seedWebhook("EVT-RCC2", "AE", "RETURN", changed, "PROCESSED");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try
+        {
+            ReturnInput a = new ReturnInput("AE", "O-RCCORE", "EVT-RCC1", "SR-RCCORE", itemId, 1, base);
+            ReturnInput b = new ReturnInput("AE", "O-RCCORE", "EVT-RCC2", "SR-RCCORE", itemId, 5, changed);
+            Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(a); });
+            Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(b); });
+            start.countDown();
+            Result r1 = f1.get();
+            Result r2 = f2.get();
+            assertTrue(r1.posted() || r2.posted(), "至少一笔先到者入账");
+            assertTrue(!r1.posted() || !r2.posted(), "核心字段不同的后到者不得 ACK");
+            assertEquals(1, count("sal_return"));
+            assertEquals(1, count("noon_intake_review"), "后到者必须隔离");
+        }
+        finally
+        {
+            pool.shutdownNow();
+            login(1L);
+        }
     }
 
     // ---------- 事务回滚 ----------

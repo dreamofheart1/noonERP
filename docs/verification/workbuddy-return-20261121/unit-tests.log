@@ -1,5 +1,5 @@
-NOON-20261121-RETURN 默认单元测试（H2 内存库，无需外部进程）——三次复核修订版
-执行时间：2026-11-21 16:57 +08:00
+NOON-20261121-RETURN 默认单元测试（H2 内存库，无需外部进程）——四次复核修订版
+执行时间：2026-11-21 17:03 +08:00
 
 命令：
   cd yx-erp && mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 \
@@ -9,30 +9,28 @@ NOON-20261121-RETURN 默认单元测试（H2 内存库，无需外部进程）�
 退出码：0
 
 surefire 报告统计（Tests run / Failures / Errors / Skipped）：
-  IntakeServiceTest            41 / 0 / 0 / 0   ← 本工作包（首次 24 → 二次 34 → 三次 41）
+  IntakeServiceTest            45 / 0 / 0 / 0   ← 本工作包（首次 24 → 二次 34 → 三次 41 → 四次 45）
   BusinessTimestampTest         6 / 0 / 0 / 0
   SiteAuthorizationTest        14 / 0 / 0 / 0
   EffectiveConfigResolverTest   3 / 0 / 0 / 0
   ConfigIntervalPolicyTest      3 / 0 / 0 / 0
   VersionedConfigReaderTest     3 / 0 / 0 / 0
   ------------------------------------------------
-  合计                         70 / 0 / 0 / 0
+  合计                         74 / 0 / 0 / 0
 
-全量默认测试：mvn test → EXIT=0；70 tests / 0 failures / 0 errors（无回归）。
+全量默认测试：mvn test → EXIT=0；74 tests / 0 failures / 0 errors（无回归）。
 
-IntakeServiceTest 41 项覆盖（按 Codex 三次复核四点意见新增 7 项）：
-  意见1 事件站点：site_code=NULL 的事件不得佐证 AE 请求 → SOURCE_UNVERIFIED，不写正式表；
-                  原有 AE/SA 同号两种插入顺序测试继续通过。
-  意见2 Partner SKU：payload 绑定 partner_sku 并逐项校验；同报文换 partnerSku 被证据层拒绝；
-                      独立事件改 partnerSku 且本地映射存在时 ACK 层判 SOURCE_CONFLICT。
-  意见3 本地主数据：md_store/md_site 归属站点、md_sku 存在、md_partner_sku↔sku↔站点映射 ACTIVE；
-                      缺 store 映射与 sku 映射错配均隔离 MASTER_DATA_UNVERIFIED；
-                      原因码契约 SQL 已声明；明确事件类型/payload 非 Noon 平台事实的边界。
-  意见4 幂等语义：订单指纹只含核心业务字段（含 partnerSku、去掉整份报文）；
-                      第二条事件仅多事件元数据字段仍 ALREADY_POSTED；
-                      退货业务键不含 eventId，不同事件佐证同一退货仍 ALREADY_POSTED 且返回同一行 ID。
-  前两轮闸门全部保持：完整键跨站同号 ACK、并发唯一键竞争、证据绑定反例、合法零金额、
-                      审计回滚、仅超管解析、SQL 结构/原因码、非法入参等。
+IntakeServiceTest 新增 4 项（Codex 三次修订复核意见：退货两入口幂等语义统一）：
+  postReturn 正常入口：仅事件元数据变化（核心字段相同）→ ALREADY_POSTED 同一行 ID；
+                       核心字段数量变化 → SOURCE_CONFLICT 隔离，不覆盖已入账。
+  resolveConcurrentReturn 并发入口：仅元数据变化并发 → 都 POSTED 且同一行 ID、只入账一次；
+                       核心字段数量变化并发 → 先到者入账、后到者 SOURCE_CONFLICT 隔离。
+  两入口共用 sameReturnBusiness：只比站点/订单号/平台退货号/父行/数量，
+                       不比事件 ID、不比整份 raw_payload，语义完全一致。
+
+前三轮闸门全部保持：完整键跨站同号 ACK、并发唯一键竞争、来源证据绑定、合法零金额、
+  空站点事件拒绝、partnerSku 绑定、本地主数据映射、订单指纹元数据变化仍 ACK、
+  不同事件同退货仍 ACK、审计回滚、仅超管解析、SQL 结构/原因码、非法入参等。
 
 注：隔离 MySQL 的 MySqlIntakeIT 为 opt-in（NOON_MYSQL_TEST_PORT），不计入默认单测，
-    单独在 mysql-it.log 记录（11/11，含原始 SQL CHECK 与真库新增边界）。
+    单独在 mysql-it.log 记录（13/13，含原始 SQL CHECK 与真库退货元数据/核心字段双入口边界）。

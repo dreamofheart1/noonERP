@@ -178,6 +178,14 @@ class MySqlIntakeIT
                 + "\",\"qty\":" + qty + ",\"item_id\":" + itemId + "}";
     }
 
+    /** 退货报文带事件元数据字段：核心业务字段不变，仅多一个元数据字段（四次复核）。 */
+    private static String returnPayloadWithMeta(String orderNo, String returnNo, int qty, long itemId, String status)
+    {
+        return "{\"order_no\":\"" + orderNo + "\",\"return_no\":\"" + returnNo
+                + "\",\"qty\":" + qty + ",\"item_id\":" + itemId
+                + ",\"event_status\":\"" + status + "\"}";
+    }
+
     private long seedParent()
     {
         jdbc.update("insert into sal_order(order_no,site_code,store_id,partner_sku,qty,gross_amount,currency,status,state_version) "
@@ -418,6 +426,70 @@ class MySqlIntakeIT
         // MR-EVR 父订单 + MX-META 订单；退货只入账一次
         assertEquals(2, count("sal_order"));
         assertEquals(1, count("sal_return"));
+    }
+
+    @Test
+    void returnMetadataChangeAckAndCoreChangeConflictOnRealMySql()
+    {
+        // 真库 JSON 列会重排字段顺序；退货元数据变化（核心字段相同）必须 ACK。
+        long itemId = seedParentAt("MR-RMETA", "AE");
+        String base = returnPayload("MR-RMETA", "SR-RMETA", 1, itemId);
+        seedWebhook("EVT-RMETA1-MY", "AE", "RETURN", base, "PROCESSED");
+        Result first = service.postReturn(new ReturnInput("AE", "MR-RMETA", "EVT-RMETA1-MY", "SR-RMETA", itemId, 1, base));
+        assertTrue(first.posted());
+        String withMeta = returnPayloadWithMeta("MR-RMETA", "SR-RMETA", 1, itemId, "PROCESSED");
+        seedWebhook("EVT-RMETA2-MY", "AE", "RETURN", withMeta, "PROCESSED");
+        Result again = service.postReturn(new ReturnInput("AE", "MR-RMETA", "EVT-RMETA2-MY", "SR-RMETA", itemId, 1, withMeta));
+        assertTrue(again.posted(), "真库：仅元数据变化应幂等 ACK");
+        assertEquals("ALREADY_POSTED", again.reasonCode());
+        assertEquals(first.entityId(), again.entityId());
+        assertEquals(1, count("sal_return"));
+        assertEquals(0, count("noon_intake_review"));
+
+        // 反例：核心字段数量变化 → 冲突隔离，真库不得误 ACK。
+        long itemId2 = seedParentAt("MR-RCORE", "AE");
+        String base2 = returnPayload("MR-RCORE", "SR-RCORE", 1, itemId2);
+        seedWebhook("EVT-RCORE1-MY", "AE", "RETURN", base2, "PROCESSED");
+        service.postReturn(new ReturnInput("AE", "MR-RCORE", "EVT-RCORE1-MY", "SR-RCORE", itemId2, 1, base2));
+        String changed = returnPayload("MR-RCORE", "SR-RCORE", 6, itemId2);
+        seedWebhook("EVT-RCORE2-MY", "AE", "RETURN", changed, "PROCESSED");
+        Result conflict = service.postReturn(new ReturnInput("AE", "MR-RCORE", "EVT-RCORE2-MY", "SR-RCORE", itemId2, 6, changed));
+        assertFalse(conflict.posted());
+        assertEquals("SOURCE_CONFLICT", conflict.reasonCode());
+        assertEquals(2, count("sal_return"), "核心字段冲突不得覆盖已入账退货");
+        assertEquals(1, count("noon_intake_review"));
+    }
+
+    @Test
+    void concurrentReturnMetadataChangeAckOnRealMySql() throws Exception
+    {
+        long itemId = seedParentAt("MR-RCONC", "AE");
+        String base = returnPayload("MR-RCONC", "SR-RCONC", 1, itemId);
+        String withMeta = returnPayloadWithMeta("MR-RCONC", "SR-RCONC", 1, itemId, "PROCESSED");
+        seedWebhook("EVT-RCONC1-MY", "AE", "RETURN", base, "PROCESSED");
+        seedWebhook("EVT-RCONC2-MY", "AE", "RETURN", withMeta, "PROCESSED");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try
+        {
+            ReturnInput a = new ReturnInput("AE", "MR-RCONC", "EVT-RCONC1-MY", "SR-RCONC", itemId, 1, base);
+            ReturnInput b = new ReturnInput("AE", "MR-RCONC", "EVT-RCONC2-MY", "SR-RCONC", itemId, 1, withMeta);
+            Future<Result> f1 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(a); });
+            Future<Result> f2 = pool.submit(() -> { login(1L); start.await(); return service.postReturn(b); });
+            start.countDown();
+            Result r1 = f1.get();
+            Result r2 = f2.get();
+            assertTrue(r1.posted());
+            assertTrue(r2.posted());
+            assertEquals(r1.entityId(), r2.entityId(), "真库并发元数据变化应 ACK 同一行 ID");
+            assertEquals(1, count("sal_return"));
+            assertEquals(0, count("noon_intake_review"));
+        }
+        finally
+        {
+            pool.shutdownNow();
+            login(1L);
+        }
     }
 
     @Configuration

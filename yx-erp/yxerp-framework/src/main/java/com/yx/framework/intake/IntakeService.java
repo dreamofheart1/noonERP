@@ -31,7 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.yx.framework.security.site.SiteAuthGuard;
 
 /**
- * NOON-20261121-RETURN：订单/退货正式入账安全闸门（三次复核修订版）。
+ * NOON-20261121-RETURN：订单/退货正式入账安全闸门（四次复核修订版）。
  *
  * <p><b>职责边界（务必先读）</b>：这是一个<b>内部 Spring service 闸门</b>，不是完整订单/退货业务闭环。
  * 它没有 HTTP/用户入口、没有管理 UI、不连生产、不自动过账 FIFO、不生成平台事件身份、
@@ -55,12 +55,15 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * 金额允许为零（如全折扣、样品单），但必须非空且必须被可信 payload 佐证。
  * 退货商品从可信父订单行取真实 sku_id，不臆造、不写 NULL。
  *
- * <p><b>幂等/回读契约（三次复核意见 4）</b>：同站同号 ACK 使用完整业务键 + 锁读回读，
+ * <p><b>幂等/回读契约（三次复核意见 4 + 四次复核意见）</b>：同站同号 ACK 使用完整业务键 + 锁读回读，
  * 直接返回该行 ID；订单业务指纹<b>只含核心业务字段</b>（站点/订单号/门店/商品/Partner SKU/
- * 金额/数量/币种），不含整份报文，事件元数据变化不致误判冲突；退货业务键锚定站点+订单号+
- * 平台退货号+父订单行，<b>不含事件 ID</b>，不同事件佐证同一退货业务仍按幂等 ACK。
- * 字段冲突语义：核心业务字段不同 → SOURCE_CONFLICT 隔离，不覆盖已入账记录；仅报文元数据/
- * 格式变化 → ACK。空报文不构成已证明重传。
+ * 金额/数量/币种），不含整份报文；退货两个幂等入口（正常重复 postReturn 与并发回读
+ * resolveConcurrentReturn）统一改用<b>退货核心业务字段</b>比较——站点 + 订单号 + 平台退货号 +
+ * 父订单行 + 数量（<b>不含事件 ID、不含整份 raw_payload</b>）。相应字段已经落在
+ * {@code biz_return_key}（站点/订单/退货号/父行）与 qty/sal_order_item_id 列上，
+ * 由 {@link #sameReturnBusiness} 统一判定，两个入口语义一致。
+ * 冲突语义：核心业务字段不同 → SOURCE_CONFLICT 隔离，不覆盖已入账记录；仅事件元数据/报文格式
+ * 变化 → ACK。空报文不构成已证明重传。
  *
  * <p><b>平台事实边界（三次复核意见 3）</b>：{@code int_webhook_event.event_type} 的
  * ORDER/RETURN 取值及 payload 字段是本工作包的<b>系统侧可信入口契约</b>，不是对 Noon 原始
@@ -266,24 +269,22 @@ public class IntakeService
             return quarantine(in.siteCode(), in.orderNo(), in.sourceReturnNo(), in.sourceEventId(), "RETURN",
                     sourceProblem, "退货来源证据不足或与请求绑定不一致", in.rawPayload(), actor);
 
-        // 4) 幂等 + 冲突：完整业务键锁读回读，直接返回同一行 ID。
+        // 4) 幂等 + 冲突：完整业务键普通读；退货核心业务字段相同 ACK，不同则隔离（四次复核）。
         String bizKey = returnBizKey(parent, in);
-        // 同上：首次存在性检查普通读，唯一键冲突回读才锁读，避免 gap lock 死锁。
+        // 首次存在性检查普通读，唯一键冲突回读才锁读，避免 gap lock 死锁。
+        // 只取核心业务字段列，不取 raw_payload：元数据/报文格式变化不参与幂等判定。
         List<Map<String, Object>> existing = jdbc.queryForList(
-                "SELECT id,raw_payload,qty,sal_order_item_id,biz_return_key FROM sal_return "
+                "SELECT id,qty,sal_order_item_id,biz_return_key FROM sal_return "
                         + "WHERE site_code=? AND order_no=? AND source_return_no=?",
                 parent.siteCode(), parent.orderNo(), in.sourceReturnNo());
         if (!existing.isEmpty())
         {
             Map<String, Object> row = existing.get(0);
-            boolean same = sameContent(row.get("raw_payload"), in.rawPayload())
-                    && ((Number) row.get("qty")).intValue() == in.qty()
-                    && ((Number) row.get("sal_order_item_id")).longValue() == in.salOrderItemId()
-                    && bizKey.equals(row.get("biz_return_key"));
-            return same
+            return sameReturnBusiness(row, parent, in)
                     ? new Result(Outcome.POSTED, ((Number) row.get("id")).longValue(), null, "ALREADY_POSTED")
                     : quarantine(parent.siteCode(), parent.orderNo(), in.sourceReturnNo(), in.sourceEventId(), "RETURN",
-                            "SOURCE_CONFLICT", "同源退货号但数量/父行/站点不同，禁止当重传 ACK", in.rawPayload(), actor);
+                            "SOURCE_CONFLICT", "同源退货号但核心业务字段不同（数量/父行/站点/退货号），禁止当重传 ACK",
+                            in.rawPayload(), actor);
         }
         LocalDateTime now = now();
         KeyHolder generated = new GeneratedKeyHolder();
@@ -319,21 +320,17 @@ public class IntakeService
         return new Result(Outcome.POSTED, key.longValue(), null, "POSTED");
     }
 
-    /** 并发撞唯一键后完整键锁读回读：同业务内容 ACK 并返回同一行 ID，不同内容隔离。 */
+    /** 并发撞唯一键后完整键锁读回读：退货核心业务字段相同 ACK 并返回同一行 ID，不同则隔离。 */
     private Result resolveConcurrentReturn(ParentInfo parent, ReturnInput in, long actor)
     {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,raw_payload,qty,sal_order_item_id,biz_return_key FROM sal_return "
+                "SELECT id,qty,sal_order_item_id,biz_return_key FROM sal_return "
                         + "WHERE site_code=? AND order_no=? AND source_return_no=? FOR UPDATE",
                 parent.siteCode(), parent.orderNo(), in.sourceReturnNo());
-        if (rows.size() == 1
-                && sameContent(rows.get(0).get("raw_payload"), in.rawPayload())
-                && ((Number) rows.get(0).get("qty")).intValue() == in.qty()
-                && ((Number) rows.get(0).get("sal_order_item_id")).longValue() == in.salOrderItemId()
-                && returnBizKey(parent, in).equals(rows.get(0).get("biz_return_key")))
+        if (rows.size() == 1 && sameReturnBusiness(rows.get(0), parent, in))
             return new Result(Outcome.POSTED, ((Number) rows.get(0).get("id")).longValue(), null, "ALREADY_POSTED");
         return quarantine(parent.siteCode(), parent.orderNo(), in.sourceReturnNo(), in.sourceEventId(), "RETURN",
-                "SOURCE_CONFLICT", "并发退货提交撞唯一键且业务内容不一致", in.rawPayload(), actor);
+                "SOURCE_CONFLICT", "并发退货提交撞唯一键且核心业务字段不一致", in.rawPayload(), actor);
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -548,6 +545,19 @@ public class IntakeService
     {
         return "RET:" + parent.siteCode() + ":" + parent.orderNo() + ":"
                 + in.sourceReturnNo() + ":" + in.salOrderItemId();
+    }
+
+    /**
+     * 退货幂等核心业务字段等同判定（四次复核意见）：站点 + 订单号 + 平台退货号 + 父订单行 + 数量。
+     * site/order 已由查询条件与父记录锚定；biz_return_key 覆盖站点+订单号+退货号+父行，
+     * 再显式比较数量。两个幂等入口（正常重复、并发回读）共用本法，语义完全一致；
+     * <b>不比较整份 raw_payload</b>，因此仅事件元数据/报文格式不同的重传仍按幂等 ACK。
+     */
+    private static boolean sameReturnBusiness(Map<String, Object> row, ParentInfo parent, ReturnInput in)
+    {
+        return ((Number) row.get("qty")).intValue() == in.qty()
+                && ((Number) row.get("sal_order_item_id")).longValue() == in.salOrderItemId()
+                && returnBizKey(parent, in).equals(row.get("biz_return_key"));
     }
 
     private static String nz(String value) { return value == null ? "" : value; }

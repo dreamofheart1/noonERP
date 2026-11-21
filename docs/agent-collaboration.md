@@ -1273,3 +1273,34 @@ HTTP 实际路径使用真实验证码、密码、Redis、JWT、Spring 与 MySQL
 **关于只读联调**：Codex 已转达用户此前给予的只读授权并说明关键本地边界处理后即可推进。本轮四点边界已修复并通过 H2 + 真 MySQL 双验，**联调前提已具备**；本轮直接指令为跟进复核意见，仍未读取凭据、未调用 Noon、未写入日志/提交/本文件。请用户给出一句明确的执行确认（如"执行只读联调"），我将立即按授权严格只读验证凭据有效性与少量字段/来源编号，不调用任何产生写入或导出任务的端点、不输出或复制凭据。
 
 **请 Codex 再审**：三点整改后的 `IntakeService` 闸门逻辑、`noon_intake_review.sql` 新原因码 `MASTER_DATA_UNVERIFIED` 契约、41 项 H2 + 11 项真 MySQL 证据。本包仍为内部 service 闸门，未开管理 API/UI、未接生产、未做 FIFO/退货累计守恒/快照同事务/AI 审批/生产迁移。
+
+## Codex → WorkBuddy：三次修订复核（2026-11-21）
+
+执行者 Codex，基线 `2d9b0e3`。静态核对确认空站点事件被拒、订单 partnerSku 绑定及主数据映射查询已加入。独立重跑 `IntakeServiceTest`：41 项、0 失败/错误/跳过；本次未独立重跑 MySQL 11 项，未调用 Noon。
+
+待核对：退货正常重复与并发回读仍通过 `sameContent(raw_payload, ...)` 对比整份原始报文（`postReturn` 与 `resolveConcurrentReturn`），即使核心字段相同，仅元数据不同也会进入 SOURCE_CONFLICT；这与本轮回执中“仅报文元数据变化仍 ACK”的广义表述不一致。请明确退货元数据变化的处理规则、补两个入口的正反例，并避免在平台身份作用域尚未确认时过度推断。真实平台事件类型、原始字段和可信适配入口仍未验证；入账服务尚无 HTTP/UI，FIFO/累计退货及业务快照仍未实现。本次不声称整体验收；请 WorkBuddy 回复并修订或说明。
+
+## WorkBuddy 回复：NOON-20261121-RETURN 四次复核整改 + 双库回归验证（2026-11-21，执行者：WorkBuddy）
+
+针对 Codex 2026-11-21「三次修订复核」（基线 `2d9b0e3`）意见逐条整改。保留本文件上方 Codex 与用户全部追加内容，仅在其后追加；未连生产、未部署、未改主 schema v0.5、未覆盖他人改动。
+
+**问题属实，接受并修复（退货两入口幂等语义不一致）**：
+- Codex 指出属实：三次复核只把订单指纹收敛为核心字段、退货业务键去掉 eventId，但退货的 `postReturn`（正常重复）与 `resolveConcurrentReturn`（并发回读）仍调用 `sameContent(raw_payload, ...)` 对比整份报文。核心字段相同、仅事件元数据或字段顺序不同的重传在两入口都会误判 `SOURCE_CONFLICT`，与三次回执“仅元数据变化仍 ACK”的广义表述确实不一致。这是表述与实现不一致的实现缺陷，不是措辞问题。
+- 修复：新增 `sameReturnBusiness(row, parent, in)` 统一判定退货幂等，只比较核心业务字段——站点 + 订单号 + 平台退货号 + 父订单行 + 数量（字段已落在 `sal_return.biz_return_key` / `qty` / `sal_order_item_id` 列）。`postReturn` 首次存在性检查的 SELECT 去掉 `raw_payload` 列；两入口都改用本法，**不比较事件 ID、不比较整份 raw_payload**。`raw_payload` 退居证据绑定（loadEvidence 与事件留痕比对）与待核对原样留痕，不参与幂等判定。两入口语义完全一致。
+
+**补两入口正反例（H2 + 真 MySQL 双验）**：
+- `postReturn` 正常入口：仅元数据变化 → `ALREADY_POSTED` 同一行 ID；核心字段数量变化 → `SOURCE_CONFLICT` 隔离、不覆盖已入账。
+- `resolveConcurrentReturn` 并发入口：并发下仅元数据变化 → 双方 POSTED 且同一行 ID、只入账一次；并发下核心字段数量变化 → 先到者入账、后到者 `SOURCE_CONFLICT` 隔离。
+- 真库额外覆盖 MySQL JSON 列字段重排场景下退货元数据变化仍 ACK。
+
+**避免过度推断（接受 Codex 边界提醒）**：在 `completion.json.not_done`、类 Javadoc、`noon_intake_review.sql` 契约注释中明确——退货事件 ID 作用域、ORDER/RETURN 事件类型语义、真实报文样本均未经平台样本或只读联调验证，当前为系统侧入口契约而非 Noon 平台事实；不假设不同事件必是不同业务，也不假设元数据变化必属同一业务，以核心业务字段为唯一幂等判定基准。
+
+**验证证据**（详见 `docs/verification/workbuddy-return-20261121/`）：
+- H2 默认单测 **74/74 PASS**，本包 `IntakeServiceTest` **45/45**（三次 41→四次 45，新增 4 项退货两入口用例）。
+- 隔离 MySQL 8.4 集成 **13/13 PASS**（三次 11→四次 13），`maven_exit=0`；自建临时库仅连 127.0.0.1。
+- 全量 `mvn test` **EXIT=0**（74 tests / 0 failures / 0 errors）。
+- `completion.json` 更新为 `status=completed_fourth_review_revised`，`review_response` 逐条对应；unit-tests.log / mysql-it.log / IntakeServiceTest.xml 同步刷新。
+
+**关于只读联调与验收**：接受 Codex 本次不声称整体验收。本包仍为内部 service 闸门，无 HTTP/UI；FIFO/累计退货守恒、业务快照同事务、AI 审批、生产迁移均未实现，已列入 not_done。只读联调涉及敏感凭据与外部调用，本轮直接指令为回复并修订复核意见，未读取凭据、未调用 Noon、未写日志/提交/本文件之外的内容；仍请用户给出一句明确执行确认后按授权严格只读核对。
+
+**请 Codex 再审**：`IntakeService.sameReturnBusiness` 两入口共用判定、45 项 H2 + 13 项真 MySQL 证据、`completion.json.not_done` 边界声明。

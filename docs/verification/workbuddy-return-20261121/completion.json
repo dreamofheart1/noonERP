@@ -1,7 +1,7 @@
 {
   "marker": "NOON-20261121-RETURN",
-  "status": "completed_third_review_revised",
-  "summary": "订单/退货正式入账安全工作包（三次复核修订版）。基线 844792c。按 Codex 2026-11-21 第三次独立复核四点整改：①loadEvidence 要求事件 site_code 非空且等于请求站点，空站点证据不再放行；②partner_sku 绑定进可信 payload 逐项校验并纳入服务端业务指纹，补同报文换 partnerSku 被拒与重传误 ACK 反例；③新增本地主数据映射闸门（md_store 经 md_site 归属站点、md_sku 存在、md_partner_sku 的 partnerSku↔sku↔站点映射 ACTIVE），无映射隔离 MASTER_DATA_UNVERIFIED，不把平台数字当系统内部 ID；④订单业务指纹去掉整份报文、只含核心业务字段，事件元数据变化仍 ACK；退货业务键去掉 eventId，按站点+订单号+退货号+父行锚定，不同事件佐证同一退货仍 ACK。明确 int_webhook_event 的 ORDER/RETURN 与 payload 字段是系统侧入口契约而非 Noon 平台事实，真实样本/事件类型语义/退货 event ID 作用域待只读联调核实。前两轮整改（完整键回读、证据绑定、零金额合法、并发锁读）全部保持。仍为内部 service 闸门，无 HTTP/UI、非闭环、未连生产、未部署、未改主 schema v0.5、未覆盖他人改动。",
+  "status": "completed_fourth_review_revised",
+  "summary": "订单/退货正式入账安全工作包（四次复核修订版）。基线 2d9b0e3。按 Codex 2026-11-21 第三次修订复核意见整改：退货两个幂等入口（正常重复 postReturn 与并发回读 resolveConcurrentReturn）此前仍用整份 raw_payload 比较，导致核心字段相同但事件元数据/报文格式不同的重传被误判 SOURCE_CONFLICT，与三次回执中'仅元数据变化仍 ACK'的广义表述不一致。本轮统一退货幂等语义：两入口共用 sameReturnBusiness，只比较退货核心业务字段（站点+订单号+平台退货号+父订单行+数量，已落在 sal_return.biz_return_key/qty/sal_order_item_id 列），不比较事件 ID、不比较整份 raw_payload；raw_payload 退居证据绑定与待核对原样留痕。补两入口各一组正反例：仅元数据变化→ACK 同一行 ID；核心字段（数量）变化→SOURCE_CONFLICT 隔离。前 three 轮整改（完整键回读、证据绑定、零金额合法、空站点事件拒绝、partnerSku 绑定、本地主数据映射、订单指纹收敛）全部保持。明确 ORDER/RETURN 与 payload 字段是系统侧入口契约而非 Noon 平台事实，退货事件 ID 作用域/真实报文样本待只读联调核实；避免过度推断。仍为内部 service 闸门，无 HTTP/UI、非闭环、未连生产、未部署、未改主 schema v0.5、未覆盖他人改动。",
   "files": [
     "yx-erp/sql/noon_intake_review.sql",
     "yx-erp/yxerp-framework/src/main/java/com/yx/framework/intake/IntakeService.java",
@@ -17,19 +17,19 @@
     {
       "name": "H2 默认单元测试",
       "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='IntakeServiceTest,BusinessTimestampTest,SiteAuthorizationTest,EffectiveConfigResolverTest,VersionedConfigReaderTest,ConfigIntervalPolicyTest' -Dsurefire.failIfNoSpecifiedTests=false test",
-      "result": "70/70 PASS（本工作包 IntakeServiceTest 41/41，二轮 34→三轮 41）",
+      "result": "74/74 PASS（本工作包 IntakeServiceTest 45/45，三轮 41→四轮 45）",
       "evidence": "docs/verification/workbuddy-return-20261121/unit-tests.log"
     },
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-intake-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=11 errors=0 failures=0 skipped=0（二轮 9→三轮 11）",
+      "result": "maven_exit=0；MySQL JUnit tests=13 errors=0 failures=0 skipped=0（三轮 11→四轮 13）",
       "evidence": "docs/verification/workbuddy-return-20261121/mysql-it.log"
     },
     {
       "name": "全量默认测试无回归",
       "command": "mvn test",
-      "result": "EXIT=0；70 tests / 0 failures / 0 errors",
+      "result": "EXIT=0；74 tests / 0 failures / 0 errors",
       "evidence": "docs/verification/workbuddy-return-20261121/unit-tests.log"
     },
     {
@@ -39,8 +39,8 @@
       "evidence": "docs/verification/workbuddy-return-20261121/IntakeServiceTest.xml"
     },
     {
-      "name": "三次复核四点行为断言",
-      "result": "空站点事件隔离/partnerSku 证据绑定与重传冲突/本地主数据映射缺失与错配隔离/事件元数据变化仍 ACK/不同事件同退货仍 ACK 且 ID 一致，H2 与真 MySQL 双验全部 PASS",
+      "name": "四次退货幂等语义两入口断言",
+      "result": "postReturn 与 resolveConcurrentReturn 均：仅元数据变化 ACK 同一行 ID、核心字段（数量）变化 SOURCE_CONFLICT 隔离；H2 与真 MySQL 双验全部 PASS",
       "evidence": "docs/verification/workbuddy-return-20261121/IntakeServiceTest.xml 与 mysql-it.log"
     }
   ],
@@ -51,9 +51,9 @@
       "来源证据绑定：event_id/站点非空且相等/状态/event_type/payload/订单号/退货号/门店/商品/Partner SKU/金额/数量逐项核验；无事件即待核对",
       "本地主数据映射：md_store 经 md_site 归属请求站点、md_sku 存在、md_partner_sku 映射 ACTIVE；无映射 MASTER_DATA_UNVERIFIED 隔离",
       "正式表零占位：门店/商品为正且有证据；金额可合法为 0 但必须被可信 payload 佐证",
-      "服务端现算业务指纹（站点+订单号+门店+商品+Partner SKU+金额+数量+币种），不含整份报文，事件元数据变化不误判冲突",
+      "服务端现算订单业务指纹（站点+订单号+门店+商品+Partner SKU+金额+数量+币种），不含整份报文，事件元数据变化不误判冲突",
+      "退货幂等两入口统一：postReturn 与 resolveConcurrentReturn 共用 sameReturnBusiness，只比核心业务字段（站点/订单号/退货号/父行/数量），不含事件 ID、不比整份 raw_payload，仅元数据/格式变化 ACK、核心字段变化 SOURCE_CONFLICT",
       "完整业务键回读 + 唯一键冲突后 FOR UPDATE 当前读，ACK 直接返回同一行 ID，跨站同号不误返",
-      "退货业务键锚定站点+订单号+平台退货号+父订单行，不含 eventId，不同事件佐证同一退货按幂等 ACK",
       "同键不同可信业务内容进 SOURCE_CONFLICT 隔离，不覆盖已入账记录；并发由 DB 唯一键兜底",
       "来源不可识别/不可核验进 NEEDS_REVIEW 待核对层，不生成平台事件号/退货号/业务幂等键",
       "同事务正式入账/隔离写入 + 不可变审计（noon_intake_audit append-only）",
@@ -65,22 +65,22 @@
       "业务与可信参数快照同事务落库/重算",
       "AI 隔离审批服务、规则真实命中与全局开关",
       "数据库最小权限、受控归档与生产迁移",
-      "平台事实待核实：真实 Noon webhook 报文样本、ORDER/RETURN 事件类型语义、payload 是否含系统内部 ID、退货 event ID 作用域；当前 ORDER/RETURN 与字段为系统侧入口契约，非平台事实声明",
+      "平台事实待核实：真实 Noon webhook 报文样本、ORDER/RETURN 事件类型语义、payload 是否含系统内部 ID、退货 event ID 作用域；当前 ORDER/RETURN 与字段为系统侧入口契约，非平台事实声明；退货事件 ID 作用域未确认前，不假设不同事件必为不同业务",
       "Noon 是否存在无 webhook 的真实订单须按平台实际能力核实；本包对无事件记录一律待核对",
       "未连接生产、未部署"
     ]
   },
   "review_response": {
     "codex_review_date": "2026-11-21",
-    "round": "第三次独立复核（基线 844792c）",
-    "point_1_event_site": "修复：loadEvidence 要求事件 site_code 非空且等于请求站点，空站点证据直接 SOURCE_UNVERIFIED；补 AE 请求 + null 站点事件反例（H2 与真 MySQL）",
-    "point_2_partner_sku": "修复：payload 绑定 partner_sku 并逐项校验；纳入 orderBusinessFingerprint；补同报文换值被拒、本地映射存在时重传改值 SOURCE_CONFLICT 反例",
-    "point_3_master_mapping": "修复：新增 verifyMasterDataRefs 校验 md_store/md_site/md_sku/md_partner_sku 映射且 ACTIVE；无映射 MASTER_DATA_UNVERIFIED；明确事件类型/payload 非平台事实，真实样本待联调",
-    "point_4_idempotent_semantics": "修复：订单指纹去掉整份报文只含核心字段；退货 biz_return_key 去掉 eventId 改锚定站点+订单号+退货号+父行；补事件元数据变化与不同事件同退货仍 ACK 测试"
+    "round": "三次修订复核（基线 2d9b0e3）",
+    "point_1_return_idempotent": "问题属实：退货 postReturn 正常重复与 resolveConcurrentReturn 并发回读此前仍用 sameContent(raw_payload) 比整份报文，核心字段相同但元数据不同的重传在两入口都会误判 SOURCE_CONFLICT，与三次回执'仅元数据变化仍 ACK'表述不一致。修复：两入口统一改用 sameReturnBusiness 只比核心业务字段（站点/订单号/平台退货号/父行/数量，落在 biz_return_key/qty/sal_order_item_id），不比事件 ID、不比 raw_payload；raw_payload 仅作证据绑定与待核对留痕",
+    "point_2_two_entry_cases": "补齐两入口正反例：postReturn 仅元数据变化→ALREADY_POSTED 同一行 ID、核心数量变化→SOURCE_CONFLICT；resolveConcurrentReturn 并发下仅元数据变化→同 ID ACK、核心数量变化→后到者隔离；H2 与真 MySQL 双验",
+    "point_3_no_over_inference": "在 completion.json.not_done 与类 Javadoc、SQL 契约注释中明确：退货事件 ID 作用域、ORDER/RETURN 事件类型语义、真实报文样本均未经平台样本/只读联调验证，当前为系统侧入口契约而非平台事实；不假设不同事件必是不同业务，也不假设元数据变化必属同一业务——以核心业务字段为唯一判定基准",
+    "point_4_scope_statement": "接受 Codex 不声称整体验收：本包仍为内部 service 闸门，无 HTTP/UI，FIFO/累计退货/业务快照同事务/AI 审批/生产迁移均未实现，均列入 not_done"
   },
   "preserved_changes": [
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部未提交记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T16:57:00+08:00"
+  "generated_at": "2026-11-21T17:03:00+08:00"
 }

@@ -1,19 +1,22 @@
-NOON-20261121-RETURN 隔离 MySQL 集成验证（opt-in，三次复核修订版）
-执行时间：2026-11-21 16:55 +08:00
+NOON-20261121-RETURN 隔离 MySQL 集成验证（opt-in，四次复核修订版）
+执行时间：2026-11-21 17:03 +08:00
 命令：python3 scripts/verify-intake-runtime.py \
         --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin \
         --maven /tmp/apache-maven-3.9.11/bin/mvn \
         --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2
 
-隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-intake-5t0zws3b
-MySQL JUnit: tests=11 errors=0 failures=0 skipped=0
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-intake-oekncbls
+MySQL JUnit: tests=13 errors=0 failures=0 skipped=0
 maven_exit=0
-证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-intake-5t0zws3b
+证据目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-intake-oekncbls
 
-11 项真库覆盖：原始 noon_intake_review.sql CHECK 约束生效；系统事件佐证的主数据订单无占位；
+13 项真库覆盖：原始 noon_intake_review.sql CHECK 约束生效；系统事件佐证的主数据订单无占位；
 缺主数据隔离不写正式表；可信父退货入账与跨站父隔离；审计失败回滚；有证据零金额入账；
 借用事件/伪造主数据隔离；跨站同订单号/同退货号两种插入顺序 ACK 返回本站同一行 ID；
 并发同源订单唯一键竞争只入账一次且 ACK entityId 一致；
-【三次复核新增】空站点事件与本地主数据映射缺失在真库均隔离；
-【三次复核新增】不同事件佐证同一退货仍 ACK、订单事件元数据变化仍 ACK 不冲突。
+【三次复核】空站点事件与本地主数据映射缺失在真库均隔离；
+【三次复核】不同事件佐证同一退货仍 ACK、订单事件元数据变化仍 ACK 不冲突；
+【四次复核新增】退货正常入口仅元数据变化（MySQL JSON 列重排字段顺序下）仍 ACK 同一行 ID，
+                 核心字段数量变化 SOURCE_CONFLICT 隔离；
+【四次复核新增】退货并发回读入口仅元数据变化并发都 POSTED 同一行 ID、只入账一次。
 说明：脚本自建临时 MySQL 8.4，仅连 127.0.0.1，不读应用数据源、不连生产、不部署、不打印密码。
