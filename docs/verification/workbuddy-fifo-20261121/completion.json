@@ -1,6 +1,6 @@
 {
   "marker": "NOON-20261121-FIFO",
-  "status": "completed_phase1_first_review_revised",
+  "status": "completed_phase1_cross_service_revised",
   "summary": "库存批次与退货数量业务·阶段一：FIFO 批次出库消耗服务（用户 2026-11-21 授权分阶段开发的首个工作包）。实现内部 Spring service 闸门 FifoConsumptionService.postDelivery：站点授权 + 可信父订单行（sal_order/sal_order_item 真实存在、站点一致）+ 系统侧事件证据绑定 + 幂等键 SALE:sourceEventId + 两阶段先判定后写入 + FIFO 按 received_at/id 选 OPEN 批 FOR UPDATE 当前读 + 批次剩余量守恒 + 妥投量不超订单可投量 + 台账 qty_available 同步递减 + 写 SALE 消耗流水(sign=+1) + 不可变审计同事务。全程系统内部测试夹具，不臆造平台事件身份、不连生产、不部署、不改主 schema v0.5。SALE_DELIVERY 为系统侧内部事件契约（真实类型 FBPI::ORDER_SYNC/FBPO::PO_SYNC/RETURNS::REFERENCE_UPDATE，适配层未实现）。",
   "files": [
     "yx-erp/sql/noon_fifo_review.sql",
@@ -18,19 +18,19 @@
     {
       "name": "H2 默认单元测试",
       "command": "mvn -s /tmp/noon-maven-settings.xml -Dmaven.repo.local=/tmp/noon-m2 -pl yxerp-framework -am -Dtest='FifoConsumptionServiceTest' -Dsurefire.failIfNoSpecifiedTests=false test",
-      "result": "24/24 PASS（正向 FIFO/授权/父行/证据/幂等/冲突/守恒/并发/审计 + Codex 复核整改 9 项：ITEM_MISMATCH/跨站同SKU/同批多行聚合/台账本单占用累计/qty_delivered 同步/DELIVERED_MISMATCH/幂等完整数量比较）",
+      "result": "26/26 PASS（正向 FIFO/授权/父行/证据/幂等/冲突/守恒/并发/审计 + Codex 一次复核整改 9 项 + 跨服务复核 2 项：流水 move_type=SALE 契约与历史兼容、台账缺失 LEDGER_SHORTAGE 隔离无部分写入）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
     },
     {
       "name": "隔离 MySQL 集成测试（opt-in）",
       "command": "python3 scripts/verify-fifo-runtime.py --mysql-bin-dir /tmp/mysql-8.4.7-macos15-arm64/bin --maven /tmp/apache-maven-3.9.11/bin/mvn --maven-settings /tmp/noon-maven-settings.xml --maven-repo /tmp/noon-m2",
-      "result": "maven_exit=0；MySQL JUnit tests=8 errors=0 failures=0 skipped=0（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚 + Codex 复核整改 4 项：跨站同SKU只扣本站、ITEM_MISMATCH 隔离、qty_delivered 真库同步、同批多行不撞唯一键）",
+      "result": "maven_exit=0；MySQL JUnit tests=9 errors=0 failures=0 skipped=0（真实 schema DDL：FIFO 顺序/关批、TINYINT sign 累计守恒、同事件并发、批次不足回滚 + 一次复核整改 4 项 + 跨服务端到端 1 项：FIFO 真实产出 SALE 原行→可信退货 sal_return→RETURN_REVERSAL 红冲过账、跨批逐条红冲、同事件重传 ACK 不双计、红冲流水 sign=-1 累计守恒、不进隔离层；不造 SALE 夹具）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/mysql-it.log"
     },
     {
       "name": "全量默认测试无回归",
       "command": "mvn test",
-      "result": "EXIT=0；123 tests / 0 failures / 0 errors（原 114 + Codex 复核整改 9）",
+      "result": "EXIT=0；125 tests / 0 failures / 0 errors（原 123 + 跨服务复核 2；红冲 25/25、入账 45/45 均未受影响，历史兼容）",
       "evidence": "docs/verification/workbuddy-fifo-20261121/unit-tests.log"
     }
   ],
@@ -51,7 +51,10 @@
       "【Codex 阶段一复核整改】明细 SKU 绑定父订单行 sku_id，跨商品扣减 ITEM_MISMATCH 隔离",
       "【Codex 阶段一复核整改】幂等完整业务身份=订单行身份+按 SKU 聚合数量（不比事件号/元数据），不同数量 SOURCE_CONFLICT 不 ACK",
       "【Codex 阶段一复核整改】consumption 按批聚合一次写入（同批多行不撞 uk_consume_biz_event）；台账按 (sku,warehouse,site) 聚合一次扣减且规划阶段累计本单占用",
-      "【Codex 阶段一复核整改】父订单行 qty_delivered 同事务同步、与流水累计核对（不一致 DELIVERED_MISMATCH 隔离），requested 用 long 防 int 溢出"
+      "【Codex 阶段一复核整改】父订单行 qty_delivered 同事务同步、与流水累计核对（不一致 DELIVERED_MISMATCH 隔离），requested 用 long 防 int 溢出",
+      "【Codex 跨服务复核整改】事件类型与流水类型解耦：INTERNAL_EVENT_TYPE=SALE_DELIVERY 仅用于 int_webhook_event 佐证；CONSUMPTION_MOVE_TYPE=SALE（schema v0.5 合法枚举）写入 inv_batch_consumption.move_type，红冲服务 sign=+1&&move_type='SALE' 原行校验可接受，累计统计同用 SALE",
+      "【Codex 跨服务复核整改】台账行不存在改 queryForList 显式判空，按可用量 0 走 LEDGER_SHORTAGE 隔离（不再抛 EmptyResultDataAccessException 变成异常回滚），无部分写入",
+      "【Codex 跨服务复核整改】真库端到端：FIFO 真实产出 SALE 原行（不造夹具）→可信 sal_return→RETURN_REVERSAL 红冲过账，覆盖跨批、同事件重传 ACK、累计守恒"
     ],
     "first_review_20261121": {
       "baseline": "4cb86c0",
@@ -65,6 +68,18 @@
       ],
       "verification": "H2 单测 24/24、全量 123/123、隔离 MySQL 8/8；证据 XML/日志已刷新",
       "not_run_by_codex": "Codex 本轮未独立运行测试，请其复跑确认"
+    },
+    "cross_service_review_20261121": {
+      "baseline": "aab9faa",
+      "reviewer": "Codex 复核（本轮独立跑隔离 MySQL 8/8 maven exit 0，静态提出跨服务不一致）",
+      "findings_all_confirmed": true,
+      "changes": [
+        "意见1 move_type 跨包不一致：FIFO 原用 INTERNAL_EVENT_TYPE=SALE_DELIVERY 同时作事件类型与流水 move_type 写入，ReversalService 仅接受 sign=+1 且 move_type='SALE'，FIFO 产出行必判 ORIGINAL_NOT_SALE。解耦为 INTERNAL_EVENT_TYPE（仅佐证）+ CONSUMPTION_MOVE_TYPE=SALE（流水写入与 sumPostedOnItem 累计），与 schema v0.5 move_type 合法枚举（SALE/RETURN_LOSS/STOCKTAKE/TRANSFER_SHORT/RETURN_REVERSAL）一致；新增 H2 consumptionMoveTypeIsSaleForReversalCompatibility 验证落账值+历史累计兼容",
+        "意见2 台账不存在抛异常：planOneLine 用 queryForObject 在 0 行抛 EmptyResultDataAccessException，绕过 LEDGER_SHORTAGE 隔离变异常回滚。改 queryForList 显式判空，缺台账按可用量 0 隔离且无部分写入；新增 H2 missingLedgerQuarantinedWithNoPartialWrite",
+        "真库端到端（Codex 明确要求不造 SALE 夹具）：MySqlFifoIT 接入 ReversalService + 真实 sal_return DDL + noon_reversal_review.sql；fifoProducesSaleFlowThenReversalPostsAcrossBatchesAndRetransmitOnRealSchema 用 FIFO 真实产出 2 条 SALE 原行（跨批 5+1），建可信退货 qty=6，批1 红冲 3 件过账、同事件重传 ACK 不双计、跨批第二条红冲 1 件，累计红冲 4<=6、不进隔离层"
+      ],
+      "verification": "H2 单测 26/26、全量 125/125（红冲 25/25、入账 45/45 未受影响=历史兼容）、隔离 MySQL 9/9；证据 XML/日志已刷新",
+      "not_done": "事件类型→内部类型适配层、真实平台样本仍未核实"
     },
     "not_done": [
       "HTTP/Controller 与管理 UI 入口（本包为内部 service 闸门，非业务闭环）",
@@ -87,5 +102,5 @@
     "docs/agent-collaboration.md 中 Codex 与用户追加的全部记录（本包仅在其后追加，未覆盖）",
     "yx-erp/yxerp-ui/.noon-preview-vite.config.js 未跟踪演示配置（保留）"
   ],
-  "generated_at": "2026-11-21T19:13:35+08:00"
+  "generated_at": "2026-11-21T19:26:11+08:00"
 }

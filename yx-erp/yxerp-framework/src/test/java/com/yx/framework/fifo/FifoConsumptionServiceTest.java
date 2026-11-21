@@ -583,6 +583,45 @@ class FifoConsumptionServiceTest
     }
 
     @Test
+    void consumptionMoveTypeIsSaleForReversalCompatibility() // Codex 跨服务复核：流水类型须 SALE 而非事件类型 SALE_DELIVERY
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 3);
+        seedEvent("EVT-MT", "AE", raw);
+        assertTrue(service.postDelivery(input("AE", "EVT-MT", item, 11L, 3, raw)).posted());
+        // 事件类型是 SALE_DELIVERY，但落账流水类型必须是 schema 契约 SALE，红冲服务才认 sign=+1 的 SALE 原行。
+        assertEquals("SALE", jdbc.queryForObject("select move_type from inv_batch_consumption", String.class));
+        assertEquals(1, jdbc.queryForObject("select sign from inv_batch_consumption", Integer.class));
+        // 历史兼容：sumPostedOnItem 以 move_type=SALE 统计，第二次妥投仍能读到已投 3，累计 6<=10 通过。
+        String raw2 = payload(item, 11L, 3);
+        seedEvent("EVT-MT2", "AE", raw2);
+        assertTrue(service.postDelivery(input("AE", "EVT-MT2", item, 11L, 3, raw2)).posted(),
+                "move_type=SALE 历史流水应被累计统计正确读取");
+        assertEquals(6, jdbc.queryForObject("select sum(qty) from inv_batch_consumption", Integer.class));
+    }
+
+    @Test
+    void missingLedgerQuarantinedWithNoPartialWrite() // Codex 跨服务复核：台账不存在应隔离而非 EmptyResultDataAccessException
+    {
+        long order = seedOrder("AE", "O-1");
+        long item = seedItem(order, 11L, 10);
+        // 故意不 seed 台账：批次存在但台账行缺失。
+        long batch = seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 10, "10.0000");
+        String raw = payload(item, 11L, 2);
+        seedEvent("EVT-NL", "AE", raw);
+        Result r = service.postDelivery(input("AE", "EVT-NL", item, 11L, 2, raw));
+        assertFalse(r.posted(), "台账缺失应隔离不抛异常");
+        assertEquals("LEDGER_SHORTAGE", r.reasonCode());
+        assertEquals(1, count("noon_fifo_review"), "应写隔离记录而非异常回滚");
+        assertEquals(0, count("inv_batch_consumption"), "无部分写入");
+        assertEquals(10, jdbc.queryForObject("select qty_remaining from inv_batch where id=?", Integer.class, batch),
+                "批次未扣");
+    }
+
+    @Test
     void auditWrittenOnPostAndQuarantine()
     {
         long order = seedOrder("AE", "O-1");

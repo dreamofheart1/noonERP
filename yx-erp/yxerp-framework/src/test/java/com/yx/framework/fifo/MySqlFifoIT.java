@@ -34,6 +34,8 @@ import com.yx.common.core.domain.model.LoginUser;
 import com.yx.framework.fifo.FifoConsumptionService.DeliveryInput;
 import com.yx.framework.fifo.FifoConsumptionService.DeliveryLine;
 import com.yx.framework.fifo.FifoConsumptionService.Result;
+import com.yx.framework.reversal.ReversalService;
+import com.yx.framework.reversal.ReversalService.ReversalInput;
 import com.yx.framework.security.site.SiteAuthGuard;
 import com.yx.system.mapper.SysUserSiteMapper;
 
@@ -47,6 +49,7 @@ class MySqlFifoIT
     private AnnotationConfigApplicationContext context;
     private JdbcTemplate jdbc;
     private FifoConsumptionService service;
+    private ReversalService reversalService;
 
     private static DataSource serverDataSource()
     {
@@ -74,13 +77,23 @@ class MySqlFifoIT
             if (!t.isBlank()) jdbc.execute(t);
         }
 
-        // 真实 schema DDL：sal_order / sal_order_item / inv_batch / inv_batch_consumption / inv_stock_ledger / int_webhook_event。
+        // 红冲隔离层 DDL（端到端：FIFO 流水 → 退货 → 红冲，失败时隔离落点须存在）。
+        String reversalReviewSql = Files.readString(Path.of("../sql/noon_reversal_review.sql"));
+        for (String s : reversalReviewSql.split(";"))
+        {
+            String t = stripComments(s);
+            if (!t.isBlank()) jdbc.execute(t);
+        }
+
+        // 真实 schema DDL：sal_order / sal_order_item / inv_batch / inv_batch_consumption /
+        // inv_stock_ledger / int_webhook_event / sal_return（端到端可信父退货）。
         String schema = Files.readString(Path.of("../../docs/noon-erp-schema-v0.5.sql"));
         for (String table : new String[]{"sal_order", "sal_order_item", "inv_batch", "inv_batch_consumption",
-                "inv_stock_ledger", "int_webhook_event"})
+                "inv_stock_ledger", "int_webhook_event", "sal_return"})
             jdbc.execute(extractCreateTable(schema, table));
 
         service = context.getBean(FifoConsumptionService.class);
+        reversalService = context.getBean(ReversalService.class);
         login(1L);
     }
 
@@ -189,6 +202,31 @@ class MySqlFifoIT
     }
 
     private int count(String table) { return jdbc.queryForObject("select count(*) from " + table, Integer.class); }
+
+    /** 端到端：建真实 sal_return 父退货（真实 DDL 必填字段齐备），返回其 id。 */
+    private long seedReturn(String site, long sku, long itemId, int qty)
+    {
+        jdbc.update("insert into sal_return(return_no,biz_return_key,order_no,site_code,sku_id,qty,"
+                        + "sal_order_item_id,status) values (?,?,?,?,?,?,?,'OPEN')",
+                "R:" + UUID.randomUUID(), "BR:" + UUID.randomUUID(), "O:" + UUID.randomUUID(),
+                site, sku, qty, itemId);
+        return jdbc.queryForObject("select id from sal_return where sku_id=? and qty=? order by id desc limit 1",
+                Long.class, sku, qty);
+    }
+
+    /** 端到端：种系统侧红冲事件（内部契约 RETURN_REVERSAL），payload 与红冲入参同内容。 */
+    private void seedReversalEvent(String eventId, String site, String payload)
+    {
+        jdbc.update("insert into int_webhook_event(event_id,event_type,site_code,payload_raw,received_at,status) "
+                        + "values (?,'RETURN_REVERSAL',?,?,current_timestamp(3),'PROCESSED')",
+                eventId, site, payload);
+    }
+
+    private static String reversalPayload(long returnId, long originalId, int qty, long sku)
+    {
+        return "{\"sal_return_id\":" + returnId + ",\"reversal_of_id\":" + originalId
+                + ",\"qty\":" + qty + ",\"sku_id\":" + sku + "}";
+    }
 
     @Test
     void fifoOrderAndConservationOnRealSchema()
@@ -333,6 +371,66 @@ class MySqlFifoIT
         assertEquals(20, jdbc.queryForObject("select qty_available from inv_stock_ledger", Integer.class), "台账未扣");
     }
 
+    @Test
+    void fifoProducesSaleFlowThenReversalPostsAcrossBatchesAndRetransmitOnRealSchema()
+    {
+        // 端到端（Codex 跨服务复核）：不造 SALE 原行夹具，原行必须由 FIFO 真实产出。
+        long order = seedOrder("AE", "O-E2E");
+        long item = seedItem(order, 11L, 10);
+        seedLedger("AE", 11L, 100L, 20);
+        seedBatch("AE", 11L, 100L, "2026-11-01 00:00:00", 5, "10.0000");
+        seedBatch("AE", 11L, 100L, "2026-11-05 00:00:00", 5, "12.0000");
+        String saleRaw = payload(item, 11L, 6);
+        seedEvent("EVT-E2E-SALE", "AE", saleRaw);
+        Result sale = service.postDelivery(input("AE", "EVT-E2E-SALE", item, 11L, 6, saleRaw));
+        assertTrue(sale.posted(), "FIFO 出库应先过账");
+        // FIFO 产出的流水必须是 schema 契约 SALE（红冲原行校验接受的值），且跨批 2 行。
+        assertEquals(2, count("inv_batch_consumption"));
+        assertEquals(0, jdbc.queryForObject(
+                "select count(*) from inv_batch_consumption where move_type<>'SALE' or sign<>1", Integer.class),
+                "FIFO 流水 move_type 必须 SALE，才能被红冲接受");
+        // 取 FIFO 真实产出的两条原消耗行（跨批 5+1），逐条红冲，不再手工造 SALE 夹具。
+        List<Long> originalIds = jdbc.queryForList(
+                "select id from inv_batch_consumption where move_type='SALE' and sign=1 order by id", Long.class);
+        assertEquals(2, originalIds.size());
+        long firstOriginal = originalIds.get(0);   // 老批 5 件，unit_cost=10
+        long secondOriginal = originalIds.get(1);  // 新批 1 件，unit_cost=12
+
+        // 可信父退货（真实 sal_return DDL；站点/SKU/订单行与 FIFO 流水一致）。
+        long ret = seedReturn("AE", 11L, item, 6);
+
+        // 批次1 红冲 3 件：FIFO 原行 → 红冲应过账（若 move_type=SALE_DELIVERY 会判 ORIGINAL_NOT_SALE）。
+        String r1 = reversalPayload(ret, firstOriginal, 3, 11L);
+        seedReversalEvent("EVT-E2E-REV1", "AE", r1);
+        ReversalService.Result rev1 = reversalService.postReversal(
+                new ReversalInput("AE", "EVT-E2E-REV1", ret, firstOriginal, 3, r1));
+        assertTrue(rev1.posted(), "FIFO 产出的 SALE 原行应可红冲，实际 reason=" + rev1.reasonCode());
+
+        // 同事件重传：应 ACK 而非双计（biz_event_key=REV:event 幂等）。
+        ReversalService.Result again = reversalService.postReversal(
+                new ReversalInput("AE", "EVT-E2E-REV1", ret, firstOriginal, 3, r1));
+        assertTrue(again.posted(), "重传应 ACK");
+        assertEquals(3, jdbc.queryForObject(
+                "select coalesce(sum(qty),0) from inv_batch_consumption where reversal_of_id=? and sign=-1",
+                Integer.class, firstOriginal), "重传不双计");
+
+        // 跨批：红冲第二条 FIFO 原行 1 件，验证跨批原行同样可冲。
+        String r2 = reversalPayload(ret, secondOriginal, 1, 11L);
+        seedReversalEvent("EVT-E2E-REV2", "AE", r2);
+        ReversalService.Result rev2 = reversalService.postReversal(
+                new ReversalInput("AE", "EVT-E2E-REV2", ret, secondOriginal, 1, r2));
+        assertTrue(rev2.posted(), "跨批第二条 FIFO 原行应可红冲，实际 reason=" + rev2.reasonCode());
+
+        // 红冲流水落账：sign=-1、move_type=RETURN_REVERSAL、金额按各自批次单位成本；累计不超退货单 qty。
+        assertEquals(2, jdbc.queryForObject(
+                "select count(*) from inv_batch_consumption where sign=-1", Integer.class),
+                "2 条红冲流水（批1 一次 + 重传不新增 + 批2 一次）");
+        assertEquals(4, jdbc.queryForObject(
+                "select coalesce(sum(qty),0) from inv_batch_consumption where sal_return_id=? and sign=-1",
+                Integer.class, ret), "累计红冲 3+1=4 <= 退货 qty 6");
+        assertEquals(0, count("noon_reversal_review"), "全链路合法不应进红冲隔离层");
+    }
+
     @Configuration
     @EnableTransactionManagement(proxyTargetClass = true)
     static class MysqlConfig
@@ -372,6 +470,12 @@ class MySqlFifoIT
         FifoConsumptionService fifoConsumptionService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard)
         {
             return new FifoConsumptionService(jdbcTemplate, guard);
+        }
+
+        @Bean
+        ReversalService reversalService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard)
+        {
+            return new ReversalService(jdbcTemplate, guard);
         }
     }
 }

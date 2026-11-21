@@ -41,6 +41,13 @@ import com.yx.framework.security.site.SiteAuthGuard;
  * 逐行 FIFO 选批（当前读锁） → 批次/台账/妥投量守恒 → 写 SALE 消耗流水 + 扣批次 + 扣台账
  * + 同步 qty_delivered → 审计，全程同事务。
  *
+ * <p><b>事件类型 vs 流水类型（跨服务契约，Codex 跨包复核）</b>：
+ * {@code event_type=SALE_DELIVERY} 是系统侧内部事件身份，仅供 {@code int_webhook_event} 佐证；
+ * 写入 {@code inv_batch_consumption.move_type} 的是业务流水类型 {@code SALE}（schema v0.5 合法枚举：
+ * SALE/RETURN_LOSS/STOCKTAKE/TRANSFER_SHORT/RETURN_REVERSAL）。两者语义不同必须解耦，若把事件类型
+ * 当流水类型写入 {@code SALE_DELIVERY}，红冲服务原行校验（sign=+1 && move_type='SALE'）必判
+ * ORIGINAL_NOT_SALE，FIFO 产出行将无法红冲。
+ *
  * <p><b>守恒契约（Codex 阶段一静态复核四点已整改）</b>：
  * <ul>
  * <li>FIFO 按 {@code received_at ASC, id ASC} 只选<b>请求站点</b>下 {@code status='OPEN'} 且
@@ -65,8 +72,15 @@ import com.yx.framework.security.site.SiteAuthGuard;
 @Service
 public class FifoConsumptionService
 {
-    /** 系统侧内部事件类型契约（非 Noon 平台原生事件类型）。 */
+    /** 系统侧内部事件类型契约（非 Noon 平台原生事件类型）：仅用于 int_webhook_event.event_type 佐证。 */
     private static final String INTERNAL_EVENT_TYPE = "SALE_DELIVERY";
+
+    /**
+     * 业务流水类型：写入 inv_batch_consumption.move_type，取 schema v0.5 合法枚举 SALE。
+     * 事件类型与流水类型解耦——红冲服务仅接受 sign=+1 且 move_type='SALE' 的原行，
+     * 故 FIFO 出库流水必须以 SALE 落账，否则跨包红冲必失败（Codex 跨服务复核）。
+     */
+    private static final String CONSUMPTION_MOVE_TYPE = "SALE";
 
     public enum Outcome
     {
@@ -198,10 +212,13 @@ public class FifoConsumptionService
             if (freeInBatch <= 0) continue;
             int take = Math.min(remaining, freeInBatch);
             // 台账可用量当前读预判（写入前判定）：扣除本单已规划占用后仍不足则整单隔离，无部分写入。
+            // 用 queryForList 显式判空：queryForObject 在台账行不存在时抛 EmptyResultDataAccessException，
+            // 会绕过 LEDGER_SHORTAGE 隔离变成异常回滚（不写隔离记录）；缺台账按可用量 0 处理并隔离。
             LedgerKey key = new LedgerKey(line.skuId(), batch.warehouseId(), in.siteCode());
-            Integer avail = jdbc.queryForObject("select qty_available from inv_stock_ledger "
+            List<Integer> availRows = jdbc.queryForList("select qty_available from inv_stock_ledger "
                             + "where sku_id=? and warehouse_id=? and site_code=?",
                     Integer.class, line.skuId(), batch.warehouseId(), in.siteCode());
+            Integer avail = availRows.isEmpty() ? null : availRows.get(0);
             int freeInLedger = (avail == null ? 0 : avail) - allocatedPerLedger.getOrDefault(key, 0);
             if (freeInLedger < take)
                 return quarantine(in, "LEDGER_SHORTAGE",
@@ -290,7 +307,7 @@ public class FifoConsumptionService
                 ps.setBigDecimal(8, batch.unitCost());
                 ps.setBigDecimal(9, amount);
                 ps.setTimestamp(10, Timestamp.valueOf(now));
-                ps.setString(11, INTERNAL_EVENT_TYPE);
+                ps.setString(11, CONSUMPTION_MOVE_TYPE); // SALE：与红冲服务原行校验同一契约
                 ps.setInt(12, 1); // SALE 正常扣减
                 ps.setString(13, periodOf(now));
                 ps.setInt(14, 0);
@@ -358,7 +375,7 @@ public class FifoConsumptionService
         for (Map<String, Object> row : jdbc.queryForList(
                 "SELECT id,qty FROM inv_batch_consumption "
                         + "WHERE sal_order_item_id=? AND move_type=? AND sign=1 ORDER BY id FOR UPDATE",
-                salOrderItemId, INTERNAL_EVENT_TYPE))
+                salOrderItemId, CONSUMPTION_MOVE_TYPE))
             total += ((Number) row.get("qty")).longValue();
         return total;
     }

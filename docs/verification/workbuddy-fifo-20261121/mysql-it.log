@@ -1,5 +1,5 @@
-NOON-20261121-FIFO 隔离 MySQL 8.4 集成验证（Codex 阶段一复核整改后重跑）
-隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-fifo-05ajtgo2
-MySQL JUnit: tests=8 errors=0 failures=0 skipped=0
+NOON-20261121-FIFO 隔离 MySQL 8.4 集成验证（Codex 跨服务复核整改后重跑，含 FIFO→退货→红冲端到端）
+隔离验证目录：/var/folders/q3/xmmb5mkd791161yj31xzhf9h0000gn/T/noon-fifo-bmc67utx
+MySQL JUnit: tests=9 errors=0 failures=0 skipped=0
 maven_exit=0
 BUILD SUCCESS
