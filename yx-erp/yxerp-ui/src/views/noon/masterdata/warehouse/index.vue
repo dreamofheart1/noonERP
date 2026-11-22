@@ -1,6 +1,7 @@
 <template>
   <div class="app-container">
   <el-alert :title="`当前站点：${siteLabel} · 仓库绑定站点与履约模式；创建后站点/履约模式不可变`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+  <el-alert title="FBN 官方仓在此仅为系统内部记录（warehouse_type=FBN、is_fbn=1），用于采购直发入仓的库存归属；不代表已在 Noon 平台创建仓库或预约入仓。" type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
 
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="110px">
         <el-form-item label="仓库编码" prop="warehouseCode">

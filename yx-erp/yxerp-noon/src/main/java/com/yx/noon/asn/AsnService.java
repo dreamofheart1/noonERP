@@ -57,6 +57,14 @@ import org.springframework.transaction.annotation.Transactional;
  * 行（{@code log_asn_item}）与源批次服务端带出；{@code operatorId} 入参仅结构保留，实际取
  * {@link SiteAuthGuard#requireCurrentUserId()}。
  *
+ * <p><b>M6 采购直发 FBN（契约 {@code docs/verification/m6-direct-fbn/contract.md} §3）</b>：
+ * {@code log_asn.source_mode='DIRECT_PURCHASE'} 时无本地源批次——
+ * create 以 {@code pur_order_item_id} 为源，校验采购明细同站/已收货/防超发（已收 − 已建直发 ASN），
+ * 生成父批次号 {@code DP:<poItemId>:<uuid8>}；seal 在 FBN 仓建 {@code DIRECT_PURCHASE/CLOSED/剩余 0}
+ * 成本父批次（成本取 {@code noon_m3_receipt.unit_cost_cny}），复用 {@code insertChildBatch} 拆在途子批次，
+ * 台账<b>只加</b> FBN 在途、不写 {@code ASN_OUT}、不扣源仓；receive 完全复用（实收后才产生可用）。
+ * {@code LOCAL_BATCH}（含空 sourceMode）路径与原 M4 实现逐字节一致（指纹同口径）。
+ *
  * <p><b>与契约字面差异（均在报告裁决点标注）</b>：
  * <ol>
  *   <li>类非 {@code final}：{@code @Transactional} 依赖 CGLIB 代理，final 类无法被代理（与既有
@@ -80,12 +88,18 @@ public class AsnService
     private static final int ASN_NO_ATTEMPTS = 3;
 
     private static final String CHILD_BATCH_PREFIX = "B:ASN:";
+    private static final String DIRECT_BATCH_PREFIX = "DP:";
     private static final String MOVE_NO_PREFIX = "AM:";
     private static final String CONSUMPTION_NO_PREFIX = "AS:";
     private static final String SHORT_EVENT_KEY_PREFIX = "ASNSHORT:";
     private static final String REF_DOC_TYPE = "ASN";
     private static final String SPLIT_REASON = "ASN_TRANSIT";
     private static final String SOURCE_TYPE_SPLIT = "TRANSFER_SPLIT";
+    /** M6 §2.3 直发父批次来源类型（成本载体，CLOSED，不参与 FIFO/可用）。 */
+    private static final String SOURCE_TYPE_DIRECT_PURCHASE = "DIRECT_PURCHASE";
+    /** 直发父批次成本取自 {@code noon_m3_receipt.unit_cost_cny}（已是 CNY，不重估汇率）。 */
+    private static final String CURRENCY_CNY = "CNY";
+    private static final BigDecimal FX_CNY = BigDecimal.ONE;
 
     private static final String STATUS_DRAFT = "DRAFT";
     private static final String STATUS_SEALED = "SEALED";
@@ -126,6 +140,8 @@ public class AsnService
         String siteCode = AsnRules.siteCode("siteCode", in.siteCode());
         String warehouseCode = AsnRules.warehouseCode(in.warehouseCode());
         String requestId = AsnRules.requireRequestId(in.requestId());
+        // §3.1 空/空白 → LOCAL_BATCH（旧调用零改动）；非法值 400。
+        String sourceMode = AsnRules.sourceMode(in.sourceMode());
 
         Long operatorId = guard.requireCurrentUserId();
 
@@ -133,11 +149,16 @@ public class AsnService
         guard.requireSite(siteCode);
         WarehouseRef fbn = requireFbnWarehouse(warehouseCode, siteCode);
 
+        // M6 §3.2 采购直发分支：无本地源批次，成本/数量以采购收货为准。
+        if (AsnRules.SOURCE_MODE_DIRECT_PURCHASE.equals(sourceMode))
+            return createDirect(in.lines(), siteCode, fbn, requestId, operatorId);
+
         // §4.2 行结构校验（排序去重、qty>0、SKU ACTIVE、批次存在/OPEN/站点/SKU/仓库 ACTIVE）。
         List<AsnCreateLine> lines = requireCreateLines(in.lines());
 
         // §4.3 指纹先于重放判定（授权 > 指纹 > DONE 重放 > 源批次校验 > 占位）。
-        String fingerprint = AsnRules.createFingerprint(siteCode, fbn.warehouseCode(), lines);
+        String fingerprint = AsnRules.createFingerprint(siteCode, fbn.warehouseCode(),
+                AsnRules.SOURCE_MODE_LOCAL_BATCH, lines);
         AsnResult replayed = replayDoneCreate(requestId, fingerprint);
         if (replayed != null) return replayed;
 
@@ -151,7 +172,7 @@ public class AsnService
 
         LocalDateTime now = AsnRules.now();
         // §4.4 单号服务端生成 ASN:<SITE>:<UUID8 大写>；uk_asn_no 兜重（撞键换号重试）。
-        long asnId = insertAsn(siteCode, fbn.warehouseCode(), now);
+        long asnId = insertAsn(siteCode, fbn.warehouseCode(), AsnRules.SOURCE_MODE_LOCAL_BATCH, now);
 
         int totalQty = 0;
         for (int i = 0; i < lines.size(); i++)
@@ -167,6 +188,58 @@ public class AsnService
 
         audit.record(AUDIT_BIZ_TYPE, String.valueOf(asnId), ACTION_CREATE,
                 "asnNo=" + asnNo + ",site=" + siteCode + ",fbn=" + fbn.warehouseCode()
+                        + ",lines=" + lines.size() + ",qty=" + totalQty,
+                operatorId);
+
+        AsnResult result = new AsnResult(asnId, asnNo, false, ACTION_CREATE, List.of());
+        markDone(requestId, ACTION_CREATE, asnId, result);
+        return result;
+    }
+
+    /**
+     * M6 §3.2 采购直发建单：每行以 {@code purOrderItemId} 为源，校验同站/存在/已收货/防超发后，
+     * 生成父批次号 {@code DP:<poItemId>:<uuid8>} 写入 {@code log_asn_item.batch_no} 与
+     * {@code pur_order_item_id}。不动批次/台账/流水/消耗（成本在 seal 时以收货记录建父批次）。
+     */
+    private AsnResult createDirect(List<AsnCreateLine> rawLines, String siteCode, WarehouseRef fbn,
+                                   String requestId, Long operatorId)
+    {
+        List<AsnCreateLine> lines = requireDirectCreateLines(rawLines);
+        // 按 purOrderItemId 升序落库并加锁，并发直发同一明细时串行化「已发量」判定，也避免行锁交叉死锁。
+        lines = new ArrayList<>(lines);
+        lines.sort(Comparator.comparingLong(AsnCreateLine::purOrderItemId));
+
+        String fingerprint = AsnRules.createFingerprint(siteCode, fbn.warehouseCode(),
+                AsnRules.SOURCE_MODE_DIRECT_PURCHASE, lines);
+        AsnResult replayed = replayDoneCreate(requestId, fingerprint);
+        if (replayed != null) return replayed;
+
+        List<DirectSource> sources = new ArrayList<>(lines.size());
+        for (AsnCreateLine line : lines)
+            sources.add(requireDirectSource(line, siteCode));
+
+        replayed = claimCreate(requestId, operatorId, siteCode, fingerprint);
+        if (replayed != null) return replayed;
+
+        LocalDateTime now = AsnRules.now();
+        long asnId = insertAsn(siteCode, fbn.warehouseCode(), AsnRules.SOURCE_MODE_DIRECT_PURCHASE, now);
+
+        int totalQty = 0;
+        for (int i = 0; i < lines.size(); i++)
+        {
+            AsnCreateLine line = lines.get(i);
+            DirectSource source = sources.get(i);
+            jdbc.update("INSERT INTO log_asn_item(asn_id,sku_id,pur_order_item_id,partner_sku,batch_no,"
+                            + "qty_shipped,qty_received,diff_qty,created_at) VALUES(?,?,?,?,?,?,0,0,?)",
+                    asnId, source.skuId(), source.purOrderItemId(), line.partnerSku(), source.batchNo(),
+                    line.qtyShipped(), now);
+            totalQty += line.qtyShipped();
+        }
+        String asnNo = jdbc.queryForObject("SELECT asn_no FROM log_asn WHERE id=?", String.class, asnId);
+
+        audit.record(AUDIT_BIZ_TYPE, String.valueOf(asnId), ACTION_CREATE,
+                "asnNo=" + asnNo + ",site=" + siteCode + ",fbn=" + fbn.warehouseCode()
+                        + ",mode=" + AsnRules.SOURCE_MODE_DIRECT_PURCHASE
                         + ",lines=" + lines.size() + ",qty=" + totalQty,
                 operatorId);
 
@@ -214,10 +287,19 @@ public class AsnService
         if (items.isEmpty())
             throw new IllegalArgumentException("ASN 没有任何明细行，不能封单: asnId=" + head.id());
 
+        boolean direct = AsnRules.SOURCE_MODE_DIRECT_PURCHASE.equals(head.sourceMode());
         List<Long> childBatchIds = new ArrayList<>(items.size());
         int totalShipped = 0;
         for (AsnItem item : items)
         {
+            if (direct)
+            {
+                // M6 §3.3 直发封单：FBN 仓建 CLOSED 成本父批次 → 拆在途子批次 → 只加在途、不扣源仓、不写 ASN_OUT。
+                childBatchIds.add(sealDirectItem(head, fbn, item, now));
+                totalShipped += item.qtyShipped();
+                continue;
+            }
+
             SourceBatch source = lockSourceBatch(item.batchNo());
             if (!BATCH_OPEN.equals(source.status()))
                 throw new IllegalArgumentException("源批次状态 " + source.status()
@@ -272,13 +354,90 @@ public class AsnService
             throw new IllegalStateException("ASN 状态并发更新失败，事务整体回滚: asnId=" + head.id());
 
         audit.record(AUDIT_BIZ_TYPE, String.valueOf(head.id()), ACTION_SEAL,
-                "asnNo=" + head.asnNo() + ",fbn=" + fbn.warehouseCode() + ",lines=" + items.size()
+                "asnNo=" + head.asnNo() + ",fbn=" + fbn.warehouseCode()
+                        + (direct ? ",mode=" + AsnRules.SOURCE_MODE_DIRECT_PURCHASE : "")
+                        + ",lines=" + items.size()
                         + ",qty=" + totalShipped + ",children=" + childBatchIds.size(),
                 operatorId);
 
         AsnResult result = new AsnResult(head.id(), head.asnNo(), false, ACTION_SEAL, childBatchIds);
         markDone(requestId, ACTION_SEAL, head.id(), result);
         return result;
+    }
+
+    /**
+     * M6 §3.3 直发封单单行：成本取采购收货 {@code unit_cost_cny}（权威），在 FBN 仓建
+     * {@code DIRECT_PURCHASE}/{@code CLOSED}/{@code qty_remaining=0} 的父批次作为成本载体（不进四态台账、
+     * 不参与 FIFO/可用），再复用 {@link #insertChildBatch} 拆 {@code IN_TRANSIT} 子批次，
+     * 台账<b>只加</b> FBN 在途，不写 {@code ASN_OUT}、不扣任何源仓。
+     *
+     * @return 本次创建的在途子批次 id
+     */
+    private long sealDirectItem(AsnHead head, WarehouseRef fbn, AsnItem item, LocalDateTime now)
+    {
+        Long purOrderItemId = item.purOrderItemId();
+        if (purOrderItemId == null)
+            throw new IllegalArgumentException("直发 ASN 明细缺少采购明细来源: asnItemId=" + item.id());
+
+        PurchaseItem purchase = loadPurchaseItem(purOrderItemId);
+        if (purchase == null)
+            throw new IllegalArgumentException("直发来源采购明细不存在: purOrderItemId=" + purOrderItemId);
+        if (!head.siteCode().equals(purchase.siteCode()))
+            throw new IllegalArgumentException("采购明细站点 " + purchase.siteCode() + " 与 ASN 站点 "
+                    + head.siteCode() + " 不一致（禁止跨站直发）: purOrderItemId=" + purOrderItemId);
+        if (purchase.skuId() != item.skuId())
+            throw new IllegalStateException("采购明细 SKU " + purchase.skuId() + " 与 ASN 行 SKU "
+                    + item.skuId() + " 不一致，数据异常: asnItemId=" + item.id());
+
+        ReceiptCost receipt = requireReceiptCost(purOrderItemId);
+        String batchNo = item.batchNo();
+        if (batchNo == null || batchNo.isBlank())
+            throw new IllegalStateException("直发 ASN 行缺少父批次号，数据异常: asnItemId=" + item.id());
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM inv_batch WHERE batch_no=?", Integer.class, batchNo) > 0)
+            throw new IllegalStateException("直发父批次号已存在（疑似重复封单），拒绝: batchNo=" + batchNo);
+
+        long parentId = insertDirectParentBatch(item, fbn, purOrderItemId, receipt);
+        // 成本载体视图（CLOSED/剩余 0）：仅供 insertChildBatch 继承成本/币种/fx/入库时刻。
+        SourceBatch parent = new SourceBatch(parentId, batchNo, item.skuId(), fbn.id(), fbn.siteCode(), 0,
+                receipt.unitCost(), CURRENCY_CNY, FX_CNY, receipt.receivedAt(), BATCH_CLOSED);
+        long childId = insertChildBatch(item, parent, fbn, head.asnNo(), now);
+
+        // 只加 FBN 在途；无源仓可用扣减（直发不经自有仓）。
+        applyLedger(item.skuId(), fbn.id(), fbn.siteCode(), 0, item.qtyShipped(),
+                "ASN 直发封单加 FBN 在途");
+        return childId;
+    }
+
+    /** 直发父批次（成本载体）：FBN 仓、{@code DIRECT_PURCHASE}、CLOSED、{@code qty_in=发运量}、剩余 0。 */
+    private long insertDirectParentBatch(AsnItem item, WarehouseRef fbn, long purOrderItemId,
+                                         ReceiptCost receipt)
+    {
+        KeyHolder keys = new GeneratedKeyHolder();
+        jdbc.update(con ->
+        {
+            PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO inv_batch(batch_no,sku_id,pur_order_item_id,warehouse_id,site_code,received_at,"
+                            + "qty_in,qty_remaining,unit_cost,currency,fx_rate,source_type,parent_batch_id,"
+                            + "split_seq,split_reason,transfer_no,asn_no,status) "
+                            + "VALUES(?,?,?,?,?,?,?,0,?,?,?,'" + SOURCE_TYPE_DIRECT_PURCHASE + "',"
+                            + "NULL,0,NULL,NULL,NULL,'" + BATCH_CLOSED + "')",
+                    new String[]{"id"});
+            ps.setString(1, item.batchNo());
+            ps.setLong(2, item.skuId());
+            ps.setLong(3, purOrderItemId);
+            ps.setLong(4, fbn.id());
+            ps.setString(5, fbn.siteCode());
+            // FIFO 入库时刻取采购收货时刻（成本可追溯，不重估）。
+            ps.setObject(6, receipt.receivedAt());
+            ps.setInt(7, item.qtyShipped());
+            ps.setBigDecimal(8, AsnRules.money(receipt.unitCost()));
+            ps.setString(9, CURRENCY_CNY);
+            ps.setBigDecimal(10, FX_CNY);
+            return ps;
+        }, keys);
+        Number key = keys.getKey();
+        if (key == null) throw new IllegalStateException("直发父批次未返回主键");
+        return key.longValue();
     }
 
     // ---------------------------------------------------------------- receive
@@ -451,7 +610,8 @@ public class AsnService
         guard.requireSite(head.siteCode());
 
         AsnRow row = jdbc.query(HEAD_SELECT + " WHERE a.id=?", HEAD_MAPPER, asnId).get(0);
-        List<AsnItemRow> items = jdbc.query("SELECT i.id,i.sku_id,i.partner_sku,i.batch_no,i.qty_shipped,"
+        List<AsnItemRow> items = jdbc.query("SELECT i.id,i.sku_id,i.pur_order_item_id,i.partner_sku,i.batch_no,"
+                        + "i.qty_shipped,"
                         + "COALESCE(i.qty_received,0) AS qty_received,COALESCE(i.diff_qty,0) AS diff_qty,"
                         + "c.id AS child_id,c.batch_no AS child_batch_no,c.status AS child_status,"
                         + "c.split_seq AS child_split_seq "
@@ -465,7 +625,7 @@ public class AsnService
 
     /** 列表/详情头查询：带明细计数与计划/实收合计。 */
     private static final String HEAD_SELECT = "SELECT a.id,a.asn_no,a.site_code,a.warehouse_code,a.status,"
-            + "a.sealed_at,a.created_at,"
+            + "a.source_mode,a.sealed_at,a.created_at,"
             + "(SELECT COUNT(*) FROM log_asn_item i WHERE i.asn_id=a.id) AS item_count,"
             + "(SELECT COALESCE(SUM(i.qty_shipped),0) FROM log_asn_item i WHERE i.asn_id=a.id) AS qty_shipped_total,"
             + "(SELECT COALESCE(SUM(i.qty_received),0) FROM log_asn_item i WHERE i.asn_id=a.id) AS qty_received_total "
@@ -481,7 +641,8 @@ public class AsnService
             rs.getObject("qty_shipped_total", Integer.class),
             rs.getObject("qty_received_total", Integer.class),
             toLocal(rs.getTimestamp("sealed_at")),
-            toLocal(rs.getTimestamp("created_at")));
+            toLocal(rs.getTimestamp("created_at")),
+            rs.getString("source_mode"));
 
     private static final RowMapper<AsnItemRow> ITEM_MAPPER = (rs, i) -> new AsnItemRow(
             rs.getLong("id"),
@@ -494,7 +655,8 @@ public class AsnService
             rs.getObject("child_id", Long.class),
             rs.getString("child_batch_no"),
             rs.getString("child_status"),
-            rs.getObject("child_split_seq", Integer.class));
+            rs.getObject("child_split_seq", Integer.class),
+            rs.getObject("pur_order_item_id", Long.class));
 
     private static LocalDateTime toLocal(java.sql.Timestamp timestamp)
     {
@@ -832,9 +994,10 @@ public class AsnService
 
     /**
      * 建号 + 插 DRAFT 头（契约 §4.4）：{@code ASN:<SITE>:<UUID前8大写>}。{@code uk_asn_no}
-     * 兜重，撞键换新号重试（同事务内，最多 3 次）。
+     * 兜重，撞键换新号重试（同事务内，最多 3 次）。{@code source_mode} 显式落库（M6 §2.1），
+     * 本地批次模式写入值与列默认值相同，不改变旧行为。
      */
-    private long insertAsn(String siteCode, String warehouseCode, LocalDateTime now)
+    private long insertAsn(String siteCode, String warehouseCode, String sourceMode, LocalDateTime now)
     {
         for (int attempt = 0; attempt < ASN_NO_ATTEMPTS; attempt++)
         {
@@ -846,14 +1009,15 @@ public class AsnService
                 jdbc.update(con ->
                 {
                     PreparedStatement ps = con.prepareStatement(
-                            "INSERT INTO log_asn(asn_no,site_code,warehouse_code,status,created_at) "
-                                    + "VALUES(?,?,?,?,?)",
+                            "INSERT INTO log_asn(asn_no,site_code,warehouse_code,status,source_mode,created_at) "
+                                    + "VALUES(?,?,?,?,?,?)",
                             new String[]{"id"});
                     ps.setString(1, asnNo);
                     ps.setString(2, siteCode);
                     ps.setString(3, warehouseCode);
                     ps.setString(4, STATUS_DRAFT);
-                    ps.setObject(5, now);
+                    ps.setString(5, sourceMode);
+                    ps.setObject(6, now);
                     return ps;
                 }, keys);
             }
@@ -922,6 +1086,152 @@ public class AsnService
                     + "，status=" + rows.get(0));
     }
 
+    // ------------------------------------------------------ 采购直发（M6 §3.2）
+
+    /**
+     * 直发行结构校验：至少 1 行；{@code purOrderItemId} 必填正整数；
+     * {@code qtyShipped > 0}；同一采购明细不得重复提交；{@code skuId} 可空（传则须 ≥1，落库时以采购明细为准）；
+     * {@code partnerSku} trim 后空白 → null、≤128；{@code batchNo} 忽略（服务端生成）。
+     */
+    private static List<AsnCreateLine> requireDirectCreateLines(List<AsnCreateLine> lines)
+    {
+        if (lines == null || lines.isEmpty())
+            throw new IllegalArgumentException("至少需要提交 1 行 ASN 明细");
+        Set<Long> seen = new LinkedHashSet<>();
+        List<AsnCreateLine> normalized = new ArrayList<>(lines.size());
+        for (AsnCreateLine line : lines)
+        {
+            if (line == null) throw new IllegalArgumentException("ASN 明细行不能为空");
+            AsnRules.requiredId("purOrderItemId", line.purOrderItemId());
+            if (line.skuId() != null) AsnRules.requiredId("skuId", line.skuId());
+            if (line.qtyShipped() == null || line.qtyShipped() <= 0)
+                throw new IllegalArgumentException("qtyShipped 必须大于 0");
+            String partnerSku = line.partnerSku() == null ? null : line.partnerSku().trim();
+            if (partnerSku != null && partnerSku.isEmpty()) partnerSku = null;
+            if (partnerSku != null && partnerSku.length() > 128)
+                throw new IllegalArgumentException("partnerSku 长度不能超过 128");
+            if (!seen.add(line.purOrderItemId()))
+                throw new IllegalArgumentException("同一采购明细不能重复提交: purOrderItemId="
+                        + line.purOrderItemId());
+            normalized.add(new AsnCreateLine(line.skuId(), null, line.qtyShipped(), partnerSku,
+                    line.purOrderItemId()));
+        }
+        return normalized;
+    }
+
+    /**
+     * 直发来源校验（M6 §3.2 步骤 1–3）：采购明细存在且<b>同站</b>、SKU ACTIVE、该明细已收货
+     * （{@code qtyReceived > 0}）、且 {@code qtyShipped ≤ qtyReceived − 已建直发 ASN 合计}。
+     *
+     * <p>{@code pur_order_item} 行 FOR UPDATE：并发建单同一明细串行化「已发量」判定，避免双开超发；
+     * 采购单单独读取（避免 H2 对 join + FOR UPDATE 的限制），站点不一致 400。
+     * 生成父批次号 {@code DP:<poItemId>:<uuid8>}（契约 §2.2，create 时锁定，seal 时据它建父批次）。
+     */
+    private DirectSource requireDirectSource(AsnCreateLine line, String siteCode)
+    {
+        long purOrderItemId = line.purOrderItemId();
+        PurchaseItem purchase = lockPurchaseItem(purOrderItemId);
+        if (purchase == null)
+            throw new IllegalArgumentException("采购明细不存在: purOrderItemId=" + purOrderItemId);
+        if (!siteCode.equals(purchase.siteCode()))
+            throw new IllegalArgumentException("采购明细属于站点 " + purchase.siteCode() + "，与 ASN 站点 "
+                    + siteCode + " 不一致（禁止跨站直发）: purOrderItemId=" + purOrderItemId);
+        if (line.skuId() != null && line.skuId() != purchase.skuId())
+            throw new IllegalArgumentException("采购明细 SKU " + purchase.skuId() + " 与提交 SKU "
+                    + line.skuId() + " 不一致: purOrderItemId=" + purOrderItemId);
+        requireActiveSku(purchase.skuId());
+
+        long qtyReceived = receiptQtyReceived(purOrderItemId);
+        if (qtyReceived <= 0)
+            throw new IllegalArgumentException("采购明细尚未收货，无法直发: purOrderItemId=" + purOrderItemId);
+        // D1：权威成本必须可取（seal 建父批次复用同一取数口径，缺失即无法追溯）。
+        requireReceiptCost(purOrderItemId);
+        long alreadyShipped = directShippedQty(purOrderItemId);
+        long available = qtyReceived - alreadyShipped;
+        if (line.qtyShipped() > available)
+            throw new IllegalArgumentException("直发量超过可发量: purOrderItemId=" + purOrderItemId
+                    + "，已收货=" + qtyReceived + "，已建直发 ASN=" + alreadyShipped
+                    + "，可发=" + Math.max(available, 0) + "，本次=" + line.qtyShipped());
+
+        return new DirectSource(purOrderItemId, purchase.skuId(),
+                DIRECT_BATCH_PREFIX + purOrderItemId + ":" + uuid8());
+    }
+
+    /** 采购明细行（FOR UPDATE，单表锁避免 H2 join+FOR UPDATE 限制）+ 采购单站点一并带出。 */
+    private PurchaseItem lockPurchaseItem(long purOrderItemId)
+    {
+        List<PurchaseItem> rows = jdbc.query("SELECT id,sku_id,pur_order_id FROM pur_order_item "
+                        + "WHERE id=? FOR UPDATE",
+                (rs, i) -> new PurchaseItem(rs.getLong("id"), rs.getLong("sku_id"),
+                        rs.getLong("pur_order_id"), null), purOrderItemId);
+        if (rows.isEmpty()) return null;
+        PurchaseItem item = rows.get(0);
+        List<String> sites = jdbc.query("SELECT site_code FROM pur_order WHERE id=?",
+                (rs, i) -> rs.getString("site_code"), item.purOrderId());
+        if (sites.isEmpty())
+            throw new IllegalStateException("采购明细的采购单不存在，数据异常: purOrderItemId="
+                    + purOrderItemId + "，purOrderId=" + item.purOrderId());
+        return new PurchaseItem(item.id(), item.skuId(), item.purOrderId(), sites.get(0));
+    }
+
+    private PurchaseItem loadPurchaseItem(long purOrderItemId)
+    {
+        List<PurchaseItem> rows = jdbc.query("SELECT i.id,i.sku_id,i.pur_order_id,o.site_code "
+                        + "FROM pur_order_item i JOIN pur_order o ON o.id=i.pur_order_id WHERE i.id=?",
+                (rs, i) -> new PurchaseItem(rs.getLong("id"), rs.getLong("sku_id"),
+                        rs.getLong("pur_order_id"), rs.getString("site_code")), purOrderItemId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /** 该采购明细累计收货量（{@code noon_m3_receipt.qty} 合计，append-only）。 */
+    private long receiptQtyReceived(long purOrderItemId)
+    {
+        Long qty = jdbc.queryForObject("SELECT COALESCE(SUM(qty),0) FROM noon_m3_receipt "
+                + "WHERE order_item_id=?", Long.class, purOrderItemId);
+        return qty == null ? 0L : qty;
+    }
+
+    /**
+     * 权威收货成本（D1）：该明细<b>最早一笔</b>收货的 {@code unit_cost_cny} 与 {@code received_at}。
+     * 契约 §5.1 的「严格按收货行 FIFO 绑定」需新增 {@code asn_item.receipt_id}，v1 取最早一笔并保持稳定
+     * （同一明细多次建单成本一致，可追溯，不重估）。
+     */
+    private ReceiptCost requireReceiptCost(long purOrderItemId)
+    {
+        List<ReceiptCost> rows = jdbc.query("SELECT unit_cost_cny,received_at FROM noon_m3_receipt "
+                        + "WHERE order_item_id=? ORDER BY received_at,id LIMIT 1",
+                (rs, i) -> new ReceiptCost(rs.getBigDecimal("unit_cost_cny"),
+                        rs.getTimestamp("received_at").toLocalDateTime()), purOrderItemId);
+        if (rows.isEmpty())
+            throw new IllegalArgumentException("采购明细缺少收货记录，无法继承直发成本: purOrderItemId="
+                    + purOrderItemId);
+        return rows.get(0);
+    }
+
+    /**
+     * 该采购明细已建直发 ASN 的发运量合计（DRAFT/SEALED/RECEIVED 全部计入，防重复/超发；
+     * 契约 §3.2 步骤 3）。
+     *
+     * <p>用<b>锁定读</b>（单表 {@code FOR UPDATE}）：{@code pur_order_item_id} 只由直发 create 写入
+     * （本地批次模式恒为 NULL），且 {@code log_asn} 无取消状态，故按该列求和即等价于
+     * {@code source_mode='DIRECT_PURCHASE'} 且状态 DRAFT/SEALED/RECEIVED。锁定读绕过 RR 快照，
+     * 能看到已提交的并发直发单，避免「锁等待后仍按旧快照判量」导致超发。
+     */
+    private long directShippedQty(long purOrderItemId)
+    {
+        List<Integer> shipped = jdbc.query("SELECT qty_shipped FROM log_asn_item "
+                        + "WHERE pur_order_item_id=? FOR UPDATE",
+                (rs, i) -> rs.getInt("qty_shipped"), purOrderItemId);
+        long total = 0L;
+        for (Integer qty : shipped) total += qty == null ? 0 : qty;
+        return total;
+    }
+
+    private static String uuid8()
+    {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    }
+
     // ---------------------------------------------------------------- internals
 
     /** FBN 目标仓（契约 §4.1）：按 (warehouseCode, siteCode) 解析，必须存在、ACTIVE、is_fbn=1 或 type=FBN。 */
@@ -976,7 +1286,7 @@ public class AsnService
 
     private AsnHead lockAsn(long asnId)
     {
-        List<AsnHead> rows = jdbc.query("SELECT id,asn_no,site_code,warehouse_code,status,sealed_at "
+        List<AsnHead> rows = jdbc.query("SELECT id,asn_no,site_code,warehouse_code,status,source_mode,sealed_at "
                         + "FROM log_asn WHERE id=? FOR UPDATE",
                 AsnService::mapHead, asnId);
         if (rows.isEmpty()) throw new IllegalArgumentException("ASN 不存在: asnId=" + asnId);
@@ -985,7 +1295,7 @@ public class AsnService
 
     private AsnHead loadAsnOrNull(long asnId)
     {
-        List<AsnHead> rows = jdbc.query("SELECT id,asn_no,site_code,warehouse_code,status,sealed_at "
+        List<AsnHead> rows = jdbc.query("SELECT id,asn_no,site_code,warehouse_code,status,source_mode,sealed_at "
                         + "FROM log_asn WHERE id=?", AsnService::mapHead, asnId);
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -994,15 +1304,17 @@ public class AsnService
     {
         return new AsnHead(rs.getLong("id"), rs.getString("asn_no"), rs.getString("site_code"),
                 rs.getString("warehouse_code"), rs.getString("status"),
-                toLocal(rs.getTimestamp("sealed_at")));
+                rs.getString("source_mode"), toLocal(rs.getTimestamp("sealed_at")));
     }
 
     /** ASN 全部明细行（FOR UPDATE，按 id 升序）：整单封单，逐行锁定后逐行发运。 */
     private List<AsnItem> lockItems(long asnId)
     {
-        return jdbc.query("SELECT id,sku_id,batch_no,qty_shipped,COALESCE(qty_received,0) AS qty_received "
+        return jdbc.query("SELECT id,sku_id,pur_order_item_id,batch_no,qty_shipped,"
+                        + "COALESCE(qty_received,0) AS qty_received "
                         + "FROM log_asn_item WHERE asn_id=? ORDER BY id FOR UPDATE",
-                (rs, i) -> new AsnItem(rs.getLong("id"), rs.getLong("sku_id"), rs.getString("batch_no"),
+                (rs, i) -> new AsnItem(rs.getLong("id"), rs.getLong("sku_id"),
+                        rs.getObject("pur_order_item_id", Long.class), rs.getString("batch_no"),
                         rs.getInt("qty_shipped"), rs.getInt("qty_received")),
                 asnId);
     }
@@ -1010,10 +1322,11 @@ public class AsnService
     /** ASN 单行（FOR UPDATE）：必须是该 ASN 的行。 */
     private AsnItem lockItem(long asnId, long asnItemId)
     {
-        List<AsnItem> rows = jdbc.query("SELECT id,sku_id,batch_no,qty_shipped,"
+        List<AsnItem> rows = jdbc.query("SELECT id,sku_id,pur_order_item_id,batch_no,qty_shipped,"
                         + "COALESCE(qty_received,0) AS qty_received "
                         + "FROM log_asn_item WHERE id=? AND asn_id=? FOR UPDATE",
-                (rs, i) -> new AsnItem(rs.getLong("id"), rs.getLong("sku_id"), rs.getString("batch_no"),
+                (rs, i) -> new AsnItem(rs.getLong("id"), rs.getLong("sku_id"),
+                        rs.getObject("pur_order_item_id", Long.class), rs.getString("batch_no"),
                         rs.getInt("qty_shipped"), rs.getInt("qty_received")),
                 asnItemId, asnId);
         if (rows.isEmpty())
@@ -1139,11 +1452,27 @@ public class AsnService
     }
 
     private record AsnHead(long id, String asnNo, String siteCode, String warehouseCode, String status,
-                           LocalDateTime sealedAt)
+                           String sourceMode, LocalDateTime sealedAt)
     {
     }
 
-    private record AsnItem(long id, long skuId, String batchNo, int qtyShipped, int qtyReceived)
+    private record AsnItem(long id, long skuId, Long purOrderItemId, String batchNo, int qtyShipped,
+                           int qtyReceived)
+    {
+    }
+
+    /** 采购直发来源（M6 §3.2）：{@code purOrderItemId} + 服务端带出的 SKU + 生成的父批次号。 */
+    private record DirectSource(long purOrderItemId, long skuId, String batchNo)
+    {
+    }
+
+    /** 采购明细 + 采购单站点（同站校验用）。 */
+    private record PurchaseItem(long id, long skuId, long purOrderId, String siteCode)
+    {
+    }
+
+    /** 采购收货权威成本（M6 §3.3）：{@code unit_cost_cny} + 收货时刻。 */
+    private record ReceiptCost(BigDecimal unitCost, LocalDateTime receivedAt)
     {
     }
 

@@ -160,6 +160,7 @@ class AsnServiceTest
         assertEquals(0, page.rows().get(0).qtyReceivedTotal());
         AsnDetail detail = service.get(created.asnId());
         assertEquals("DRAFT", detail.head().status());
+        assertEquals("LOCAL_BATCH", detail.head().sourceMode(), "旧调用默认本地批次模式");
         assertNull(detail.items().get(0).childBatchId(), "未封单无子批次");
     }
 
@@ -945,6 +946,251 @@ class AsnServiceTest
         assertThrows(IllegalArgumentException.class, () -> service.get(-1L));
     }
 
+    // ------------------------------------------------------ M6 采购直发 FBN
+
+    @Test
+    void directPurchaseCreatesSealReceivesWithReceiptCostAndNoLocalStock()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-D1", "AE", "FBN", 1, "ACTIVE");
+        long sku = newSku("SKU-ASN-D1", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 10, 10, "12.0000");
+        LocalDateTime firstReceivedAt = LocalDateTime.of(2026, 7, 1, 9, 0, 12);
+        LocalDateTime secondReceivedAt = LocalDateTime.of(2026, 7, 2, 9, 30, 45);
+        newReceipt(order, poItem, 4, "12.0000", firstReceivedAt);
+        newReceipt(order, poItem, 6, "13.0000", secondReceivedAt);
+
+        AsnResult created = service.create(new AsnCreateInput("AE", "WH-FBN-D1", rid(), null,
+                List.of(new AsnCreateLine(sku, null, 10, "P-D1", poItem)), "DIRECT_PURCHASE"));
+        assertFalse(created.replayed());
+        assertEquals("DIRECT_PURCHASE", jdbc.queryForObject("select source_mode from log_asn where id=?",
+                String.class, created.asnId()));
+        Map<String, Object> item = jdbc.queryForMap("select id,sku_id,pur_order_item_id,batch_no,"
+                + "qty_shipped,qty_received,diff_qty,partner_sku from log_asn_item where asn_id=?",
+                created.asnId());
+        long asnItemId = ((Number) item.get("id")).longValue();
+        assertEquals(sku, ((Number) item.get("sku_id")).longValue());
+        assertEquals(poItem, ((Number) item.get("pur_order_item_id")).longValue(), "直发写采购明细来源");
+        assertEquals(10, ((Number) item.get("qty_shipped")).intValue());
+        assertEquals(0, ((Number) item.get("qty_received")).intValue());
+        assertEquals("P-D1", item.get("partner_sku"));
+        String parentBatchNo = (String) item.get("batch_no");
+        assertTrue(parentBatchNo.matches("DP:" + poItem + ":[0-9a-f]{8}"), parentBatchNo);
+
+        // 读路径回显来源模式与采购明细（前端列表/详情依赖）。
+        assertEquals("DIRECT_PURCHASE", service.get(created.asnId()).head().sourceMode());
+        assertEquals(poItem, service.get(created.asnId()).items().get(0).purOrderItemId());
+        assertEquals("DIRECT_PURCHASE", service.list("AE", 0, 20).rows().get(0).sourceMode());
+
+        // create 零副作用：不建批次、不动台账、不写流水、不扣任何仓。
+        assertEquals(0, count("inv_batch"), "直发建单不建任何批次");
+        assertEquals(0, count("inv_stock_ledger"), "直发建单不动台账");
+        assertEquals(0, count("inv_stock_move"), "直发建单不写流水");
+        assertEquals(2, count("noon_m3_receipt"), "不伪造采购收货记录");
+
+        // seal：FBN 仓建 DIRECT_PURCHASE/CLOSED 成本父批次（剩余 0）+ 在途子批次；只加在途，不写 ASN_OUT。
+        AsnResult sealed = service.seal(new AsnSealInput(created.asnId(), rid(), null));
+        assertEquals(1, sealed.childBatchIds().size());
+        long child = sealed.childBatchIds().get(0);
+        long parent = jdbc.queryForObject("select parent_batch_id from inv_batch where id=?", Long.class, child);
+        assertEquals(1, jdbc.queryForObject("select count(*) from inv_batch where id=? and batch_no=? "
+                        + "and source_type='DIRECT_PURCHASE' and status='CLOSED' and qty_in=10 "
+                        + "and qty_remaining=0 and pur_order_item_id=? and warehouse_id=? and site_code='AE' "
+                        + "and parent_batch_id is null",
+                Integer.class, parent, parentBatchNo, poItem, fbn), "直发父批次成本载体落库体");
+        // 成本取该明细<最早一笔>收货的 unit_cost_cny（v1 口径，契约 §5.1 待定严格 FIFO 绑定）。
+        assertEquals(0, new BigDecimal("12.0000").compareTo(jdbc.queryForObject(
+                "select unit_cost from inv_batch where id=?", BigDecimal.class, parent)));
+        assertEquals("CNY", jdbc.queryForObject("select currency from inv_batch where id=?",
+                String.class, parent));
+        assertEquals(0, BigDecimal.ONE.compareTo(jdbc.queryForObject("select fx_rate from inv_batch where id=?",
+                BigDecimal.class, parent)));
+        assertEquals(Timestamp.valueOf(firstReceivedAt), jdbc.queryForObject(
+                "select received_at from inv_batch where id=?", Timestamp.class, parent));
+
+        assertEquals(1, jdbc.queryForObject("select count(*) from inv_batch where id=? "
+                        + "and source_type='TRANSFER_SPLIT' and status='IN_TRANSIT' and parent_batch_id=? "
+                        + "and split_seq=1 and split_reason='ASN_TRANSIT' and asn_no=? and qty_in=10 "
+                        + "and qty_remaining=10 and warehouse_id=? and site_code='AE'",
+                Integer.class, child, parent, created.asnNo(), fbn), "在途子批次血缘");
+        assertEquals(10, ledgerInTransit(sku, fbn), "FBN 仓在途 +10（只加在途）");
+        assertEquals(0, jdbc.queryForObject("select count(*) from inv_stock_move", Integer.class),
+                "直发封单不写 ASN_OUT（无源仓出库）");
+        assertEquals(0, ledgerAvailable(sku, fbn), "封单不产生可用（父批次 CLOSED 不虚增可用）");
+
+        // receive 9（短少 1）：子批次 OPEN，FBN 可用 9，在途 0，短少按收货成本记账。
+        service.receive(new AsnReceiveInput(created.asnId(), rid(), null,
+                List.of(new AsnReceiveLine(asnItemId, 9, "short-d1"))));
+        assertEquals("OPEN", jdbc.queryForObject("select status from inv_batch where id=?",
+                String.class, child));
+        assertEquals(9, jdbc.queryForObject("select qty_remaining from inv_batch where id=?",
+                Integer.class, child));
+        assertEquals(0, ledgerInTransit(sku, fbn));
+        assertEquals(9, ledgerAvailable(sku, fbn), "可用 = 实收 9（父批次不产生可用）");
+        assertEquals("RECEIVED", jdbc.queryForObject("select status from log_asn where id=?",
+                String.class, created.asnId()));
+        Map<String, Object> shortRow = jdbc.queryForMap("select biz_event_key,qty,unit_cost,amount "
+                + "from inv_batch_consumption where move_type='ASN_SHORT'");
+        assertEquals("ASNSHORT:" + asnItemId + ":short-d1", shortRow.get("biz_event_key"));
+        assertEquals(1, ((Number) shortRow.get("qty")).intValue());
+        assertEquals(0, new BigDecimal("12.0000").compareTo((BigDecimal) shortRow.get("unit_cost")),
+                "短少成本继承收货成本");
+        assertEquals(0, new BigDecimal("12.0000").compareTo((BigDecimal) shortRow.get("amount")));
+
+        // 父批次仍 CLOSED/剩余 0，不参与 FIFO；守恒：子批次 9 + 短少 1 = 发运 10（= 已收货 10）。
+        assertEquals("CLOSED", jdbc.queryForObject("select status from inv_batch where id=?",
+                String.class, parent));
+        assertEquals(0, jdbc.queryForObject("select qty_remaining from inv_batch where id=?",
+                Integer.class, parent));
+        assertEquals(10, jdbc.queryForObject("select (select coalesce(qty_remaining,0) from inv_batch "
+                        + "where id=?) + (select coalesce(sum(qty),0) from inv_batch_consumption "
+                        + "where move_type='ASN_SHORT')", Integer.class, child), "子批次剩余 + 短少 = 收货量");
+    }
+
+    @Test
+    void directPurchaseRejectsUnreceivedOverShipCrossSiteAndBadInput()
+    {
+        login(1L);
+        newWarehouse("WH-FBN-D2", "AE", "FBN", 1, "ACTIVE");
+        long sku = newSku("SKU-ASN-D2", "ACTIVE");
+        long otherSku = newSku("SKU-ASN-D2-OTHER", "ACTIVE");
+        long orderAe = newPurchaseOrder("AE");
+        long unreceived = newPurchaseItem(orderAe, sku, 5, 0, "4.0000");
+        long received5 = newPurchaseItem(orderAe, sku, 5, 5, "4.0000");
+        newReceipt(orderAe, received5, 5, "4.0000", LocalDateTime.of(2026, 7, 3, 9, 0));
+        long orderSa = newPurchaseOrder("SA");
+        long crossSite = newPurchaseItem(orderSa, sku, 5, 5, "4.0000");
+        newReceipt(orderSa, crossSite, 5, "4.0000", LocalDateTime.of(2026, 7, 3, 9, 0));
+
+        // 未收货 → 400（D1：直发不绕开采购收货）。
+        IllegalArgumentException noReceipt = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, unreceived)), "DIRECT_PURCHASE")));
+        assertTrue(noReceipt.getMessage().contains("尚未收货"), noReceipt.getMessage());
+        // 超发 → 400（已收 5，本次 6）。
+        IllegalArgumentException overReceived = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 6, null, received5)), "DIRECT_PURCHASE")));
+        assertTrue(overReceived.getMessage().contains("超过可发量"), overReceived.getMessage());
+        // 跨站采购明细 → 400。
+        IllegalArgumentException cross = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, crossSite)), "DIRECT_PURCHASE")));
+        assertTrue(cross.getMessage().contains("不一致"), cross.getMessage());
+        // 采购明细不存在 / 缺 purOrderItemId / SKU 不符 / 非法来源模式 → 400。
+        assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, 99999L)), "DIRECT_PURCHASE")));
+        IllegalArgumentException missingPo = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, null)), "DIRECT_PURCHASE")));
+        assertTrue(missingPo.getMessage().contains("purOrderItemId"), missingPo.getMessage());
+        IllegalArgumentException skuMismatch = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(otherSku, null, 1, null, received5)), "DIRECT_PURCHASE")));
+        assertTrue(skuMismatch.getMessage().contains("SKU"), skuMismatch.getMessage());
+        IllegalArgumentException badMode = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, received5)), "DIRECT")));
+        assertTrue(badMode.getMessage().contains("sourceMode"), badMode.getMessage());
+        // 被拒请求零写入。
+        assertEquals(0, count("log_asn"));
+        assertEquals(0, count("log_asn_item"));
+        assertEquals(0, count("noon_m4_asn_request"));
+
+        // 分批发运：已收 5，第一张 3 + 第二张 2 可建；第三张任何量都超发。
+        AsnResult first = service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                List.of(new AsnCreateLine(sku, null, 3, null, received5)), "DIRECT_PURCHASE"));
+        AsnResult second = service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                List.of(new AsnCreateLine(sku, null, 2, null, received5)), "DIRECT_PURCHASE"));
+        assertNotNull(first);
+        assertNotNull(second);
+        IllegalArgumentException third = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, received5)), "DIRECT_PURCHASE")));
+        assertTrue(third.getMessage().contains("超过可发量"), third.getMessage());
+        assertEquals(2, count("log_asn"), "超发被拒不得建第三张单");
+
+        // 同单内重复采购明细 → 400。
+        IllegalArgumentException dupPo = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D2", rid(), null,
+                        List.of(new AsnCreateLine(sku, null, 1, null, received5),
+                                new AsnCreateLine(sku, null, 1, null, received5)), "DIRECT_PURCHASE")));
+        assertTrue(dupPo.getMessage().contains("重复"), dupPo.getMessage());
+    }
+
+    @Test
+    void directPurchaseActionsAreIdempotentAndFingerprintStaysCompatibleForLocal()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-D3", "AE", "FBN", 1, "ACTIVE");
+        long sku = newSku("SKU-ASN-D3", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 8, 8, "5.5000");
+        newReceipt(order, poItem, 8, "5.5000", LocalDateTime.of(2026, 7, 4, 9, 0));
+
+        // 指纹兼容：本地模式 3 参与 4 参（LOCAL_BATCH）逐字节一致，直发口径不同。
+        List<AsnCreateLine> localLines = List.of(new AsnCreateLine(sku, "B:SRC-D3", 2, null));
+        assertEquals(AsnRules.createFingerprint("AE", "WH-FBN-D3", localLines),
+                AsnRules.createFingerprint("AE", "WH-FBN-D3", "LOCAL_BATCH", localLines),
+                "本地模式指纹必须与旧版一致");
+        assertFalse(AsnRules.createFingerprint("AE", "WH-FBN-D3", localLines).equals(
+                        AsnRules.createFingerprint("AE", "WH-FBN-D3", "DIRECT_PURCHASE",
+                                List.of(new AsnCreateLine(sku, null, 2, null, poItem)))),
+                "直发指纹含来源模式，不得与本地撞串");
+
+        String key = rid();
+        AsnCreateInput input = new AsnCreateInput("AE", "WH-FBN-D3", key, null,
+                List.of(new AsnCreateLine(sku, null, 8, null, poItem)), "DIRECT_PURCHASE");
+        AsnResult created = service.create(input);
+        int requests = count("noon_m4_asn_request");
+        // ① CREATE 同键同内容 → 重放零写入。
+        AsnResult replayCreate = service.create(input);
+        assertTrue(replayCreate.replayed());
+        assertEquals(created.asnId(), replayCreate.asnId());
+        assertEquals(requests, count("noon_m4_asn_request"));
+        // ② 同键改量 → 400。
+        IllegalArgumentException changed = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-D3", key, null,
+                        List.of(new AsnCreateLine(sku, null, 7, null, poItem)), "DIRECT_PURCHASE")));
+        assertTrue(changed.getMessage().contains("内容与原请求不一致"), changed.getMessage());
+
+        long asnItemId = jdbc.queryForObject("select id from log_asn_item where asn_id=?",
+                Long.class, created.asnId());
+        String sealKey = rid();
+        AsnResult sealed = service.seal(new AsnSealInput(created.asnId(), sealKey, null));
+        int batches = count("inv_batch");
+        // ③ SEAL 重放：不再建父/子批次、不再加在途。
+        AsnResult replaySeal = service.seal(new AsnSealInput(created.asnId(), sealKey, null));
+        assertTrue(replaySeal.replayed());
+        assertEquals(sealed.childBatchIds(), replaySeal.childBatchIds());
+        assertEquals(batches, count("inv_batch"));
+        assertEquals(8, ledgerInTransit(sku, fbn), "在途只加一次");
+        assertEquals(0, ledgerAvailable(sku, fbn));
+        assertEquals(0, count("inv_stock_move where change_type='ASN_OUT'"));
+
+        // ④ RECEIVE 重放：不双加可用、不双记短少。
+        String receiveKey = rid();
+        service.receive(new AsnReceiveInput(created.asnId(), receiveKey, null,
+                List.of(new AsnReceiveLine(asnItemId, 8, null))));
+        int consumptions = count("inv_batch_consumption");
+        AsnResult replayReceive = service.receive(new AsnReceiveInput(created.asnId(), receiveKey, null,
+                List.of(new AsnReceiveLine(asnItemId, 8, null))));
+        assertTrue(replayReceive.replayed());
+        assertEquals(consumptions, count("inv_batch_consumption"));
+        assertEquals(8, ledgerAvailable(sku, fbn), "可用只加一次");
+        assertEquals(0, ledgerInTransit(sku, fbn));
+
+        // 父批次始终 CLOSED/剩余 0：可用只来自 OPEN 子批次，FIFO 不会选中父批次。
+        assertEquals(1, count("inv_batch where source_type='DIRECT_PURCHASE' and status='CLOSED' "
+                + "and qty_remaining=0"));
+        assertEquals(8, jdbc.queryForObject("select coalesce(sum(qty_remaining),0) from inv_batch "
+                        + "where status='OPEN' and warehouse_id=? and sku_id=?", Integer.class, fbn, sku),
+                "OPEN 批次合计 = 实收 8");
+        assertEquals(8, ledgerAvailable(sku, fbn), "台账可用 = OPEN 批次合计（父批次不虚增）");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private long newSku(String code, String status)
@@ -1000,6 +1246,32 @@ class AsnServiceTest
     private static String rid()
     {
         return "r-" + UUID.randomUUID();
+    }
+
+    // ------------------------------------------------------ M6 采购/收货来源造数
+
+    private long newPurchaseOrder(String site)
+    {
+        String orderNo = "PO-" + UUID.randomUUID().toString().substring(0, 8);
+        jdbc.update("insert into pur_order(order_no,site_code,status) values (?,?, 'RECEIVED')", orderNo, site);
+        return jdbc.queryForObject("select id from pur_order where order_no=?", Long.class, orderNo);
+    }
+
+    private long newPurchaseItem(long purOrderId, long skuId, int qtyOrdered, int qtyReceived, String unitPrice)
+    {
+        jdbc.update("insert into pur_order_item(pur_order_id,sku_id,qty_ordered,qty_received,unit_price,"
+                        + "currency,fx_rate) values (?,?,?,?,?, 'CNY', 1)",
+                purOrderId, skuId, qtyOrdered, qtyReceived, unitPrice);
+        return jdbc.queryForObject("select id from pur_order_item where pur_order_id=? order by id desc limit 1",
+                Long.class, purOrderId);
+    }
+
+    private void newReceipt(long purOrderId, long purOrderItemId, int qty, String unitCostCny,
+                            LocalDateTime receivedAt)
+    {
+        jdbc.update("insert into noon_m3_receipt(order_id,order_item_id,qty,unit_cost_cny,received_at) "
+                        + "values (?,?,?,?,?)",
+                purOrderId, purOrderItemId, qty, unitCostCny, Timestamp.valueOf(receivedAt));
     }
 
     private static void login(long id)
@@ -1070,14 +1342,31 @@ class AsnServiceTest
                 + "site_code varchar(16) not null, warehouse_code varchar(64) not null, "
                 + "status varchar(24) not null default 'DRAFT', sealed_at timestamp(3), slot_date date, "
                 + "carrier varchar(128), tracking_no varchar(128), "
-                + "source varchar(24) not null default 'MANUAL', raw_payload varchar(4000), "
+                + "source varchar(24) not null default 'MANUAL', "
+                + "source_mode varchar(24) not null default 'LOCAL_BATCH', raw_payload varchar(4000), "
                 + "created_at timestamp(3) not null default current_timestamp(3), "
                 + "updated_at timestamp(3) not null default current_timestamp(3), "
                 + "constraint uk_asn_no unique(asn_no))");
         jdbc.execute("create table log_asn_item (id bigint auto_increment primary key, asn_id bigint not null, "
-                + "sku_id bigint not null, partner_sku varchar(128), batch_no varchar(64) not null, "
+                + "sku_id bigint not null, pur_order_item_id bigint, partner_sku varchar(128), "
+                + "batch_no varchar(64) not null, "
                 + "qty_shipped int not null, qty_received int default 0, diff_qty int default 0, "
                 + "created_at timestamp(3) not null default current_timestamp(3))");
+        // M6 §2 直发依赖的采购/收货来源表（宽松 DDL，CHECK 由 MySqlAsnIT 真库验证）。
+        jdbc.execute("create table pur_order (id bigint auto_increment primary key, order_no varchar(64) not null, "
+                + "supplier_id bigint, site_code varchar(16) not null, currency char(3) not null default 'CNY', "
+                + "total_amount decimal(18,4) default 0, status varchar(24) not null default 'DRAFT', "
+                + "source varchar(24) default 'MANUAL', source_ref_no varchar(64), operator_id bigint, "
+                + "created_at timestamp(3) not null default current_timestamp(3), "
+                + "constraint uk_pur_no unique(order_no))");
+        jdbc.execute("create table pur_order_item (id bigint auto_increment primary key, "
+                + "pur_order_id bigint not null, sku_id bigint not null, qty_ordered int not null, "
+                + "qty_received int not null default 0, unit_price decimal(18,4) not null, "
+                + "currency char(3) not null default 'CNY', fx_rate decimal(18,8), "
+                + "created_at timestamp(3) not null default current_timestamp(3))");
+        jdbc.execute("create table noon_m3_receipt (id bigint auto_increment primary key, "
+                + "order_id bigint not null, order_item_id bigint not null, qty int not null, "
+                + "unit_cost_cny decimal(18,4) not null, received_at timestamp(3) not null, operator_id bigint)");
         jdbc.execute("create table noon_m4_asn_request (request_id varchar(64) not null, "
                 + "action varchar(16) not null, asn_id bigint not null, site_code varchar(16) not null, "
                 + "operator_id bigint, content_fingerprint char(64) not null, "

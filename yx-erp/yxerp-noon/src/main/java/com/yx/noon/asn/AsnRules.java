@@ -30,6 +30,10 @@ final class AsnRules
     static final int DEFAULT_PAGE_SIZE = 20;
     static final int MONEY_SCALE = 4;
 
+    /** M6 契约 §2.1 来源模式：本地批次（M4 现状）/ 采购直发（无本地源批次）。 */
+    static final String SOURCE_MODE_LOCAL_BATCH = "LOCAL_BATCH";
+    static final String SOURCE_MODE_DIRECT_PURCHASE = "DIRECT_PURCHASE";
+
     /** 幂等键格式（对齐 M3 v2 / M4 前两轮）：8–64 位，仅字母数字下划线短横。 */
     private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9_-]{8,64}");
 
@@ -83,6 +87,18 @@ final class AsnRules
         if (code.length() > 64)
             throw new IllegalArgumentException("warehouseCode 长度不能超过 64");
         return code;
+    }
+
+    /**
+     * M6 §3.1 来源模式规范化：空白 → {@code LOCAL_BATCH}（旧调用零改动），
+     * 仅接受 {@code LOCAL_BATCH} / {@code DIRECT_PURCHASE}（大小写不敏感），其它 400。
+     */
+    static String sourceMode(String value)
+    {
+        if (value == null || value.isBlank()) return SOURCE_MODE_LOCAL_BATCH;
+        String mode = value.trim().toUpperCase(Locale.ROOT);
+        if (SOURCE_MODE_LOCAL_BATCH.equals(mode) || SOURCE_MODE_DIRECT_PURCHASE.equals(mode)) return mode;
+        throw new IllegalArgumentException("sourceMode 只允许 LOCAL_BATCH / DIRECT_PURCHASE");
     }
 
     /** SQL IN 占位符：返回 "?,?" 形式。 */
@@ -153,6 +169,43 @@ final class AsnRules
      * 业务上 {@code partnerSku} 空白会被规范化为 null（同一语义不产生两个不同指纹），已在报告说明。
      */
     static String createFingerprint(String siteCode, String warehouseCode, List<AsnCreateLine> lines)
+    {
+        return createFingerprint(siteCode, warehouseCode, SOURCE_MODE_LOCAL_BATCH, lines);
+    }
+
+    /**
+     * M6 §3.2 建单指纹（按来源模式分口径）：
+     * <ul>
+     *   <li>{@code LOCAL_BATCH}（含空）：与 M4 旧实现<b>逐字节一致</b>
+     *       （{@code CREATE|site|warehouse|skuId:batchNo:qtyShipped:partnerSku}），
+     *       历史幂等行不会被误判为内容冲突；</li>
+     *   <li>{@code DIRECT_PURCHASE}：{@code CREATE|DIRECT_PURCHASE|site|warehouse|poItemId:qtyShipped}
+     *       （按 {@code purOrderItemId} 升序）。前缀含模式名，且站点编码只允许 AE/SA，
+     *       不会与本地口径撞串。</li>
+     * </ul>
+     */
+    static String createFingerprint(String siteCode, String warehouseCode, String sourceMode,
+                                    List<AsnCreateLine> lines)
+    {
+        if (!SOURCE_MODE_DIRECT_PURCHASE.equals(sourceMode))
+            return localCreateFingerprint(siteCode, warehouseCode, lines);
+
+        List<AsnCreateLine> sorted = new ArrayList<>(lines);
+        sorted.sort(Comparator.comparingLong(AsnCreateLine::purOrderItemId));
+        StringBuilder canonical = new StringBuilder("CREATE|").append(SOURCE_MODE_DIRECT_PURCHASE).append('|')
+                .append(field(siteCode)).append('|').append(field(warehouseCode)).append('|');
+        for (int i = 0; i < sorted.size(); i++)
+        {
+            if (i > 0) canonical.append(',');
+            AsnCreateLine line = sorted.get(i);
+            canonical.append(line.purOrderItemId()).append(':').append(line.qtyShipped());
+        }
+        return sha256Hex(canonical.toString());
+    }
+
+    /** M4 本地批次建单指纹原文（不可改动，历史幂等行逐字节兼容）。 */
+    private static String localCreateFingerprint(String siteCode, String warehouseCode,
+                                                 List<AsnCreateLine> lines)
     {
         List<AsnCreateLine> sorted = new ArrayList<>(lines);
         sorted.sort(Comparator.comparingLong(AsnCreateLine::skuId)

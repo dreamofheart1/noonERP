@@ -9,6 +9,7 @@
       show-icon
       style="margin-bottom: 12px"
     />
+    <el-alert title="直发主路径：采购单先登记收货（记成本、不建本地库存）→ 头程费用关联采购单 → ASN 采购直发 → FBN 官方仓实收后才产生可用库存。" type="success" :closable="false" show-icon style="margin-bottom: 12px" />
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="86px">
       <el-form-item label="采购单号" prop="orderNo">
         <el-input v-model="queryParams.orderNo" placeholder="请输入采购单号" clearable style="width:180px" @keyup.enter="handleQuery" />

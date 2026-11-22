@@ -7,6 +7,14 @@ package com.yx.noon.asn;
  */
 public record AsnItemRow(Long id, Long skuId, String partnerSku, String batchNo, Integer qtyShipped,
                          Integer qtyReceived, Integer diffQty, Long childBatchId, String childBatchNo,
-                         String childStatus, Integer childSplitSeq)
+                         String childStatus, Integer childSplitSeq, Long purOrderItemId)
 {
+    /** 兼容旧调用（无直发采购明细字段）的构造器，purOrderItemId 视为 null。 */
+    public AsnItemRow(Long id, Long skuId, String partnerSku, String batchNo, Integer qtyShipped,
+                      Integer qtyReceived, Integer diffQty, Long childBatchId, String childBatchNo,
+                      String childStatus, Integer childSplitSeq)
+    {
+        this(id, skuId, partnerSku, batchNo, qtyShipped, qtyReceived, diffQty, childBatchId,
+                childBatchNo, childStatus, childSplitSeq, null);
+    }
 }

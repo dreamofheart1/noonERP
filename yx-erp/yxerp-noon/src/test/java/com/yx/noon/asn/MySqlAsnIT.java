@@ -88,6 +88,10 @@ class MySqlAsnIT
         runSqlFile("../sql/noon_m4_inventory.sql");
         // M4 第三轮第三批正式迁移（noon_m4_asn_request）。
         runSqlFile("../sql/noon_m4_asn.sql");
+        // M3 采购/收货真实 DDL（直发成本来源 noon_m3_receipt；纯 CREATE TABLE IF NOT EXISTS）。
+        runSqlFile("../sql/noon_m3_purchasing.sql");
+        // M6 直发列迁移（log_asn.source_mode / log_asn_item.pur_order_item_id），幂等可重复执行。
+        runSqlFile("../sql/noon_m6_direct_fbn.sql");
 
         clean();
         GRANTS.clear();
@@ -465,6 +469,71 @@ class MySqlAsnIT
                 Integer.class));
     }
 
+    // ------------------------------------------------------------ M6 采购直发真库守恒
+
+    @Test
+    void directPurchaseKeepsConservationOnRealSchema()
+    {
+        long fbn = newWarehouse("WH-FBN-IT-H1", "AE", true);
+        long sku = newSku("SKU-ASN-IT-H1");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 8, 8, "11.0000");
+        newReceipt(order, poItem, 8, "11.0000", LocalDateTime.of(2026, 3, 6, 9, 0));
+
+        // create：source_mode=DIRECT_PURCHASE + 行写 pur_order_item_id/DP 父批次号；不动批次/台账。
+        AsnResult created = asnService.create(new AsnCreateInput("AE", "WH-FBN-IT-H1", rid(), null,
+                List.of(new AsnCreateLine(sku, null, 8, "P-IT-H1", poItem)), "DIRECT_PURCHASE"));
+        assertEquals("DIRECT_PURCHASE", jdbc.queryForObject("select source_mode from log_asn where id=?",
+                String.class, created.asnId()));
+        String parentBatchNo = jdbc.queryForObject("select batch_no from log_asn_item where asn_id=? "
+                + "and pur_order_item_id=?", String.class, created.asnId(), poItem);
+        assertTrue(parentBatchNo.startsWith("DP:" + poItem + ":"), parentBatchNo);
+        assertEquals(0, jdbc.queryForObject("select count(*) from inv_batch", Integer.class),
+                "直发 create 不建批次");
+        assertEquals(0, jdbc.queryForObject("select count(*) from inv_stock_ledger", Integer.class),
+                "直发 create 不动台账");
+
+        // seal：真库建 DIRECT_PURCHASE/CLOSED 父批次（qty_in>0、剩余 0 守 CHECK）+ 在途子批次，只加在途。
+        AsnResult sealed = asnService.seal(new AsnSealInput(created.asnId(), rid(), null));
+        long child = sealed.childBatchIds().get(0);
+        long parent = jdbc.queryForObject("select parent_batch_id from inv_batch where id=?", Long.class, child);
+        assertEquals(1, jdbc.queryForObject("select count(*) from inv_batch where id=? "
+                        + "and source_type='DIRECT_PURCHASE' and status='CLOSED' and qty_in=8 "
+                        + "and qty_remaining=0 and pur_order_item_id=? and warehouse_id=? and site_code='AE'",
+                Integer.class, parent, poItem, fbn), "直发父批次成本载体");
+        assertEquals(0, new BigDecimal("11.0000").compareTo(jdbc.queryForObject(
+                "select unit_cost from inv_batch where id=?", BigDecimal.class, parent)));
+        assertEquals(8, jdbc.queryForObject("select qty_in_transit from inv_stock_ledger "
+                + "where sku_id=? and warehouse_id=?", Integer.class, sku, fbn));
+        assertEquals(0, jdbc.queryForObject("select count(*) from inv_stock_move", Integer.class),
+                "直发封单不写 ASN_OUT");
+        assertEquals(0, jdbc.queryForObject("select qty_available from inv_stock_ledger "
+                + "where sku_id=? and warehouse_id=?", Integer.class, sku, fbn), "封单不产生可用");
+
+        // receive 7（短少 1）：可用 7、在途 0、短少按收货成本记账、父批次仍 CLOSED。
+        long item = jdbc.queryForObject("select id from log_asn_item where asn_id=?",
+                Long.class, created.asnId());
+        asnService.receive(new AsnReceiveInput(created.asnId(), rid(), null,
+                List.of(new AsnReceiveLine(item, 7, "short-it-h1"))));
+        assertEquals(7, jdbc.queryForObject("select qty_available from inv_stock_ledger "
+                + "where sku_id=? and warehouse_id=?", Integer.class, sku, fbn));
+        assertEquals(0, jdbc.queryForObject("select qty_in_transit from inv_stock_ledger "
+                + "where sku_id=? and warehouse_id=?", Integer.class, sku, fbn));
+        assertEquals("RECEIVED", jdbc.queryForObject("select status from log_asn where id=?",
+                String.class, created.asnId()));
+        assertEquals("CLOSED", jdbc.queryForObject("select status from inv_batch where id=?",
+                String.class, parent), "父批次始终 CLOSED");
+        assertEquals(0, jdbc.queryForObject("select qty_remaining from inv_batch where id=?",
+                Integer.class, parent), "父批次从不占用可用量");
+        Map<String, Object> shortRow = jdbc.queryForMap("select biz_event_key,qty,unit_cost "
+                + "from inv_batch_consumption where move_type='ASN_SHORT'");
+        assertEquals("ASNSHORT:" + item + ":short-it-h1", shortRow.get("biz_event_key"));
+        assertEquals(1, ((Number) shortRow.get("qty")).intValue());
+        assertEquals(0, new BigDecimal("11.0000").compareTo((BigDecimal) shortRow.get("unit_cost")));
+        assertEquals(0, jdbc.queryForObject("select count(*) from noon_m4_asn_request where status='PENDING'",
+                Integer.class), "直发全链路无 PENDING 残留");
+    }
+
     // ------------------------------------------------------------ helpers
 
     private static final Map<Long, List<String>> GRANTS = new ConcurrentHashMap<>();
@@ -525,11 +594,37 @@ class MySqlAsnIT
                 skuId, warehouseId, site, available);
     }
 
+    // ------------------------------------------------------ M6 采购/收货来源造数
+
+    private long newPurchaseOrder(String site)
+    {
+        String orderNo = "PO-IT-" + UUID.randomUUID().toString().substring(0, 8);
+        jdbc.update("insert into pur_order(order_no,site_code,status) values (?,?, 'RECEIVED')", orderNo, site);
+        return jdbc.queryForObject("select id from pur_order where order_no=?", Long.class, orderNo);
+    }
+
+    private long newPurchaseItem(long purOrderId, long skuId, int qtyOrdered, int qtyReceived, String unitPrice)
+    {
+        jdbc.update("insert into pur_order_item(pur_order_id,sku_id,qty_ordered,qty_received,unit_price,"
+                        + "currency,fx_rate) values (?,?,?,?,?, 'CNY', 1)",
+                purOrderId, skuId, qtyOrdered, qtyReceived, unitPrice);
+        return jdbc.queryForObject("select id from pur_order_item where pur_order_id=? order by id desc limit 1",
+                Long.class, purOrderId);
+    }
+
+    private void newReceipt(long purOrderId, long purOrderItemId, int qty, String unitCostCny,
+                            LocalDateTime receivedAt)
+    {
+        jdbc.update("insert into noon_m3_receipt(order_id,order_item_id,qty,unit_cost_cny,received_at) "
+                        + "values (?,?,?,?,?)",
+                purOrderId, purOrderItemId, qty, unitCostCny, java.sql.Timestamp.valueOf(receivedAt));
+    }
+
     private void clean()
     {
         for (String table : new String[]{"noon_m4_asn_request", "log_asn_item", "log_asn",
                 "noon_m4_inventory_audit", "inv_stock_move", "inv_stock_ledger",
-                "inv_batch_consumption", "inv_batch"})
+                "inv_batch_consumption", "inv_batch", "noon_m3_receipt", "pur_order_item", "pur_order"})
             jdbc.execute("delete from " + table);
         jdbc.execute("delete from md_sku where sku_code like 'SKU-ASN-IT-%'");
         jdbc.execute("delete from md_warehouse where warehouse_code like 'WH-ASN-IT-%' or warehouse_code like 'WH-FBN-IT-%'");

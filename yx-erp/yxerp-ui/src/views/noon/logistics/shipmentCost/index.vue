@@ -1,7 +1,7 @@
 <template>
   <div class="app-container">
   <el-alert :title="`当前站点：${siteLabel} · 头程费用本页仅登记（allocationFlag 为标记），实际分摊与利润接入未实现`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
-  <el-alert title="基础流程：SKU 管理 → 采购单 → ASN 入仓 → 头程费用。新增费用可多选关联当前站点的采购单（跨站/不存在将被拒绝），并与 ASN 关联并存。" type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
+  <el-alert title="直发主流程：SKU 管理 → 采购单 → 头程费用（多选关联采购单）→ ASN 采购直发 → FBN 官方仓实收。可多选关联当前站点采购单（跨站/不存在将被拒绝），并与 ASN 关联并存；费用仅登记，不实际分摊。" type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
 
     <el-form :model="queryParams" ref="queryForm" size="small" :inline="true" v-show="showSearch">
       <el-form-item label="站点">

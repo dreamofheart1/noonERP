@@ -1132,3 +1132,71 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 - 按既定开发环境及生成器规范集中实施，并在 MySQL 8.0.35 验证采购→头程→ASN→FBN 入仓关键路径、分批/重复及站点边界；保留开发环境可访问和用户测试数据。完成后一次性写回结果、测试与真实平台未验证范围，交 Codex 重点复核；用户自行推送。
 
 本次仅将用户已确认的优先顺序和流程要求记录在案，未直接通知 WorkBuddy、未修改业务代码或运行测试。
+
+### 2026-11-23 · WorkBuddy · 接收「期间分摊搁置 + 优先跑通采购直发 FBN」回执
+
+已读 Codex 两条新指令（用户/Codex → WorkBuddy、豆包）。确认口径如下，本条仅接收与定范围，未改业务代码、未跑测试：
+
+**一、期间/分摊标记暂时搁置**：不再为这两字段等待用户决定或阻塞开发；现有字段行为（period 空取当前业务月 + list 过滤、allocation_flag 仅标记不分摊）不视为已确认规则，不接入财务计算或误称完成。上一轮在协作文档/contract §5.4 提出的用途疑问保持记录但本轮不追。
+
+**二、优先跑通采购直发 FBN（更新既有流程假设）**：主路径调整为「系统 SKU → 采购单 → 头程运输（可关联采购单，上一轮多选关联已实现）→ ASN 预约/登记 → Noon FBN 官方仓实际收货」。采购后不先经自有/国内仓收货出库；自有仓路径保留为后续可选，不删除已有实现。
+
+**三、落实的硬约束（后续实现与验证的验收点）**：
+- FBN 官方仓在仓库管理建**内部记录**，明确区分系统记录与 Noon 平台真实仓；不因建内部记录而声称平台已建仓或已预约。
+- 头程/发运/在途/ASN 关联以真实单据与业务事件为依据，不伪造国内仓收货/可用库存/供应商交付；采购数量、分批发运、在途、实收、短少可追溯且防重复。
+- 现有 ASN 依赖源仓 OPEN 批次，直发需调整或新增路径；官方仓确认实收后才产生对应可用库存；短少处理不虚增/重复扣成本。
+- 成本可追溯、数量守恒、权限隔离、重复请求安全，不破坏已有仓库路径。
+- 期间/分摊仍不接财务；Noon 平台自动预约/接口未验证，当前以人工登记与真实状态为准，不虚报已对接。
+- 按既定环境/生成器规范在 MySQL 8.0.35 验证关键路径+分批/重复/站点边界，完成后一次性回报交 Codex 复核；用户负责推送。
+
+下一步：先盘点仓库管理、ASN 源仓 OPEN 批次依赖、采购→头程→ASN→库存成本链路现状，再定直发路径实施方案；豆包 CLI 若仍 `auth_unavailable` 则由 WorkBuddy 直接实施并在回报中说明。
+
+### 2026-11-23 · 豆包 · 采购直发 FBN 后端内核完成（ASN create/seal 直发分支）
+
+按 `docs/verification/m6-direct-fbn/contract.md` §3 实现「采购直发 FBN」后端内核，D1–D5 决策未改。仅改 ASN 后端内核与对应测试，未动 Controller/前端/SQL 迁移/schema/协作文档正文。
+
+**一、改动文件（均在授权范围内）**
+- `yxerp-noon/.../asn/AsnCreateInput.java`、`AsnCreateLine.java`：新增 `sourceMode`（可空，默认 LOCAL_BATCH）与行级 `purOrderItemId`（可空）；各加四参/五参兼容构造器，旧调用（本地批次）不受影响。
+- `asn/AsnRules.java`：`sourceMode()` 规范化（空→LOCAL_BATCH、非法 400）；建单指纹按模式分口径——本地模式与旧版**逐字节一致**（3 参重载保留），直发为 `CREATE|DIRECT_PURCHASE|site|warehouse|按 poItemId 升序的 poItemId:qtyShipped`。
+- `asn/AsnService.java`：create 增 DIRECT_PURCHASE 分支（采购明细存在+同站、`noon_m3_receipt` 累计收货>0、权威成本可取、`qtyShipped ≤ 已收 − 已建直发 ASN 合计`；`pur_order_item` FOR UPDATE 串行化同明细并发建单；父批次号 `DP:<poItemId>:<uuid8>` 写 `batch_no` 与 `pur_order_item_id`）；seal 增直发分支（FBN 仓建 `DIRECT_PURCHASE`/`CLOSED`/`qty_remaining=0` 父批次做成本载体，`unit_cost/currency/fx_rate/received_at` 取收货，复用 `insertChildBatch` 拆 IN_TRANSIT 子批次，`applyLedger(FBN,0,+qty)` 只加在途，不写 ASN_OUT、不扣源仓）；receive 零改动；`log_asn` 插头显式写 `source_mode`；列表/详情补 `source_mode` 与行 `pur_order_item_id` 回显（对接 WorkBuddy 已扩展的 `AsnRow`/`AsnItemRow` 新字段）。
+- 测试：`AsnServiceTest`（H2 DDL 补 `log_asn.source_mode`、`log_asn_item.pur_order_item_id` + 采购/收货来源表；新增 3 个直发用例）；`MySqlAsnIT`（同步跑 `noon_m3_purchasing.sql` 与 `noon_m6_direct_fbn.sql`，新增直发真库守恒用例）。
+
+**二、验证**
+- `mvn -q -pl yxerp-noon -am -Dtest=AsnServiceTest -Dsurefire.failIfNoSpecifiedTests=false test`：**17/17 全绿**（14 个既有本地批次用例 + 3 个直发用例）。
+- 直发用例覆盖：create→seal→receive 全链路、父批次 CLOSED 且不虚增可用、封单无 ASN_OUT/无源仓扣减、收货后才产生可用与短少按收货成本记账、无收货拒绝、超发/分批发运额度拒绝、跨站拒绝、缺 purOrderItemId/SKU 不符/非法 sourceMode 拒绝、CREATE/SEAL/RECEIVE 三动作幂等重放零副作用、本地模式指纹逐字节兼容。
+
+**三、未解决 / 未声称完成**
+1. **MySQL 8.0.35 真库未验证**：本机无 MySQL 实例（3306 未监听，也无 `NOON_MYSQL_TEST_PORT`/`NOON_MYSQL_TEST_URL`），`MySqlAsnIT` 已按真 DDL 补齐迁移与直发断言但**未执行**，需在有隔离库的环境补跑（opt-in，缺参数自动 skip）。
+2. **分批收货成本取值（契约 §5.1 待定）**：v1 取该采购明细**最早一笔**收货的 `unit_cost_cny` 与 `received_at`（稳定可追溯、不重估）；「严格按收货行 FIFO 绑定」需新增 `asn_item.receipt_id`，未做，待用户/Codex 拍板。父批次 `currency=CNY`、`fx_rate=1`（收货表只存 CNY 成本、无币种/汇率列）。
+3. **目录外文件未动**：Controller（`AsnController` 直接 `@RequestBody AsnCreateInput`，Jackson 自动绑定新字段，无需改）、前端、SQL 迁移、schema、协作文档正文均未改；仓库里 `yx-erp/sql/noon_m6_direct_fbn.sql` 与 schema v0.5 的 `source_mode`/`pur_order_item_id` 列已由 WorkBuddy 就位，Java 直接使用这些列名。
+4. 未连接生产、未部署、未推送；Noon 平台建仓/预约接口仍未验证，FBN 仓仅为系统内部记录。
+
+### 2026-11-23 · WorkBuddy · 采购直发 FBN 集成 + 真库 E2E 全链路验证（集中交付）
+
+豆包已交付 ASN 直发后端内核（上一条回执）。WorkBuddy 完成其余全部环节并在 MySQL 8.0.35 开发库跑通真实单据 E2E，交 Codex 复核。
+
+**一、集成改动（豆包范围外）**
+- DDL 迁移 `yx-erp/sql/noon_m6_direct_fbn.sql`（幂等 ALTER：log_asn.source_mode 默认 LOCAL_BATCH、log_asn_item.pur_order_item_id、inv_batch.source_type 注释扩 DIRECT_PURCHASE），开发库执行两次幂等通过；schema v0.5 同步三处新装库列。
+- 输出 DTO `AsnRow` 加 sourceMode、`AsnItemRow` 加 purOrderItemId（兼容构造器，豆包 Service 构造点已对接）。
+- 前端：ASN 新建弹窗加「来源模式」radio（本地仓批次/采购直发），直发模式行改为采购明细下拉（真实 listOrder→getOrder 展开、筛已收 qtyReceived>0、带出 SKU、前端预校验可发额度）；列表加「来源」列、详情显示来源模式；采购单/头程费用/ASN/仓库四页流程提示改为直发主路径，仓库页明确 FBN 为系统内部记录（非平台已建仓/已预约）。
+- 数据：经仓库管理 API 建 `FBN-AE-OFFICIAL`/`FBN-SA-OFFICIAL` 内部仓（FBN、is_fbn=1、ACTIVE）。
+- 方案契约 `docs/verification/m6-direct-fbn/contract.md`（D1–D5 决策+缺口）、E2E 报告 `e2e-report.md`、UI 证据 `direct-asn-ui.png`。
+
+**二、真库 E2E（真实单据，非夹具）**
+前置：PO5 确认后部分收货 10 件（item5/SKU2/unit_cost_cny=20），未建本地仓批次/自有库存。
+- create 直发 ASN（qty6）→ seal → receive：seal 后 FBN 台账 available=0/in_transit=6（实收前无可用），父批次 `DIRECT_PURCHASE/CLOSED/remaining=0` 不虚增；receive 后 available=6/in_transit=0，子批次 OPEN，成本 20 来自收货。
+- 边界全通：超发（可发4发5）400、无收货 400、跨站 400、同键 seal 重放 replayed=true、分批发运（第二张发4，累计=10）成功。
+- 短少：第二张发4实收3短少1 → FBN 可用累计9（短少1不虚增），消耗流水 `ASN_SHORT|ASNSHORT:2:SHORT-E2E-001|20.0000` 可追溯。
+- UI：列表「采购直发」标签、来源模式切换、采购明细下拉加载真实已收项，均验证通过。详见 `docs/verification/m6-direct-fbn/e2e-report.md`。
+
+**三、测试与回归**
+- `AsnServiceTest` 17/17；全量 `mvn -pl yxerp-noon -am test` **458 测试全绿、零回归**（含各模块 H2 + 隔离 MySQL IT）；前端 build 通过。
+- `MySqlAsnIT` 本次未单独执行（opt-in 未注入隔离库 URL），真库关键路径已由本开发库 E2E 覆盖。
+
+**四、待确认缺口（集中提出，不阻塞已交付部分）**
+1. **分批收货成本取值**：v1 取采购明细最早一笔收货成本；严格按收货行 FIFO 绑定需新增 `asn_item.receipt_id`——请用户/Codex 拍板是否立专项。
+2. **多币种采购直发**：父批次 currency=CNY、fx_rate=1（收货表仅存 CNY 成本列），外币采购直发需扩展——是否本轮处理请指示。
+3. **Noon 平台建仓/自动预约接口**：未验证，FBN 仓与 ASN 均为人工登记内部记录，不虚报已对接。
+4. **期间/分摊标记**：按用户指令搁置，未接财务计算。
+
+**五、未声称完成**：头程费用实际分摊、利润接入、退货时效、B/C 处置、M7/M9、原型 DEMO 内存链状态不变。未连接生产、未部署、未推送。请 Codex 重点复核：① 直发父批次 CLOSED 不虚增可用的守恒口径；② 防超发/跨站/幂等边界；③ 上述两项待拍板缺口。
