@@ -1,11 +1,11 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 盘点 DRAFT → APPLIED（应用后不可撤销）；账面量按应用时实时库存重算；物理处置未实现`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <!-- 查询区：沿用若依代码生成器 inv_stocktake 骨架 -->
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="82px">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" placeholder="全部站点" clearable style="width: 140px">
-          <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
@@ -30,7 +30,7 @@
       <el-table-column label="期间" align="center" prop="period" width="100" />
       <el-table-column label="状态" align="center" prop="status" width="110">
         <template #default="scope">
-          <el-tag :type="scope.row.status === 'APPLIED' ? 'success' : 'info'">{{ scope.row.status }}</el-tag>
+          <el-tag :type="scope.row.status === 'APPLIED' ? 'success' : 'info'">{{ { DRAFT: '草稿', APPLIED: '已应用' }[scope.row.status] || scope.row.status }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" align="center" prop="createdAt" min-width="170" />
@@ -49,6 +49,9 @@
     <!-- 新建盘点弹窗 -->
     <el-dialog title="新建盘点单" v-model="createOpen" width="760px" append-to-body>
       <el-form :model="createForm" label-width="100px">
+        <el-form-item label="站点">
+          <el-tag type="info" effect="plain">{{ siteLabel }}（由顶栏站点上下文决定，仓库须落在该站点）</el-tag>
+        </el-form-item>
         <el-form-item label="仓库 ID" required>
           <el-input-number v-model="createForm.warehouseId" :min="1" :precision="0" placeholder="盘点仓库" />
         </el-form-item>
@@ -136,6 +139,7 @@
 </template>
 
 <script setup name="StocktakeInventory">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listStocktake, getStocktake, createStocktake, applyStocktake, getStocktakeResult } from "@/api/noon/inventory/stocktake"
 
 const { proxy } = getCurrentInstance()
@@ -143,7 +147,6 @@ const stocktakeList = ref([])
 const loading = ref(true)
 const showSearch = ref(true)
 const total = ref(0)
-const siteOptions = ref(["AE", "SA"])
 const createOpen = ref(false)
 const applyOpen = ref(false)
 const detailOpen = ref(false)
@@ -156,12 +159,18 @@ const data = reactive({
 })
 const { queryParams, createForm, applyForm } = toRefs(data)
 
+const { siteFilter, siteLabel } = useSiteScope(() => {
+  if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
+  if (queryParams.value) queryParams.value.pageNum = 1
+  getList()
+})
+if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const params = {
     offset: (queryParams.value.pageNum - 1) * queryParams.value.pageSize,
     limit: queryParams.value.pageSize,
-    siteCode: queryParams.value.siteCode
+    siteCode: siteFilter.value || undefined
   }
   listStocktake(params).then(response => {
     const payload = response.data || {}

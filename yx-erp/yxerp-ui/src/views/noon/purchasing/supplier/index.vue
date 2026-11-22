@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+  <el-alert title="全局供应商主数据：本页不随顶栏站点切换过滤（站点为记录属性）；站点级数据权限仍由服务端 SiteAuthGuard 控制。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-alert
       title="M3 隔离演示数据，成本口径只含采购价不含头程费用；收货不生成库存批次。"
       type="warning"

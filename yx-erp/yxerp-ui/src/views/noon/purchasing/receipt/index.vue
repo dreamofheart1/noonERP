@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 收货记录为只读台账，成本只含采购价；未实现的费用分摊待接入`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-alert
       title="M3 隔离演示数据，成本口径只含采购价不含头程费用；收货不生成库存批次。"
       type="warning"
@@ -10,6 +12,9 @@
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="86px">
       <el-form-item label="采购单ID" prop="orderId">
         <el-input-number v-model="queryParams.orderId" :min="1" :precision="0" controls-position="right" style="width:180px" placeholder="请输入采购单ID" @keyup.enter="handleQuery" />
+      </el-form-item>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
@@ -32,6 +37,7 @@
 </template>
 
 <script setup name="ReceiptPurchasing">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listReceipt } from "@/api/noon/purchasing/receipt"
 const { proxy } = getCurrentInstance()
 const receiptList = ref([])
@@ -44,10 +50,17 @@ const data = reactive({
   }
 })
 const { queryParams } = toRefs(data)
+const { siteFilter, siteLabel } = useSiteScope(() => {
+  if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
+  if (queryParams.value) queryParams.value.pageNum = 1
+  getList()
+})
+if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const { pageNum, ...rest } = queryParams.value
   const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit }
+  params.siteCode = siteFilter.value || undefined
   listReceipt(params).then(res => {
     const payload = res.data || {}
     receiptList.value = Array.isArray(payload.rows) ? payload.rows : []

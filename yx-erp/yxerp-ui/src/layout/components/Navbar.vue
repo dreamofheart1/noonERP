@@ -36,6 +36,27 @@
         <el-tooltip content="消息通知" effect="dark" placement="bottom">
           <header-notice id="header-notice" class="right-menu-item hover-effect" />
         </el-tooltip>
+
+        <el-tooltip content="站点切换（仅收敛展示与查询范围，不改变权限）" effect="dark" placement="bottom">
+          <span class="site-switch">
+            <el-select
+              id="site-select"
+              v-model="siteStore.siteCode"
+              class="site-select"
+              size="small"
+              placeholder="全部站点"
+              @change="handleSiteChange"
+            >
+              <el-option label="全部站点" value="ALL" />
+              <el-option
+                v-for="item in siteStore.siteOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </span>
+        </el-tooltip>
       </template>
 
       <el-dropdown @command="handleCommand" class="avatar-container right-menu-item hover-effect" trigger="hover">
@@ -80,6 +101,7 @@ import useAppStore from '@/store/modules/app'
 import useUserStore from '@/store/modules/user'
 import useLockStore from '@/store/modules/lock'
 import useSettingsStore from '@/store/modules/settings'
+import useSiteStore from '@/store/modules/site'
 import HeaderNotice from './HeaderNotice'
 
 const route = useRoute()
@@ -88,6 +110,15 @@ const appStore = useAppStore()
 const userStore = useUserStore()
 const lockStore = useLockStore()
 const settingsStore = useSettingsStore()
+const siteStore = useSiteStore()
+
+onMounted(() => {
+  siteStore.initSites()
+})
+
+function handleSiteChange(code) {
+  siteStore.setSite(code)
+}
 
 function toggleSideBar() {
   appStore.toggleSideBar()
@@ -264,6 +295,18 @@ async function toggleTheme(event) {
             transform: scale(1.15);
           }
         }
+      }
+    }
+
+    .site-switch {
+      display: inline-flex;
+      align-items: center;
+      height: 100%;
+      padding: 0 8px;
+      vertical-align: middle;
+
+      .site-select {
+        width: 104px;
       }
     }
 

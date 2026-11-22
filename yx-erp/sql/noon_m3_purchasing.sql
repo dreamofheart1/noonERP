@@ -46,8 +46,8 @@ CREATE TABLE IF NOT EXISTS md_sku_supplier (
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pur_order (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-  order_no        VARCHAR(64)  NOT NULL COMMENT '采购单业务编号',
-  supplier_id     BIGINT       NOT NULL,
+  order_no        VARCHAR(64)  NOT NULL COMMENT '采购单业务编号，服务端生成',
+  supplier_id     BIGINT       COMMENT '可空：供应商非必填，非空须为 ACTIVE 供应商',
   site_code       VARCHAR(16)  NOT NULL,
   currency        CHAR(3)      NOT NULL DEFAULT 'CNY',
   total_amount    DECIMAL(18,4) DEFAULT 0,

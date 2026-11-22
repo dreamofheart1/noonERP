@@ -59,7 +59,8 @@ WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE menu_id = 3122);
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name,
                       is_frame, is_cache, menu_type, visible, status, perms, icon,
                       create_by, create_time, update_by, update_time, remark)
-SELECT 3130, '采购单管理', 3100, 3, 'order', 'noon/purchasing/order/index', '', '', 1, 0, 'C', '0', '0',
+-- route_name=PurchaseOrder：与 M5 销售订单(3710, path 同为 'order')消歧，避免前端 addRoute 同名覆盖导致 404
+SELECT 3130, '采购单管理', 3100, 3, 'order', 'noon/purchasing/order/index', '', 'PurchaseOrder', 1, 0, 'C', '0', '0',
        'noon:purchasing:order:list', 'documentation', 'admin', NOW(), '', NULL, 'pur_order 管理（状态机/部分收货）'
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE menu_id = 3130);
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query, route_name,

@@ -8,7 +8,9 @@ import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
@@ -133,6 +135,30 @@ final class ShipmentCostRules
         return value;
     }
 
+    /** 单笔费用最多可关联的采购单数（防一次提交过大列表）。 */
+    static final int MAX_PO_IDS = 200;
+
+    /**
+     * 采购单多选关联：空合法（费用可只挂 ASN 或都不挂）；非空每个必须为正整数，
+     * 去重后按升序返回稳定列表（存在性/同站点由 Service 随后校验）。超过上限 400。
+     */
+    static List<Long> poIds(List<Long> values)
+    {
+        if (values == null || values.isEmpty()) return List.of();
+        if (values.size() > MAX_PO_IDS)
+            throw new IllegalArgumentException("单笔费用最多关联 " + MAX_PO_IDS + " 个采购单");
+        LinkedHashSet<Long> unique = new LinkedHashSet<>();
+        for (Long id : values)
+        {
+            if (id == null || id <= 0)
+                throw new IllegalArgumentException("poIds 中的采购单 id 必须为正整数");
+            unique.add(id);
+        }
+        List<Long> result = new ArrayList<>(unique);
+        Collections.sort(result);
+        return result;
+    }
+
     /** 选填备注：空白视为 null，去首尾空白，长度 ≤ 512。 */
     static String remark(String value)
     {
@@ -182,11 +208,30 @@ final class ShipmentCostRules
     static String createFingerprint(Long asnId, String siteCode, String period, String feeType, BigDecimal amount,
                                     String currency, BigDecimal fxRate, String allocationFlag, String remark)
     {
-        String canonical = "CREATE|" + (asnId == null ? "" : asnId) + '|' + siteCode + '|'
-                + (period == null ? "" : period) + '|' + feeType + '|' + amount.toPlainString() + '|'
-                + currency + '|' + fxRate.toPlainString() + '|' + allocationFlag + '|'
-                + (remark == null ? "" : remark);
-        return sha256Hex(canonical);
+        return createFingerprint(asnId, siteCode, period, feeType, amount, currency, fxRate,
+                allocationFlag, remark, List.of());
+    }
+
+    /**
+     * CREATE 内容指纹（含采购单多选）：在旧指纹末尾追加 {@code |poId1,poId2}（已由 {@link #poIds(List)}
+     * 规范化为升序去重）。同 requestId 若采购单选择不同即内容冲突 400。空 poIds 与旧指纹计算完全一致，
+     * 保证历史幂等行重放不受影响。
+     */
+    static String createFingerprint(Long asnId, String siteCode, String period, String feeType, BigDecimal amount,
+                                    String currency, BigDecimal fxRate, String allocationFlag, String remark,
+                                    List<Long> poIds)
+    {
+        StringBuilder canonical = new StringBuilder("CREATE|")
+                .append(asnId == null ? "" : asnId).append('|').append(siteCode).append('|')
+                .append(period == null ? "" : period).append('|').append(feeType).append('|')
+                .append(amount.toPlainString()).append('|').append(currency).append('|')
+                .append(fxRate.toPlainString()).append('|').append(allocationFlag).append('|')
+                .append(remark == null ? "" : remark);
+        // 仅当确实选了采购单才追加分段，保证未选采购单时与旧指纹逐字节一致（历史幂等行可安全重放）。
+        if (poIds != null && !poIds.isEmpty())
+            canonical.append('|').append(poIds.stream().map(String::valueOf)
+                    .collect(java.util.stream.Collectors.joining(",")));
+        return sha256Hex(canonical.toString());
     }
 
     /** 金额统一 4 位小数（HALF_UP）。 */

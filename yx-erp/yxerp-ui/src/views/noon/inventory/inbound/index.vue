@@ -4,10 +4,8 @@
       title="M4 隔离演示数据：入库确认后生成 FIFO 批次并更新四态台账；成本只含采购价、不摊头程。调拨/ASN/盘点属后续模块。"
       type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="86px">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" clearable placeholder="全部授权站点" style="width:180px">
-          <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
@@ -53,8 +51,8 @@
           <el-input-number v-model="form.warehouseId" :min="1" :precision="0" controls-position="right" style="width:200px" />
         </el-form-item>
         <el-form-item label="站点" prop="siteCode">
-          <el-select v-model="form.siteCode" clearable placeholder="与仓库归属一致" style="width:180px">
-            <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
+          <el-select v-model="form.siteCode" clearable placeholder="请选择授权站点" style="width:180px">
+            <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
           <span style="margin-left:8px;color:#909399;font-size:12px">实际以仓库归属为准校验</span>
         </el-form-item>
@@ -98,6 +96,7 @@
 </template>
 
 <script setup name="InboundInventory">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listInbound, getInbound, confirmInbound, getInboundResult } from "@/api/noon/inventory/inbound"
 import { getOrder } from "@/api/noon/purchasing/order"
 
@@ -106,7 +105,6 @@ const inboundList = ref([])
 const loading = ref(true)
 const showSearch = ref(true)
 const total = ref(0)
-const siteOptions = ref(["AE", "SA"])
 const formOpen = ref(false)
 const detailOpen = ref(false)
 const submitting = ref(false)
@@ -119,10 +117,17 @@ const data = reactive({
 })
 const { queryParams, form } = toRefs(data)
 
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  queryParams.value.siteCode = siteFilter.value || null
+  queryParams.value.pageNum = 1
+  getList()
+})
+queryParams.value.siteCode = siteFilter.value || null
+
 function getList() {
   loading.value = true
   const { pageNum, ...rest } = queryParams.value
-  const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit }
+  const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit, siteCode: siteFilter.value || undefined }
   listInbound(params).then(res => {
     const payload = res.data || {}
     inboundList.value = Array.isArray(payload.rows) ? payload.rows : []
@@ -144,7 +149,7 @@ function writePending(orderId, rid) { try { localStorage.setItem(pendingKey(orde
 function clearPending(orderId) { try { localStorage.removeItem(pendingKey(orderId)) } catch (e) {} }
 
 function handleAdd() {
-  form.value.purOrderId = null; form.value.warehouseId = null; form.value.siteCode = null; form.value.lines = []
+  form.value.purOrderId = null; form.value.warehouseId = null; form.value.siteCode = siteFilter.value || null; form.value.lines = []
   formTitle.value = "新增入库"
   formOpen.value = true
 }

@@ -332,6 +332,15 @@ class PurchasingServiceTest
                 "CNY 成本 = Σ(qty × unit_price × 1)");
         assertEquals(2, orderService.get(cny).items().size());
         assertEquals("DRAFT", orderService.get(cny).status());
+        assertTrue(orderService.get(cny).orderNo().startsWith("PO:AE:"),
+                "采购单号由服务端生成: " + orderService.get(cny).orderNo());
+
+        // 供应商可选：可空建单并可确认
+        long noSupplier = orderService.save(new OrderInput(null, null, "AE", "CNY", null, null,
+                List.of(new OrderItemInput(sku1, 2, new BigDecimal("10.0000"), "CNY", BigDecimal.ONE))));
+        assertNull(orderService.get(noSupplier).supplierId());
+        orderService.confirm(noSupplier);
+        assertEquals("CONFIRMED", orderService.get(noSupplier).status());
 
         IllegalArgumentException missingFx = assertThrows(IllegalArgumentException.class,
                 () -> orderService.save(new OrderInput("PO-CNY-2", supplier, "AE", "CNY", null, null,
@@ -365,10 +374,10 @@ class PurchasingServiceTest
                         List.of(new OrderItemInput(9999L, 1, new BigDecimal("10"), "CNY", BigDecimal.ONE)))));
         assertTrue(orphanSku.getMessage().contains("SKU 不存在"), orphanSku.getMessage());
 
-        IllegalArgumentException dupNo = assertThrows(IllegalArgumentException.class,
-                () -> orderService.save(new OrderInput("PO-CNY-1", supplier, "AE", "CNY", null, null,
-                        List.of(new OrderItemInput(sku1, 1, new BigDecimal("10"), "CNY", BigDecimal.ONE)))));
-        assertTrue(dupNo.getMessage().contains("采购单号"), dupNo.getMessage());
+        long another = orderService.save(new OrderInput("PO-CNY-1", supplier, "AE", "CNY", null, null,
+                List.of(new OrderItemInput(sku1, 1, new BigDecimal("10"), "CNY", BigDecimal.ONE))));
+        assertTrue(!orderService.get(cny).orderNo().equals(orderService.get(another).orderNo()),
+                "客户端重复传单号不影响服务端自动生成");
 
         // 修改：仅 DRAFT，orderNo/siteCode 不可变
         IllegalArgumentException codeChanged = assertThrows(IllegalArgumentException.class,
@@ -376,11 +385,11 @@ class PurchasingServiceTest
                         List.of(new OrderItemInput(sku1, 5, new BigDecimal("10"), "CNY", BigDecimal.ONE)))));
         assertTrue(codeChanged.getMessage().contains("不可变更"), codeChanged.getMessage());
         IllegalArgumentException siteChanged = assertThrows(IllegalArgumentException.class,
-                () -> orderService.update(cny, new OrderInput("PO-CNY-1", supplier, "SA", "CNY", null, null,
+                () -> orderService.update(cny, new OrderInput(null, supplier, "SA", "CNY", null, null,
                         List.of(new OrderItemInput(sku1, 5, new BigDecimal("10"), "CNY", BigDecimal.ONE)))));
         assertTrue(siteChanged.getMessage().contains("不可变更"), siteChanged.getMessage());
 
-        orderService.update(cny, new OrderInput("PO-CNY-1", supplier, "AE", "CNY", "MANUAL", null,
+        orderService.update(cny, new OrderInput(null, supplier, "AE", "CNY", "MANUAL", null,
                 List.of(new OrderItemInput(sku1, 10, new BigDecimal("11.0000"), "CNY", BigDecimal.ONE))));
         assertEquals(0, new BigDecimal("110.0000").compareTo(orderService.get(cny).totalAmount()),
                 "整体替换明细并重算合计");
@@ -393,7 +402,7 @@ class PurchasingServiceTest
                 () -> orderService.confirm(cny));
         assertTrue(confirmAgain.getMessage().contains("仅 DRAFT"), confirmAgain.getMessage());
         IllegalArgumentException updateConfirmed = assertThrows(IllegalArgumentException.class,
-                () -> orderService.update(cny, new OrderInput("PO-CNY-1", supplier, "AE", "CNY", null, null,
+                () -> orderService.update(cny, new OrderInput(null, supplier, "AE", "CNY", null, null,
                         List.of(new OrderItemInput(sku1, 1, new BigDecimal("11"), "CNY", BigDecimal.ONE)))));
         assertTrue(updateConfirmed.getMessage().contains("仅 DRAFT"), updateConfirmed.getMessage());
         IllegalArgumentException closeTooEarly = assertThrows(IllegalArgumentException.class,
@@ -414,12 +423,14 @@ class PurchasingServiceTest
         assertTrue(inactiveOnSave.getMessage().contains("已停用"), inactiveOnSave.getMessage());
 
         // 列表筛选
-        assertEquals(3, orderService.list(null, 0, 10, null).total(), "超管看全部（AE/SA）");
-        assertEquals(1, orderService.list(null, 0, 10, new OrderQuery("po-usd", null, null, null, null)).total());
+        assertEquals(5, orderService.list(null, 0, 10, null).total(), "超管看全部（AE/SA）：含无供应商单与重复传号单");
+        assertEquals(1, orderService.list(null, 0, 10,
+                new OrderQuery(orderService.get(usd).orderNo(), null, null, null, null)).total(),
+                "按服务端生成的单号可精确筛选");
         assertEquals(1, orderService.list(null, 0, 10,
                 new OrderQuery(null, null, "SA", null, null)).total());
-        assertEquals(1, orderService.list(null, 0, 10,
-                new OrderQuery(null, null, null, "confirmed", null)).total(), "status 过滤大小写不敏感");
+        assertEquals(2, orderService.list(null, 0, 10,
+                new OrderQuery(null, null, null, "confirmed", null)).total(), "status 过滤大小写不敏感，含无供应商已确认单");
         assertEquals(1, orderService.list(null, 0, 10,
                 new OrderQuery(null, null, null, null, "replenish_suggestion")).total());
         assertEquals(0, orderService.list(null, 0, 10,
@@ -430,7 +441,7 @@ class PurchasingServiceTest
         // 站点隔离：AE 用户只看 AE 单据；无站点零行
         login(2L);
         PageResult<OrderRow> aeOrders = orderService.list(null, 0, 10, null);
-        assertEquals(2, aeOrders.total(), "AE 用户只统计 AE 单据");
+        assertEquals(4, aeOrders.total(), "AE 用户只统计 AE 单据（含无供应商与重复传号单）");
         assertEquals(0, orderService.list(null, 0, 10, new OrderQuery(null, null, "SA", null, null)).total(),
                 "条件站点与授权交集为空即零行");
         assertThrows(AccessDeniedException.class, () -> orderService.get(draft2), "SA 单据详情拒绝");
@@ -1047,7 +1058,7 @@ class PurchasingServiceTest
                 + "created_at timestamp(3) not null default current_timestamp(3), "
                 + "constraint uk_sku_sup_eff unique(sku_id,supplier_id,effective_from))");
         jdbc.execute("create table pur_order (id bigint auto_increment primary key, order_no varchar(64) not null, "
-                + "supplier_id bigint not null, site_code varchar(16) not null, currency char(3) not null default 'CNY', "
+                + "supplier_id bigint, site_code varchar(16) not null, currency char(3) not null default 'CNY', "
                 + "total_amount decimal(18,4) default 0, status varchar(24) not null default 'DRAFT', "
                 + "source varchar(24) default 'MANUAL', source_ref_no varchar(64), operator_id bigint, "
                 + "config_snapshot_batch_no varchar(64), created_at timestamp(3) not null default current_timestamp(3), "

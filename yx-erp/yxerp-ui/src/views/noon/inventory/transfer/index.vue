@@ -6,13 +6,13 @@
 -->
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 调拨：发运拆在途子批次，收货转 OPEN；短少须登记异常，未实现项已标注`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-alert title="M4 调拨闭环：发运从源批次拆出在途子批次（源仓可用减/目标仓在途增），收货转 OPEN 并冲销短少。调拨单由上游单据/种子产生，本页负责发运与收货。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
 
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="80px">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" clearable placeholder="全部授权站点" style="width:170px">
-          <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
@@ -36,7 +36,7 @@
       <el-table-column label="明细数" align="center" prop="itemCount" width="90" />
       <el-table-column label="状态" align="center" prop="status" width="120">
         <template #default="scope">
-          <el-tag :type="scope.row.status === 'RECEIVED' ? 'success' : (scope.row.status === 'IN_TRANSIT' ? 'warning' : 'info')">{{ scope.row.status }}</el-tag>
+          <el-tag :type="scope.row.status === 'RECEIVED' ? 'success' : (scope.row.status === 'IN_TRANSIT' ? 'warning' : 'info')">{{ { DRAFT: '草稿', IN_TRANSIT: '在途', RECEIVED: '已收货' }[scope.row.status] || scope.row.status }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" align="center" prop="createdAt" min-width="170" />
@@ -60,6 +60,9 @@
     <!-- 新建调拨弹窗 -->
     <el-dialog title="新建调拨单" v-model="createOpen" width="720px" append-to-body>
       <el-form label-width="100px">
+        <el-form-item label="站点">
+          <el-tag type="info" effect="plain">{{ siteLabel }}（由顶栏站点上下文决定，源仓/目标仓须落在该站点）</el-tag>
+        </el-form-item>
         <el-form-item label="源仓ID"><el-input-number v-model="createForm.fromWarehouseId" :min="1" :precision="0" /></el-form-item>
         <el-form-item label="目标仓ID"><el-input-number v-model="createForm.toWarehouseId" :min="1" :precision="0" /></el-form-item>
         <el-form-item label="明细行">
@@ -153,6 +156,7 @@
 </template>
 
 <script setup name="TransferInventory">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listTransfer, getTransfer, createTransfer, shipTransfer, receiveTransfer, getTransferResult } from "@/api/noon/inventory/transfer"
 
 const { proxy } = getCurrentInstance()
@@ -160,7 +164,6 @@ const transferList = ref([])
 const loading = ref(true)
 const showSearch = ref(true)
 const total = ref(0)
-const siteOptions = ref(["AE", "SA"])
 const createOpen = ref(false)
 const shipOpen = ref(false)
 const receiveOpen = ref(false)
@@ -178,12 +181,18 @@ const data = reactive({
 const { queryParams, createForm, shipForm, receiveForm } = toRefs(data)
 
 /** 沿用生成器 getList 结构；PageResult 分页换算 */
+const { siteFilter, siteLabel } = useSiteScope(() => {
+  if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
+  if (queryParams.value) queryParams.value.pageNum = 1
+  getList()
+})
+if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const params = {
     offset: (queryParams.value.pageNum - 1) * queryParams.value.pageSize,
     limit: queryParams.value.pageSize,
-    siteCode: queryParams.value.siteCode
+    siteCode: siteFilter.value || undefined
   }
   listTransfer(params).then(response => {
     const payload = response.data || {}
@@ -218,7 +227,7 @@ function submitCreate() {
   }
   submitting.value = true
   createTransfer({ fromWarehouseId: createForm.value.fromWarehouseId, toWarehouseId: createForm.value.toWarehouseId,
-    siteCode: null, lines, requestId: newRequestId("CR") }).then(res => {
+    siteCode: siteFilter.value || null, lines, requestId: newRequestId("CR") }).then(res => {
     submitting.value = false
     if (res && res.data && res.data.replayed === true) proxy.$modal.msgWarning("该建单请求已处理（幂等重放）")
     else proxy.$modal.msgSuccess("调拨单已创建，可继续发运")

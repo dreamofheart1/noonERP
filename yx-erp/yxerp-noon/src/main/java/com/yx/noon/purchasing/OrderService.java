@@ -2,11 +2,14 @@ package com.yx.noon.purchasing;
 
 import java.math.BigDecimal;
 import java.sql.PreparedStatement;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 import com.yx.common.utils.SecurityUtils;
 import com.yx.framework.security.site.SiteAuthGuard;
@@ -38,6 +41,10 @@ public class OrderService
     private static final String ITEM_COLUMNS = "id,pur_order_id,sku_id,qty_ordered,qty_received,"
             + "unit_price,currency,fx_rate";
     static final String ENTITY = PurchasingAudit.ENTITY_ORDER;
+
+    /** 采购单号由服务端生成，客户端传入的 orderNo 一律忽略。 */
+    private static final String ORDER_NO_PREFIX = "PO:";
+    private static final int ORDER_NO_ATTEMPTS = 3;
 
     private static final RowMapper<OrderRow> MAPPER = (rs, i) -> new OrderRow(
             rs.getLong("id"),
@@ -148,49 +155,56 @@ public class OrderService
 
     /**
      * 新增采购单（契约 4.3）：仅超管，初始 DRAFT。site_code 先 requireSite；
-     * supplier ACTIVE、至少 1 行、行 sku ACTIVE、qty/unitPrice>0、fxRate 按币种、行币种等于订单币种。
+     * orderNo 由服务端生成；供应商可空，非空时必须 ACTIVE；至少 1 行、行 sku ACTIVE、
+     * qty/unitPrice>0、fxRate 按币种、行币种等于订单币种。
      */
     @Transactional(rollbackFor = Exception.class)
     public long save(OrderInput in)
     {
         Long operatorId = guard.requireAdministrator();
-        String orderNo = PurchasingRules.required("orderNo", in.orderNo(), 64);
         String siteCode = PurchasingRules.siteCode("siteCode", in.siteCode());
         guard.requireSite(siteCode);
-        PurchasingRefs.requireActiveSupplier(jdbc, in.supplierId());
+        PurchasingRefs.requireActiveSupplierIfPresent(jdbc, in.supplierId());
         String currency = PurchasingRules.currency(in.currency());
         String source = PurchasingRules.source(in.source());
         String sourceRefNo = PurchasingRules.optional("sourceRefNo", in.sourceRefNo(), 64);
         List<ItemValues> items = validateItems(in.items(), currency);
         BigDecimal total = total(items);
-        long id;
-        try
+        long id = 0L;
+        for (int attempt = 0; attempt < ORDER_NO_ATTEMPTS; attempt++)
         {
-            KeyHolder keys = new GeneratedKeyHolder();
-            jdbc.update(con ->
+            String orderNo = nextOrderNo(siteCode);
+            try
             {
-                PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO pur_order(order_no,supplier_id,site_code,currency,total_amount,status,"
-                                + "source,source_ref_no,operator_id) VALUES(?,?,?,?,?,'DRAFT',?,?,?)",
-                        new String[]{"id"});
-                ps.setString(1, orderNo);
-                ps.setObject(2, in.supplierId());
-                ps.setString(3, siteCode);
-                ps.setString(4, currency);
-                ps.setObject(5, total);
-                ps.setString(6, source);
-                ps.setString(7, sourceRefNo);
-                ps.setObject(8, operatorId);
-                return ps;
-            }, keys);
-            Number key = keys.getKey();
-            if (key == null) throw new IllegalStateException("采购单新增未返回主键");
-            id = key.longValue();
+                KeyHolder keys = new GeneratedKeyHolder();
+                jdbc.update(con ->
+                {
+                    PreparedStatement ps = con.prepareStatement(
+                            "INSERT INTO pur_order(order_no,supplier_id,site_code,currency,total_amount,status,"
+                                    + "source,source_ref_no,operator_id) VALUES(?,?,?,?,?,'DRAFT',?,?,?)",
+                            new String[]{"id"});
+                    ps.setString(1, orderNo);
+                    ps.setObject(2, in.supplierId());
+                    ps.setString(3, siteCode);
+                    ps.setString(4, currency);
+                    ps.setObject(5, total);
+                    ps.setString(6, source);
+                    ps.setString(7, sourceRefNo);
+                    ps.setObject(8, operatorId);
+                    return ps;
+                }, keys);
+                Number key = keys.getKey();
+                if (key == null) throw new IllegalStateException("采购单新增未返回主键");
+                id = key.longValue();
+                break;
+            }
+            catch (DuplicateKeyException e)
+            {
+                if (attempt == ORDER_NO_ATTEMPTS - 1)
+                    throw PurchasingRules.duplicate(e, "pur_order", "uk_pur_no", "采购单号生成冲突");
+            }
         }
-        catch (DuplicateKeyException e)
-        {
-            throw PurchasingRules.duplicate(e, "pur_order", "uk_pur_no", "采购单号 order_no 已存在");
-        }
+        if (id == 0L) throw new IllegalStateException("采购单号生成失败");
         insertItems(id, items);
         audit.record(ENTITY, id, PurchasingAudit.ACTION_INSERT, null, load(id));
         return id;
@@ -218,7 +232,7 @@ public class OrderService
         if (received != null && received > 0)
             throw new IllegalArgumentException("已有收货数量，不可整体修改明细: id=" + id);
 
-        PurchasingRefs.requireActiveSupplier(jdbc, in.supplierId());
+        PurchasingRefs.requireActiveSupplierIfPresent(jdbc, in.supplierId());
         String currency = PurchasingRules.currency(in.currency());
         String source = PurchasingRules.source(in.source());
         String sourceRefNo = PurchasingRules.optional("sourceRefNo", in.sourceRefNo(), 64);
@@ -247,7 +261,8 @@ public class OrderService
         OrderRow before = lockOrder(id);
         if (!"DRAFT".equals(before.status()))
             throw new IllegalArgumentException("仅 DRAFT 采购单可确认，当前状态 " + before.status());
-        PurchasingRefs.requireActiveSupplier(jdbc, before.supplierId());
+        if (before.supplierId() != null)
+            PurchasingRefs.requireActiveSupplierIfPresent(jdbc, before.supplierId());
         if (before.items().isEmpty())
             throw new IllegalArgumentException("采购单至少需要 1 行明细才能确认: id=" + id);
         for (OrderItemRow item : before.items())
@@ -331,6 +346,14 @@ public class OrderService
         OrderRow head = rows.get(0);
         return new OrderRow(head.id(), head.orderNo(), head.supplierId(), head.siteCode(), head.currency(),
                 head.totalAmount(), head.status(), head.source(), head.sourceRefNo(), head.operatorId(), items);
+    }
+
+    /** 服务端单号：PO:<SITE>:<yyyyMMdd>:<UUID8>，与 uk_pur_no 一起保证唯一。 */
+    private static String nextOrderNo(String siteCode)
+    {
+        return ORDER_NO_PREFIX + siteCode + ":"
+                + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE) + ":"
+                + UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase(Locale.ROOT);
     }
 
     private List<ItemValues> validateItems(List<OrderItemInput> items, String currency)

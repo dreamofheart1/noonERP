@@ -13,6 +13,8 @@
 
 若依是一套全部开源的快速开发平台，毫无保留给个人及企业免费使用。
 
+> Noon ERP 二次开发环境沿用本项目 Java 要求，并统一 MySQL 8、Redis 和前端 Node 版本；具体配置及初始化状态见 [开发环境规范](../docs/development-environment.md)。
+
 * 前端采用Vue、Element UI。
 * 后端采用Spring Boot、Spring Security、Redis & Jwt。
 * 权限认证使用Jwt，支持多终端认证系统。

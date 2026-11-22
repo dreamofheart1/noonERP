@@ -1,14 +1,13 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 仓库绑定站点与履约模式；创建后站点/履约模式不可变`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="110px">
         <el-form-item label="仓库编码" prop="warehouseCode">
           <el-input v-model="queryParams.warehouseCode" placeholder="请输入仓库编码" clearable style="width:200px" @keyup.enter="handleQuery" />
         </el-form-item>
-        <el-form-item label="站点" prop="siteCode">
-          <el-select v-model="queryParams.siteCode" placeholder="请选择站点" clearable style="width:200px">
-          <el-option label="AE" value="AE" />
-          <el-option label="SA" value="SA" />
-          </el-select>
+        <el-form-item label="站点">
+          <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
         </el-form-item>
         <el-form-item label="状态" prop="status">
           <el-select v-model="queryParams.status" placeholder="请选择状态" clearable style="width:200px">
@@ -65,9 +64,8 @@
         <el-input v-model="form.warehouseCode" placeholder="请输入仓库编码" />
       </el-form-item>
       <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="form.siteCode" placeholder="请选择站点" style="width:100%">
-          <el-option label="AE" value="AE" />
-          <el-option label="SA" value="SA" />
+        <el-select v-model="form.siteCode" placeholder="请选择授权站点" style="width:100%">
+          <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
         </el-select>
       </el-form-item>
       <el-form-item label="仓库名称" prop="warehouseName">
@@ -112,6 +110,7 @@
 </template>
 
 <script setup name="Warehouse">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listWarehouse, getWarehouse, addWarehouse, updateWarehouse, changeWarehouseStatus } from "@/api/noon/masterdata/warehouse"
 const { proxy } = getCurrentInstance()
 const warehouseList = ref([])
@@ -138,10 +137,17 @@ const data = reactive({
   }
 })
 const { queryParams, form, rules } = toRefs(data)
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  queryParams.value.siteCode = siteFilter.value || null
+  queryParams.value.pageNum = 1
+  getList()
+})
+queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const { pageNum, ...rest } = queryParams.value
   const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit }
+  params.siteCode = siteFilter.value || undefined
   listWarehouse(params).then(res => {
     const payload = res.data || {}
     warehouseList.value = Array.isArray(payload.rows) ? payload.rows : []
@@ -151,16 +157,17 @@ function getList() {
 }
 function cancel() { open.value = false; reset() }
 function reset() {
+  proxy.resetForm("warehouseRef")
   form.value = {
     warehouseCode: null,
-    siteCode: null,
+    // 新增默认站点取当前站点；ALL 时留空，必须由用户选择（仓库站点创建后不可变）
+    siteCode: siteFilter.value || null,
     warehouseName: null,
     warehouseType: null,
     fulfillmentMode: null,
     isFbn: null,
     status: null,
   }
-  proxy.resetForm("warehouseRef")
 }
 function handleQuery() { queryParams.value.pageNum = 1; getList() }
 function resetQuery() { proxy.resetForm("queryRef"); handleQuery() }

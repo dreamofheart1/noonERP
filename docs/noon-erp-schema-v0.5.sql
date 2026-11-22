@@ -291,8 +291,8 @@ DELIMITER ;
 
 CREATE TABLE IF NOT EXISTS pur_order (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-  order_no        VARCHAR(64)  NOT NULL COMMENT '采购单业务编号',
-  supplier_id     BIGINT       NOT NULL,
+  order_no        VARCHAR(64)  NOT NULL COMMENT '采购单业务编号，服务端生成',
+  supplier_id     BIGINT       COMMENT '可空：供应商非必填，非空须为 ACTIVE 供应商',
   site_code       VARCHAR(16)  NOT NULL,
   currency        CHAR(3)      NOT NULL DEFAULT 'CNY',
   total_amount    DECIMAL(18,4) DEFAULT 0,
@@ -571,6 +571,18 @@ CREATE TABLE IF NOT EXISTS log_shipment_cost (
   KEY idx_period (period),
   CONSTRAINT chk_ship_cost_alloc CHECK (allocation_flag IN ('NONE','PARTIAL','FULL'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='头程/关税/包材费用：只登记，不摊进 FIFO 批次';
+
+-- 头程费用 ↔ 采购单多对多关联：新增费用可多选关联多个采购单（asn_id 单关联并存）。
+-- 采购单必须存在且与费用同站点（写入前校验，跨站 400）；site_code 冗余用于审计追溯。
+CREATE TABLE IF NOT EXISTS log_shipment_cost_po (
+  cost_id     BIGINT       NOT NULL COMMENT '头程费用 id（log_shipment_cost.id）',
+  po_id       BIGINT       NOT NULL COMMENT '采购单 id（pur_order.id）',
+  site_code   VARCHAR(16)  NOT NULL COMMENT '冗余站点，便于审计与按站追溯',
+  created_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (cost_id, po_id),
+  KEY idx_po (po_id),
+  KEY idx_site (site_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='头程费用与采购单多对多关联（费用可多选采购单）';
 
 -- =============================================================================
 -- 下半部分（D/E/F 组、视图、初始化）接续于本文件

@@ -35,6 +35,10 @@ import org.springframework.transaction.annotation.Transactional;
  * <p><b>list / get</b>：站点授权过滤（传 siteCode 先 {@code requireSite} 再单站过滤；未传返回全部授权站点、
  * 空授权零行），total 为同条件真实总数；get 先取费用行真实 {@code site_code} 再 {@code requireSite}。
  *
+ * <p><b>采购单多选关联</b>：入参 {@code poIds} 可空；非空逐个校验存在且同站点（跨站/不存在 400，
+ * 发生在写入前），去重升序后同事务写 {@code log_shipment_cost_po} 多对多关联表；与 asnId 并存互不影响；
+ * 纳入 CREATE 内容指纹（同键改选采购单即内容冲突 400）；列表/详情回显关联采购单 id。
+ *
  * <p><b>边界（契约 §0）</b>：纯登记，<b>不动库存/批次/台账/COGS</b>；{@code allocation_flag} 的
  * PARTIAL/FULL 仅作标记，本批绝不实际分摊（分摊算法留 M6）。登记不可变（不支持修改/删除）。
  *
@@ -69,7 +73,8 @@ public class ShipmentCostService
             rs.getString("currency"),
             rs.getBigDecimal("fx_rate"),
             rs.getString("allocation_flag"),
-            rs.getTimestamp("created_at").toLocalDateTime());
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            List.of()); // poIds 由 list() 批量装载，避免逐行 N+1
 
     private static final RowMapper<ShipmentCostDetail> DETAIL_MAPPER = (rs, i) -> new ShipmentCostDetail(
             rs.getLong("id"),
@@ -83,7 +88,8 @@ public class ShipmentCostService
             rs.getBigDecimal("fx_rate"),
             rs.getString("allocation_flag"),
             rs.getString("remark"),
-            rs.getTimestamp("created_at").toLocalDateTime());
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            List.of()); // poIds 由 get() 单独装载
 
     private final JdbcTemplate jdbc;
     private final SiteAuthGuard guard;
@@ -122,13 +128,16 @@ public class ShipmentCostService
         String allocationFlag = ShipmentCostRules.allocationFlag(in.allocationFlag());
         String remark = ShipmentCostRules.remark(in.remark());
         Long asnId = ShipmentCostRules.asnId(in.asnId());
+        List<Long> poIds = ShipmentCostRules.poIds(in.poIds());
         String requestId = ShipmentCostRules.requireRequestId(in.requestId());
 
         // 契约 §3：带 asnId 时必须存在且与登记站点一致（跨站/不存在 400），且发生在任何写入之前。
         if (asnId != null) requireSameSiteAsn(asnId, siteCode);
+        // 采购单多选：每个必须存在且与登记站点一致（跨站/不存在 400），发生在任何写入之前。
+        if (!poIds.isEmpty()) requireSameSitePos(poIds, siteCode);
 
         String fingerprint = ShipmentCostRules.createFingerprint(asnId, siteCode, period, feeType, amount,
-                currency, fxRate, allocationFlag, remark);
+                currency, fxRate, allocationFlag, remark, poIds);
         ShipmentCostResult replayed = replayDone(requestId, siteCode, fingerprint);
         if (replayed != null) return replayed;
 
@@ -139,12 +148,16 @@ public class ShipmentCostService
         String resolvedPeriod = period == null ? ShipmentCostRules.periodOf(now) : period;
         Inserted inserted = insertCost(asnId, siteCode, resolvedPeriod, feeType, amount, currency, fxRate,
                 allocationFlag, remark, now);
+        // 同事务写采购单关联（多对多）；异常时随 PENDING 占位一起回滚。
+        insertCostPoLinks(inserted.id(), poIds, siteCode, now);
 
         audit.record(inserted.id(), ACTION_CREATE,
                 "costNo=" + inserted.costNo() + ",site=" + siteCode + ",period=" + resolvedPeriod
                         + ",feeType=" + feeType + ",amount=" + amount.toPlainString() + ",currency=" + currency
                         + ",fxRate=" + fxRate.toPlainString() + ",allocation=" + allocationFlag
-                        + ",asnId=" + (asnId == null ? "" : asnId),
+                        + ",asnId=" + (asnId == null ? "" : asnId)
+                        + ",poIds=" + (poIds.isEmpty() ? "" : poIds.stream().map(String::valueOf)
+                                .collect(java.util.stream.Collectors.joining(","))),
                 operatorId);
 
         // 提交前写回首次结果：cost_id=真实 id + status=DONE + result_json（replayed=false）。异常时整事务回滚。
@@ -226,6 +239,7 @@ public class ShipmentCostService
         pageArgs.add(offset);
         List<ShipmentCostRow> rows = jdbc.query("SELECT " + ROW_COLUMNS + " FROM log_shipment_cost" + where
                 + " ORDER BY id DESC LIMIT ? OFFSET ?", ROW_MAPPER, pageArgs.toArray());
+        attachPoIdsToRows(rows);
         return new PageResult<>(rows, total);
     }
 
@@ -237,7 +251,9 @@ public class ShipmentCostService
         ShipmentCostDetail detail = loadDetailOrNull(id);
         if (detail == null) throw new IllegalArgumentException("费用登记不存在: id=" + id);
         guard.requireSite(detail.siteCode());
-        return detail;
+        return new ShipmentCostDetail(detail.id(), detail.costNo(), detail.asnId(), detail.siteCode(),
+                detail.period(), detail.feeType(), detail.amount(), detail.currency(), detail.fxRate(),
+                detail.allocationFlag(), detail.remark(), detail.createdAt(), loadPoIds(id));
     }
 
     // ---------------------------------------------------------------- 校验辅助
@@ -253,6 +269,72 @@ public class ShipmentCostService
         if (asnSite == null || !asnSite.equals(siteCode))
             throw new IllegalArgumentException("ASN 站点 " + asnSite + " 与登记站点 " + siteCode
                     + " 不一致，不允许跨站关联: asnId=" + asnId);
+    }
+
+    /**
+     * 采购单多选校验：逐个查 pur_order，任一不存在即 400、任一跨站即 400（发生在任何写入之前）。
+     * 单次 IN 查询批量取回，避免逐个查库。
+     */
+    private void requireSameSitePos(List<Long> poIds, String siteCode)
+    {
+        String in = ShipmentCostRules.placeholders(poIds.size());
+        List<PoSite> found = jdbc.query("SELECT id,site_code FROM pur_order WHERE id IN (" + in + ")",
+                (rs, i) -> new PoSite(rs.getLong("id"), rs.getString("site_code")), poIds.toArray());
+        java.util.Map<Long, String> siteById = new java.util.HashMap<>();
+        for (PoSite p : found) siteById.put(p.id(), p.siteCode());
+        for (Long poId : poIds)
+        {
+            String poSite = siteById.get(poId);
+            if (poSite == null)
+                throw new IllegalArgumentException("采购单不存在: poId=" + poId);
+            if (!siteCode.equals(poSite))
+                throw new IllegalArgumentException("采购单站点 " + poSite + " 与登记站点 " + siteCode
+                        + " 不一致，不允许跨站关联: poId=" + poId);
+        }
+    }
+
+    /** 同事务写费用↔采购单关联行；poIds 为空则不写。 */
+    private void insertCostPoLinks(long costId, List<Long> poIds, String siteCode, LocalDateTime now)
+    {
+        if (poIds.isEmpty()) return;
+        for (Long poId : poIds)
+            jdbc.update("INSERT INTO log_shipment_cost_po(cost_id,po_id,site_code,created_at) VALUES(?,?,?,?)",
+                    costId, poId, siteCode, now);
+    }
+
+    /** 单笔费用关联的采购单 id（升序）。 */
+    private List<Long> loadPoIds(long costId)
+    {
+        return jdbc.query("SELECT po_id FROM log_shipment_cost_po WHERE cost_id=? ORDER BY po_id",
+                (rs, i) -> rs.getLong("po_id"), costId);
+    }
+
+    /** 批量装载当前页各费用的采购单 id，避免逐行查库（N+1）。 */
+    private void attachPoIdsToRows(List<ShipmentCostRow> rows)
+    {
+        if (rows.isEmpty()) return;
+        List<Long> ids = rows.stream().map(ShipmentCostRow::id).collect(java.util.stream.Collectors.toList());
+        String in = ShipmentCostRules.placeholders(ids.size());
+        List<PoLink> links = jdbc.query("SELECT cost_id,po_id FROM log_shipment_cost_po WHERE cost_id IN ("
+                        + in + ") ORDER BY cost_id,po_id",
+                (rs, i) -> new PoLink(rs.getLong("cost_id"), rs.getLong("po_id")), ids.toArray());
+        java.util.Map<Long, List<Long>> byCost = new java.util.HashMap<>();
+        for (PoLink link : links) byCost.computeIfAbsent(link.costId(), k -> new ArrayList<>()).add(link.poId());
+        for (int i = 0; i < rows.size(); i++)
+        {
+            ShipmentCostRow r = rows.get(i);
+            rows.set(i, new ShipmentCostRow(r.id(), r.costNo(), r.asnId(), r.siteCode(), r.period(),
+                    r.feeType(), r.amount(), r.currency(), r.fxRate(), r.allocationFlag(), r.createdAt(),
+                    byCost.getOrDefault(r.id(), List.of())));
+        }
+    }
+
+    private record PoSite(long id, String siteCode)
+    {
+    }
+
+    private record PoLink(long costId, long poId)
+    {
     }
 
     /**

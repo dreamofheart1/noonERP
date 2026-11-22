@@ -1,10 +1,10 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · ASN：DRAFT → SEALED → RECEIVED（子批次 SEALED 后为 IN_TRANSIT）；仅 DRAFT 可封单、仅 SEALED 可收货；Slot 预约未实现`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryFormRef" size="small" :inline="true" v-show="showSearch">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" placeholder="全部授权站点" clearable style="width: 140px">
-          <el-option label="AE" value="AE" /><el-option label="SA" value="SA" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
@@ -24,7 +24,11 @@
       <el-table-column label="ASN 号" prop="asnNo" min-width="180" />
       <el-table-column label="站点" prop="siteCode" width="70" />
       <el-table-column label="FBN 仓" prop="warehouseCode" width="130" />
-      <el-table-column label="状态" prop="status" width="100" />
+      <el-table-column label="状态" prop="status" width="100">
+        <template #default="scope">
+          <el-tag :type="scope.row.status === 'RECEIVED' ? 'success' : (scope.row.status === 'SEALED' ? 'warning' : 'info')">{{ { DRAFT: '草稿', SEALED: '已封单', RECEIVED: '已收货' }[scope.row.status] || scope.row.status }}</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="行数" prop="itemCount" width="70" />
       <el-table-column label="创建时间" prop="createdAt" width="160" />
       <el-table-column label="操作" align="center" min-width="200" class-name="small-padding fixed-width">
@@ -41,9 +45,9 @@
     <!-- 新建 ASN 弹窗 -->
     <el-dialog title="新建 ASN" v-model="createOpen" width="640px" append-to-body>
       <el-form ref="createFormRef" :model="createForm" label-width="100px" size="small">
-        <el-form-item label="站点" prop="siteCode">
-          <el-select v-model="createForm.siteCode" placeholder="请选择" style="width: 100%">
-            <el-option label="AE" value="AE" /><el-option label="SA" value="SA" />
+        <el-form-item label="站点" required>
+          <el-select v-model="createForm.siteCode" placeholder="请选择授权站点" style="width: 100%">
+            <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="FBN 仓编码" prop="warehouseCode">
@@ -139,6 +143,7 @@
 </template>
 
 <script setup name="Asn">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { ref, reactive, toRefs, getCurrentInstance } from 'vue'
 import { listAsn, getAsn, getAsnResult, createAsn, sealAsn, receiveAsn } from '@/api/noon/inbound/asn'
 
@@ -158,7 +163,8 @@ const receiveTarget = ref(null)
 
 const data = reactive({
   queryParams: { pageNum: 1, pageSize: 10, siteCode: null },
-  createForm: { siteCode: 'AE', warehouseCode: '', lines: [] },
+  // 新建 ASN 默认站点在 openCreate 时取自当前站点；ALL 时留空，必须由用户选择
+  createForm: { siteCode: null, warehouseCode: '', lines: [] },
   receiveForm: { asnId: null, lines: [] }
 })
 const { queryParams, createForm, receiveForm } = toRefs(data)
@@ -172,12 +178,19 @@ function readPending(action) { try { return localStorage.getItem(pendingKey(acti
 function writePending(action, rid) { try { localStorage.setItem(pendingKey(action), rid) } catch (e) {} }
 function clearPending(action) { try { localStorage.removeItem(pendingKey(action)) } catch (e) {} }
 
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  queryParams.value.siteCode = siteFilter.value || null
+  queryParams.value.pageNum = 1
+  getList()
+})
+queryParams.value.siteCode = siteFilter.value || null
+
 function getList() {
   loading.value = true
   listAsn({
     offset: (queryParams.value.pageNum - 1) * queryParams.value.pageSize,
     limit: queryParams.value.pageSize,
-    siteCode: queryParams.value.siteCode || undefined
+    siteCode: siteFilter.value || undefined
   }).then(res => {
     const payload = res.data || {}
     rows.value = Array.isArray(payload.rows) ? payload.rows : []
@@ -189,7 +202,7 @@ function resetQuery() { queryParams.value = { pageNum: 1, pageSize: 10, siteCode
 
 function addLine() { createForm.value.lines.push({ skuId: null, batchNo: '', qtyShipped: null, partnerSku: '' }) }
 function handleCreate() {
-  Object.assign(createForm.value, { siteCode: 'AE', warehouseCode: '' })
+  Object.assign(createForm.value, { siteCode: siteFilter.value || null, warehouseCode: '' })
   createForm.value.lines = [{ skuId: null, batchNo: '', qtyShipped: null, partnerSku: '' }]
   createOpen.value = true
 }

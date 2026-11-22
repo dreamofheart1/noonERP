@@ -157,6 +157,71 @@ class ShipmentCostServiceTest
         assertEquals(consumptions, count("inv_batch_consumption"));
     }
 
+    // ------------------------------------------------------- 采购单多选关联
+
+    @Test
+    void createWithMultiplePurchaseOrdersStoresDedupedLinksAndEchoesInDetailAndList()
+    {
+        login(1L);
+        long po1 = newPo("PO-AE-1", "AE");
+        long po2 = newPo("PO-AE-2", "AE");
+        long poSa = newPo("PO-SA-1", "SA");
+
+        // 传入重复 id（po2 两次）→ 去重升序；含 ASN 并存互不影响。
+        ShipmentCostResult created = service.create(new ShipmentCostInput(null, "AE", "2026-11", "FREIGHT",
+                new BigDecimal("500"), "CNY", BigDecimal.ONE, null, "多采购单费用", rid(),
+                java.util.List.of(po2, po1, po2)));
+        assertTrue(created.costId() > 0);
+
+        // 关联表：去重后两行，均带费用站点；SA 采购单未被关联。
+        assertEquals(2, count("log_shipment_cost_po"));
+        assertEquals(2, jdbc.queryForObject("select count(*) from log_shipment_cost_po where cost_id=? and site_code='AE'",
+                Integer.class, created.costId()));
+        assertEquals(0, jdbc.queryForObject("select count(*) from log_shipment_cost_po where po_id=?",
+                Integer.class, poSa));
+
+        // 详情回显升序去重。
+        ShipmentCostDetail detail = service.get(created.costId());
+        assertEquals(java.util.List.of(po1, po2), detail.poIds());
+        assertTrue(String.valueOf(jdbc.queryForMap("select detail from noon_m4_inventory_audit")
+                .get("detail")).contains("poIds=" + po1 + "," + po2), "审计记录关联采购单");
+
+        // 列表回显（批量装载，非 N+1 逻辑不影响结果）。
+        ShipmentCostRow row = service.list("AE", 0, 10, null).rows().stream()
+                .filter(r -> r.id() == created.costId()).findFirst().orElseThrow();
+        assertEquals(java.util.List.of(po1, po2), row.poIds());
+    }
+
+    @Test
+    void createRejectsCrossSiteOrMissingPurchaseOrder()
+    {
+        login(1L);
+        long poSa = newPo("PO-SA-2", "SA");
+        // 跨站采购单 400，且不写任何费用/关联行。
+        assertBad(new ShipmentCostInput(null, "AE", "2026-11", "FREIGHT", new BigDecimal("1"), "CNY",
+                BigDecimal.ONE, null, null, rid(), java.util.List.of(poSa)));
+        // 不存在的采购单 400。
+        assertBad(new ShipmentCostInput(null, "AE", "2026-11", "FREIGHT", new BigDecimal("1"), "CNY",
+                BigDecimal.ONE, null, null, rid(), java.util.List.of(999999L)));
+        assertEquals(0, count("log_shipment_cost"));
+        assertEquals(0, count("log_shipment_cost_po"));
+    }
+
+    @Test
+    void sameRequestIdWithDifferentPoIdsIsContentConflict()
+    {
+        login(1L);
+        long po1 = newPo("PO-AE-3", "AE");
+        long po2 = newPo("PO-AE-4", "AE");
+        String rid = rid();
+        service.create(new ShipmentCostInput(null, "AE", "2026-11", "FREIGHT", new BigDecimal("1"), "CNY",
+                BigDecimal.ONE, null, null, rid, java.util.List.of(po1)));
+        // 同键改选采购单 → 内容指纹不同 → 400 冲突，不新增费用行。
+        assertBad(new ShipmentCostInput(null, "AE", "2026-11", "FREIGHT", new BigDecimal("1"), "CNY",
+                BigDecimal.ONE, null, null, rid, java.util.List.of(po2)));
+        assertEquals(1, count("log_shipment_cost"));
+    }
+
     @Test
     void periodDefaultsToBusinessMonthAndCnyFxMustBeExplicitOne()
     {
@@ -273,12 +338,12 @@ class ShipmentCostServiceTest
                 + "\"createdAt\":\"2000-01-01T00:00:00\"}";
         ShipmentCostInput in = mapper.readValue(json, ShipmentCostInput.class);
 
-        // record 分量只有契约 §2 的 10 个；主键/单号/状态/时刻没有入口。
+        // record 分量只有契约 §2 的业务字段（含新增 poIds）；主键/单号/状态/时刻没有入口。
         List<String> components = new ArrayList<>();
         for (java.lang.reflect.RecordComponent component : ShipmentCostInput.class.getRecordComponents())
             components.add(component.getName());
         assertEquals(List.of("asnId", "siteCode", "period", "feeType", "amount", "currency", "fxRate",
-                "allocationFlag", "remark", "requestId"), components);
+                "allocationFlag", "remark", "requestId", "poIds"), components);
 
         ShipmentCostResult created = service.create(in);
         assertTrue(created.costId() > 0 && created.costId() != 999, "主键服务端生成");
@@ -605,6 +670,12 @@ class ShipmentCostServiceTest
         return jdbc.queryForObject("select id from log_asn where asn_no=?", Long.class, asnNo);
     }
 
+    private long newPo(String orderNo, String site)
+    {
+        jdbc.update("insert into pur_order(order_no,site_code,status) values (?,?,'DRAFT')", orderNo, site);
+        return jdbc.queryForObject("select id from pur_order where order_no=?", Long.class, orderNo);
+    }
+
     private int count(String table)
     {
         return jdbc.queryForObject("select count(*) from " + table, Integer.class);
@@ -663,6 +734,16 @@ class ShipmentCostServiceTest
                 + "status varchar(24) not null default 'DRAFT', source varchar(24) not null default 'MANUAL', "
                 + "created_at timestamp(3) not null default current_timestamp(3), "
                 + "constraint uk_asn_no unique(asn_no))");
+        // 采购单主表（采购单多选校验：存在 + 同站点；仅取最小列集）。
+        jdbc.execute("create table pur_order (id bigint auto_increment primary key, "
+                + "order_no varchar(64) not null, site_code varchar(16) not null, "
+                + "status varchar(24) not null default 'DRAFT', "
+                + "created_at timestamp(3) not null default current_timestamp(3), "
+                + "constraint uk_pur_no unique(order_no))");
+        // 费用 ↔ 采购单多对多关联表。
+        jdbc.execute("create table log_shipment_cost_po (cost_id bigint not null, po_id bigint not null, "
+                + "site_code varchar(16) not null, created_at timestamp(3) not null default current_timestamp(3), "
+                + "constraint pk_cost_po primary key (cost_id, po_id))");
         jdbc.execute("create table noon_m4_shipment_cost_request (request_id varchar(64) not null primary key, "
                 + "cost_id bigint not null, site_code varchar(16) not null, operator_id bigint, "
                 + "content_fingerprint char(64) not null, status varchar(16) not null default 'PENDING', "

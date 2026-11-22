@@ -1,13 +1,13 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 订单：IMPORTED → DELIVERED → RETURNED/CANCELLED；仅 DELIVERED 触发 FIFO；退货 A/B/C 分级处置已接入，时效校验未实现`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-tabs v-model="activeTab" @tab-click="handleTab">
       <!-- ============ 订单 tab ============ -->
       <el-tab-pane label="销售订单" name="order">
         <el-form :model="orderQuery" ref="orderQueryRef" size="small" :inline="true" v-show="showSearch">
-          <el-form-item label="站点" prop="siteCode">
-            <el-select v-model="orderQuery.siteCode" placeholder="全部授权站点" clearable style="width: 140px">
-              <el-option label="AE" value="AE" /><el-option label="SA" value="SA" />
-            </el-select>
+          <el-form-item label="站点">
+            <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
           </el-form-item>
           <el-form-item label="订单号" prop="orderNo"><el-input v-model="orderQuery.orderNo" placeholder="订单号" clearable style="width: 140px" /></el-form-item>
           <el-form-item label="状态" prop="status">
@@ -43,10 +43,8 @@
       <!-- ============ 退货 tab ============ -->
       <el-tab-pane label="退货单" name="return">
         <el-form :model="returnQuery" ref="returnQueryRef" size="small" :inline="true" v-show="showSearch">
-          <el-form-item label="站点" prop="siteCode">
-            <el-select v-model="returnQuery.siteCode" placeholder="全部授权站点" clearable style="width: 140px">
-              <el-option label="AE" value="AE" /><el-option label="SA" value="SA" />
-            </el-select>
+          <el-form-item label="站点">
+            <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
           </el-form-item>
           <el-form-item label="订单号" prop="orderNo"><el-input v-model="returnQuery.orderNo" placeholder="订单号" clearable style="width: 140px" /></el-form-item>
           <el-form-item label="分级" prop="grade">
@@ -85,7 +83,7 @@
     <!-- 订单导入弹窗 -->
     <el-dialog title="订单导入" v-model="importOrderOpen" width="560px" append-to-body>
       <el-form ref="importOrderFormRef" :model="importOrderForm" label-width="100px" size="small">
-        <el-form-item label="站点"><el-select v-model="importOrderForm.siteCode" style="width:100%"><el-option label="AE" value="AE" /><el-option label="SA" value="SA" /></el-select></el-form-item>
+        <el-form-item label="站点" required><el-select v-model="importOrderForm.siteCode" placeholder="请选择授权站点" style="width:100%"><el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" /></el-select></el-form-item>
         <el-form-item label="订单号"><el-input v-model="importOrderForm.orderNo" placeholder="平台订单号" /></el-form-item>
         <el-form-item label="门店ID"><el-input v-model="importOrderForm.storeId" type="number" placeholder="md_store id" /></el-form-item>
         <el-form-item label="SKU ID"><el-input v-model="importOrderForm.skuId" type="number" placeholder="md_sku id" /></el-form-item>
@@ -110,7 +108,7 @@
     <!-- 退货导入弹窗 -->
     <el-dialog title="退货入账" v-model="importReturnOpen" width="520px" append-to-body>
       <el-form ref="importReturnFormRef" :model="importReturnForm" label-width="110px" size="small">
-        <el-form-item label="站点"><el-select v-model="importReturnForm.siteCode" style="width:100%"><el-option label="AE" value="AE" /><el-option label="SA" value="SA" /></el-select></el-form-item>
+        <el-form-item label="站点" required><el-select v-model="importReturnForm.siteCode" placeholder="请选择授权站点" style="width:100%"><el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" /></el-select></el-form-item>
         <el-form-item label="订单号"><el-input v-model="importReturnForm.orderNo" placeholder="父订单号" /></el-form-item>
         <el-form-item label="平台退货号"><el-input v-model="importReturnForm.sourceReturnNo" placeholder="平台退货单号" /></el-form-item>
         <el-form-item label="订单行ID"><el-input v-model="importReturnForm.salOrderItemId" type="number" placeholder="父订单行 id" /></el-form-item>
@@ -153,6 +151,7 @@
 </template>
 
 <script setup name="SalesFlow">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { ref, reactive, getCurrentInstance } from 'vue'
 import {
   importOrder, deliverOrder, importReturn, reverseReturn, disposeReturn,
@@ -173,19 +172,28 @@ const orderRows = ref([])
 const returnRows = ref([])
 const orderTotal = ref(0)
 const returnTotal = ref(0)
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  orderQuery.value.siteCode = siteFilter.value || null
+  returnQuery.value.siteCode = siteFilter.value || null
+  orderQuery.value.pageNum = 1
+  returnQuery.value.pageNum = 1
+  handleTab()
+})
+orderQuery.value.siteCode = siteFilter.value || null
+returnQuery.value.siteCode = siteFilter.value || null
 
 function newRequestId() { return 'm5-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10) }
 
 function getOrders() {
   loading.value = true
-  listOrders(orderQuery.value).then(res => {
+  listOrders({ ...orderQuery.value, siteCode: siteFilter.value || undefined }).then(res => {
     const p = res.data || {}
     orderRows.value = p.rows || []; orderTotal.value = p.total || 0
   }).catch(() => {}).finally(() => { loading.value = false })
 }
 function getReturns() {
   loading.value = true
-  listReturns(returnQuery.value).then(res => {
+  listReturns({ ...returnQuery.value, siteCode: siteFilter.value || undefined }).then(res => {
     const p = res.data || {}
     returnRows.value = p.rows || []; returnTotal.value = p.total || 0
   }).catch(() => {}).finally(() => { loading.value = false })
@@ -199,11 +207,12 @@ getOrders()
 const importOrderOpen = ref(false)
 const importOrderForm = ref({})
 function openImportOrder() {
-  importOrderForm.value = { siteCode: 'AE', orderNo: '', storeId: null, skuId: null, partnerSku: '', grossAmount: null, qty: null, currency: 'AED' }
+  importOrderForm.value = { siteCode: siteFilter.value || null, orderNo: '', storeId: null, skuId: null, partnerSku: '', grossAmount: null, qty: null, currency: 'AED' }
   importOrderOpen.value = true
 }
 function submitImportOrder() {
   const f = importOrderForm.value
+  if (!f.siteCode) { proxy.$modal.msgWarning('请选择授权站点'); return }
   if (!f.orderNo || !f.storeId || !f.skuId || !f.partnerSku || f.grossAmount === null || !(f.qty > 0)) { proxy.$modal.msgWarning('请填全订单字段且数量>0'); return }
   importOrder({ ...f, sourceChannel: 'MANUAL', requestId: newRequestId() }).then(() => {
     proxy.$modal.msgSuccess('导入成功'); importOrderOpen.value = false; getOrders()
@@ -226,11 +235,12 @@ function submitDeliver() {
 const importReturnOpen = ref(false)
 const importReturnForm = ref({})
 function openImportReturn() {
-  importReturnForm.value = { siteCode: 'AE', orderNo: '', sourceReturnNo: '', salOrderItemId: null, qty: null }
+  importReturnForm.value = { siteCode: siteFilter.value || null, orderNo: '', sourceReturnNo: '', salOrderItemId: null, qty: null }
   importReturnOpen.value = true
 }
 function submitImportReturn() {
   const f = importReturnForm.value
+  if (!f.siteCode) { proxy.$modal.msgWarning('请选择授权站点'); return }
   if (!f.orderNo || !f.sourceReturnNo || !f.salOrderItemId || !(f.qty > 0)) { proxy.$modal.msgWarning('请填全退货字段且数量>0'); return }
   importReturn({ ...f, requestId: newRequestId() }).then(() => {
     proxy.$modal.msgSuccess('退货入账成功'); importReturnOpen.value = false; getReturns()

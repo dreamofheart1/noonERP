@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 状态机：DRAFT → CONFIRMED → PARTIAL_RECEIVED → RECEIVED → CLOSED；仅当前状态可用操作`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-alert
       title="M3 隔离演示数据，成本口径只含采购价不含头程费用；收货不生成库存批次。"
       type="warning"
@@ -14,11 +16,8 @@
       <el-form-item label="供应商ID" prop="supplierId">
         <el-input-number v-model="queryParams.supplierId" :min="1" :precision="0" controls-position="right" style="width:150px" placeholder="供应商ID" />
       </el-form-item>
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" placeholder="请选择站点" clearable style="width:130px">
-          <el-option label="AE" value="AE" />
-          <el-option label="SA" value="SA" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item label="状态" prop="status">
         <el-select v-model="queryParams.status" placeholder="请选择状态" clearable style="width:160px">
@@ -44,13 +43,16 @@
     <el-row :gutter="10" class="mb8">
       <el-col :span="1.5"><el-button type="primary" plain icon="Plus" @click="handleAdd" v-hasPermi="['noon:purchasing:order:add']">新增</el-button></el-col>
       <el-col :span="1.5"><el-button type="success" plain icon="Edit" :disabled="single" @click="handleUpdate" v-hasPermi="['noon:purchasing:order:edit']">修改</el-button></el-col>
+      <el-col :span="1.5"><el-button type="warning" plain icon="Truck" @click="goShipmentCost">头程费用</el-button></el-col>
       <right-toolbar v-model:showSearch="showSearch" @queryTable="getList" />
     </el-row>
     <el-table v-loading="loading" :data="orderList" @selection-change="handleSelectionChange" border>
       <el-table-column type="selection" width="55" align="center" />
       <el-table-column label="ID" align="center" prop="id" width="80" />
       <el-table-column label="采购单号" align="center" prop="orderNo" show-overflow-tooltip />
-      <el-table-column label="供应商ID" align="center" prop="supplierId" width="100" />
+      <el-table-column label="供应商" align="center" prop="supplierId" width="120">
+        <template #default="scope">{{ supplierDisplay(scope.row.supplierId) }}</template>
+      </el-table-column>
       <el-table-column label="站点" align="center" prop="siteCode" width="80" />
       <el-table-column label="币种" align="center" prop="currency" width="80" />
       <el-table-column label="采购成本(CNY)" align="center" prop="totalAmount" width="130" />
@@ -78,21 +80,22 @@
         <el-row>
           <el-col :span="12">
             <el-form-item label="采购单号" prop="orderNo">
-              <el-input v-model="form.orderNo" placeholder="请输入采购单号" />
+              <el-input :model-value="form.orderNo" disabled :placeholder="form.id ? '系统生成，不可修改' : '保存后由系统自动生成'" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="供应商ID" prop="supplierId">
-              <el-input-number v-model="form.supplierId" :min="1" :precision="0" controls-position="right" style="width:100%" placeholder="请输入供应商ID" />
+            <el-form-item label="供应商" prop="supplierId">
+              <el-input :model-value="supplierLabel" readonly placeholder="可为空" style="width:calc(100% - 150px)" />
+              <el-button style="margin-left:8px" icon="Search" @click="openSupplierDialog">选择供应商</el-button>
+              <el-button v-if="form.supplierId" link type="danger" @click="clearSupplier">清空</el-button>
             </el-form-item>
           </el-col>
         </el-row>
         <el-row>
           <el-col :span="8">
             <el-form-item label="站点" prop="siteCode">
-              <el-select v-model="form.siteCode" placeholder="请选择站点" style="width:100%">
-                <el-option label="AE" value="AE" />
-                <el-option label="SA" value="SA" />
+              <el-select v-model="form.siteCode" placeholder="请选择授权站点" style="width:100%">
+                <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -121,9 +124,12 @@
         <el-form-item label="采购明细" prop="items">
           <el-table :data="form.items" border size="small">
             <el-table-column label="序号" type="index" width="55" align="center" />
-            <el-table-column label="SKU ID" width="150" align="center">
+            <el-table-column label="商品（SKU）" width="260" align="center">
               <template #default="scope">
-                <el-input-number v-model="scope.row.skuId" :min="1" :precision="0" controls-position="right" style="width:100%" />
+                <el-button link type="primary" icon="Search" @click="openSkuDialog(scope.$index)">
+                  {{ scope.row.skuCode ? scope.row.skuCode + (scope.row.skuName ? ' / ' + scope.row.skuName : '') : '选择系统内商品' }}
+                </el-button>
+                <div v-if="scope.row.skuId" style="color:#909399;font-size:11px">ID {{ scope.row.skuId }}</div>
               </template>
             </el-table-column>
             <el-table-column label="订购数量" width="140" align="center">
@@ -158,13 +164,66 @@
             </el-table-column>
           </el-table>
           <el-button type="primary" plain icon="Plus" size="mini" style="margin-top:8px" @click="addItem">添加明细</el-button>
-          <div style="color:#909399;font-size:12px;margin-top:6px">成本口径 = Σ(单价 × 汇率)，CNY 汇率固定为 1；"带价"按当天有效报价带出单价。</div>
+          <div style="color:#909399;font-size:12px;margin-top:6px">商品来自「商品与基础资料 → SKU 管理」；选中后自动带出 SKU 编码与名称。成本口径 = Σ(单价 × 汇率)，CNY 汇率固定为 1；"带价"需已选供应商及有效报价。</div>
         </el-form-item>
       </el-form>
       <template #footer>
         <div class="dialog-footer">
           <el-button type="primary" @click="submitForm">确 定</el-button>
           <el-button @click="cancel">取 消</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="选择商品（系统内 SKU）" v-model="skuDialogOpen" width="900px" append-to-body>
+      <el-form :inline="true" size="small">
+        <el-form-item label="SKU 编码/名称">
+          <el-input v-model="skuKeyword" placeholder="输入编码或名称搜索" clearable style="width:240px" @keyup.enter="searchSku" />
+        </el-form-item>
+        <el-form-item><el-button type="primary" icon="Search" @click="searchSku">搜索</el-button></el-form-item>
+      </el-form>
+      <el-table :data="skuRows" v-loading="skuLoading" border highlight-current-row size="small" @current-change="row => currentSku = row">
+        <el-table-column label="ID" prop="id" width="80" align="center" />
+        <el-table-column label="SKU 编码" prop="skuCode" width="160" />
+        <el-table-column label="名称 EN" prop="nameEn" min-width="220" />
+        <el-table-column label="类目" prop="categoryCode" width="130" />
+        <el-table-column label="状态" prop="status" width="90" align="center" />
+        <el-table-column label="操作" width="80" align="center">
+          <template #default="scope">
+            <el-button link type="primary" @click="currentSku = scope.row">选择</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button type="primary" :disabled="!currentSku" @click="confirmSku">确定</el-button>
+          <el-button @click="skuDialogOpen = false">取 消</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="选择供应商" v-model="supplierDialogOpen" width="900px" append-to-body>
+      <el-form :inline="true" size="small">
+        <el-form-item label="供应商编号/名称">
+          <el-input v-model="supplierKeyword" placeholder="输入编号或名称搜索" clearable style="width:240px" @keyup.enter="searchSupplier" />
+        </el-form-item>
+        <el-form-item><el-button type="primary" icon="Search" @click="searchSupplier">搜索</el-button></el-form-item>
+      </el-form>
+      <el-table :data="supplierRows" v-loading="supplierLoading" border highlight-current-row size="small" @current-change="row => currentSupplier = row">
+        <el-table-column label="ID" prop="id" width="80" align="center" />
+        <el-table-column label="供应商编号" prop="supplierNo" width="160" />
+        <el-table-column label="名称" prop="supplierName" min-width="240" />
+        <el-table-column label="状态" prop="status" width="90" align="center" />
+        <el-table-column label="操作" width="80" align="center">
+          <template #default="scope">
+            <el-button link type="primary" @click="currentSupplier = scope.row">选择</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button type="primary" :disabled="!currentSupplier" @click="confirmSupplier">确定</el-button>
+          <el-button @click="supplierDialogOpen = false">取 消</el-button>
         </div>
       </template>
     </el-dialog>
@@ -193,8 +252,12 @@
 </template>
 
 <script setup name="OrderPurchasing">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listOrder, getOrder, addOrder, updateOrder, confirmOrder, closeOrder } from "@/api/noon/purchasing/order"
+import { listSupplier } from "@/api/noon/purchasing/supplier"
+import { listSku } from "@/api/noon/masterdata/sku"
 import { getEffectiveQuotation } from "@/api/noon/purchasing/quotation"
+import { useRoute, useRouter } from "vue-router"
 import { receiveGoods, getReceiptResult } from "@/api/noon/purchasing/receipt"
 const { proxy } = getCurrentInstance()
 const orderList = ref([])
@@ -208,6 +271,27 @@ const title = ref("")
 const receiveOpen = ref(false)
 const receiveTitle = ref("")
 const receiveForm = reactive({ orderId: null, lines: [], requestId: null })
+const router = useRouter()
+const route = useRoute()
+const skuCatalog = ref([])
+const supplierCatalog = ref([])
+const skuDialogOpen = ref(false)
+const skuKeyword = ref("")
+const skuRows = ref([])
+const skuLoading = ref(false)
+const currentSku = ref(null)
+const pickingSkuIndex = ref(-1)
+const supplierDialogOpen = ref(false)
+const supplierKeyword = ref("")
+const supplierRows = ref([])
+const supplierLoading = ref(false)
+const currentSupplier = ref(null)
+const supplierLabel = computed(() => {
+  const f = form.value || {}
+  if (f.supplierName) return f.supplierName + (f.supplierNo ? ' · ' + f.supplierNo : '')
+  if (f.supplierNo) return f.supplierNo
+  return f.supplierId ? '供应商 ID ' + f.supplierId : ''
+})
 
 // 一次收货提交动作生成唯一幂等键：重试复用同一个，真实第二次收货用新值（契约 v2 §9.1）
 function newRequestId() {
@@ -240,7 +324,7 @@ const sourceMap = {
 }
 function statusInfo(s) { return statusMap[s] || { label: s || '-', type: 'info' } }
 function sourceLabel(s) { return sourceMap[s] || s || '-' }
-function newItem() { return { skuId: null, qtyOrdered: 1, unitPrice: null, currency: 'CNY', fxRate: 1 } }
+function newItem() { return { skuId: null, skuCode: null, skuName: null, qtyOrdered: 1, unitPrice: null, currency: 'CNY', fxRate: 1 } }
 function todayStr() {
   const d = new Date()
   const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -257,8 +341,6 @@ const data = reactive({
     source: null,
   },
   rules: {
-    orderNo: [{ required: true, message: '采购单号不能为空', trigger: 'blur' }],
-    supplierId: [{ required: true, message: '供应商ID不能为空', trigger: 'change' }],
     siteCode: [{ required: true, message: '站点不能为空', trigger: 'change' }],
     currency: [{ required: true, message: '币种不能为空', trigger: 'change' }],
     source: [{ required: true, message: '来源不能为空', trigger: 'change' }],
@@ -269,14 +351,23 @@ const { queryParams, form, rules } = toRefs(data)
 function checkItems(rule, value, callback) {
   if (!value || !value.length) {
     callback(new Error('请至少添加一行采购明细'))
+  } else if (value.some(it => !it.skuId)) {
+    callback(new Error('请为每行采购明细选择系统内商品'))
   } else {
     callback()
   }
 }
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  queryParams.value.siteCode = siteFilter.value || null
+  queryParams.value.pageNum = 1
+  getList()
+})
+queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const { pageNum, ...rest } = queryParams.value
   const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit }
+  params.siteCode = siteFilter.value || undefined
   listOrder(params).then(res => {
     const payload = res.data || {}
     orderList.value = Array.isArray(payload.rows) ? payload.rows : []
@@ -286,20 +377,98 @@ function getList() {
 }
 function cancel() { open.value = false; reset() }
 function reset() {
+  // 先清校验/旧值，再写入默认值，避免 resetFields 覆盖「默认站点=当前站点」
+  proxy.resetForm("orderRef")
   form.value = {
     id: null,
     orderNo: null,
     supplierId: null,
-    siteCode: null,
+    supplierNo: null,
+    supplierName: null,
+    // 新增默认站点取当前站点；ALL 时留空，必须由用户选择（不伪造站点）
+    siteCode: siteFilter.value || null,
     currency: 'CNY',
     source: 'MANUAL',
     sourceRefNo: null,
     items: [newItem()],
   }
-  proxy.resetForm("orderRef")
 }
 function addItem() { form.value.items.push(newItem()) }
 function removeItem(index) { form.value.items.splice(index, 1) }
+function supplierDisplay(id) {
+  if (!id) return '未指定'
+  const s = supplierCatalog.value.find(x => x.id === id)
+  return s ? (s.supplierName || s.supplierNo || ('ID ' + id)) : ('ID ' + id)
+}
+function loadSkuCatalog() {
+  return listSku({ offset: 0, limit: 200, status: 'ACTIVE' }).then(res => {
+    skuCatalog.value = (res && res.data && Array.isArray(res.data.rows)) ? res.data.rows : []
+  }).catch(() => { skuCatalog.value = [] })
+}
+function loadSupplierCatalog() {
+  return listSupplier({ offset: 0, limit: 200, status: 'ACTIVE' }).then(res => {
+    supplierCatalog.value = (res && res.data && Array.isArray(res.data.rows)) ? res.data.rows : []
+  }).catch(() => { supplierCatalog.value = [] })
+}
+function applySkuToItem(index, sku) {
+  if (!sku) return
+  const item = form.value.items[index]
+  if (!item) return
+  item.skuId = sku.id
+  item.skuCode = sku.skuCode
+  item.skuName = sku.nameEn || sku.nameAr || ''
+}
+function openSkuDialog(index) {
+  pickingSkuIndex.value = index
+  skuKeyword.value = ''
+  currentSku.value = null
+  skuRows.value = skuCatalog.value.slice(0, 50)
+  skuDialogOpen.value = true
+}
+function searchSku() {
+  skuLoading.value = true
+  const q = { offset: 0, limit: 200, status: 'ACTIVE' }
+  if (skuKeyword.value) { q.skuCode = skuKeyword.value; q.nameEn = skuKeyword.value }
+  listSku(q).then(res => {
+    skuRows.value = (res && res.data && Array.isArray(res.data.rows)) ? res.data.rows : []
+    currentSku.value = null
+  }).catch(() => { skuRows.value = [] }).finally(() => { skuLoading.value = false })
+}
+function confirmSku() {
+  if (!currentSku.value) return
+  applySkuToItem(pickingSkuIndex.value, currentSku.value)
+  skuDialogOpen.value = false
+}
+function openSupplierDialog() {
+  supplierKeyword.value = ''
+  currentSupplier.value = null
+  supplierRows.value = supplierCatalog.value.slice(0, 50)
+  supplierDialogOpen.value = true
+}
+function searchSupplier() {
+  supplierLoading.value = true
+  const q = { offset: 0, limit: 200, status: 'ACTIVE' }
+  if (supplierKeyword.value) { q.supplierNo = supplierKeyword.value; q.supplierName = supplierKeyword.value }
+  listSupplier(q).then(res => {
+    supplierRows.value = (res && res.data && Array.isArray(res.data.rows)) ? res.data.rows : []
+    currentSupplier.value = null
+  }).catch(() => { supplierRows.value = [] }).finally(() => { supplierLoading.value = false })
+}
+function confirmSupplier() {
+  if (!currentSupplier.value) return
+  form.value.supplierId = currentSupplier.value.id
+  form.value.supplierNo = currentSupplier.value.supplierNo
+  form.value.supplierName = currentSupplier.value.supplierName
+  supplierDialogOpen.value = false
+}
+function clearSupplier() {
+  form.value.supplierId = null
+  form.value.supplierNo = null
+  form.value.supplierName = null
+}
+function goShipmentCost() {
+  router.push({ path: '/noon-logistics/shipment-cost', query: siteFilter.value ? { siteCode: siteFilter.value } : {} })
+}
 function onCurrencyChange(val) {
   form.value.items.forEach(it => {
     it.currency = val
@@ -308,10 +477,8 @@ function onCurrencyChange(val) {
 }
 function fillPrice(index) {
   const item = form.value.items[index]
-  if (!item.skuId || !form.value.supplierId) {
-    proxy.$modal.msgWarning("请先填写 SKU ID 与供应商ID")
-    return
-  }
+  if (!item.skuId) { proxy.$modal.msgWarning("请先选择系统内商品"); return }
+  if (!form.value.supplierId) { proxy.$modal.msgWarning("供应商为空，无法带价；请手工录入单价"); return }
   getEffectiveQuotation({ skuId: item.skuId, supplierId: form.value.supplierId, at: todayStr() }).then(res => {
     const q = res && res.data
     if (!q) {
@@ -342,6 +509,8 @@ function handleUpdate(row) {
       id: o.id,
       orderNo: o.orderNo,
       supplierId: o.supplierId,
+      supplierNo: o.supplierId ? (supplierCatalog.value.find(s => s.id === o.supplierId)?.supplierNo || null) : null,
+      supplierName: o.supplierId ? (supplierCatalog.value.find(s => s.id === o.supplierId)?.supplierName || null) : null,
       siteCode: o.siteCode,
       currency: o.currency || 'CNY',
       source: o.source || 'MANUAL',
@@ -349,6 +518,8 @@ function handleUpdate(row) {
       items: Array.isArray(o.items) && o.items.length
         ? o.items.map(it => ({
             skuId: it.skuId,
+            skuCode: skuCatalog.value.find(s => s.id === it.skuId)?.skuCode || null,
+            skuName: skuCatalog.value.find(s => s.id === it.skuId)?.nameEn || null,
             qtyOrdered: it.qtyOrdered,
             unitPrice: it.unitPrice != null ? Number(it.unitPrice) : null,
             currency: it.currency || o.currency || 'CNY',
@@ -364,8 +535,8 @@ function submitForm() {
   proxy.$refs["orderRef"].validate(valid => {
     if (!valid) return
     const payload = {
-      orderNo: form.value.orderNo,
-      supplierId: form.value.supplierId,
+      orderNo: form.value.id ? form.value.orderNo : null,
+      supplierId: form.value.supplierId || null,
       siteCode: form.value.siteCode,
       currency: form.value.currency,
       source: form.value.source,
@@ -450,5 +621,17 @@ function submitReceive() {
   })
   // 提交失败/响应未知时保留 pending，重开弹窗会先查询再决定是否复用
 }
+function initFromRoute() {
+  const raw = route.query && route.query.skuId
+  const skuId = raw ? Number(raw) : null
+  if (!skuId) return
+  handleAdd()
+  const sku = skuCatalog.value.find(s => s.id === skuId)
+  if (sku) applySkuToItem(0, sku)
+  else loadSkuCatalog().then(() => applySkuToItem(0, skuCatalog.value.find(s => s.id === skuId)))
+}
+loadSkuCatalog()
+loadSupplierCatalog()
+onMounted(initFromRoute)
 getList()
 </script>

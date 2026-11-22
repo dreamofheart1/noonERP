@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+  <el-alert title="全局主数据：本页不随顶栏站点切换过滤（站点为记录属性）；站点级数据权限仍由服务端 SiteAuthGuard 控制。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="110px">
         <el-form-item label="Partner SKU" prop="partnerSku">
           <el-input v-model="queryParams.partnerSku" placeholder="请输入Partner SKU" clearable style="width:200px" @keyup.enter="handleQuery" />

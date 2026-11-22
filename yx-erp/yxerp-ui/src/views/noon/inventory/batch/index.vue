@@ -7,11 +7,11 @@
 -->
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · FIFO 批次按 received_at/batch_id 出库；COGS 唯一来源 inv_batch_consumption`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="80px">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" clearable placeholder="全部授权站点" style="width:170px">
-          <el-option v-for="s in siteOptions" :key="s" :label="s" :value="s" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item label="SKU" prop="skuId">
         <el-input-number v-model="queryParams.skuId" :min="1" :precision="0" controls-position="right" style="width:170px" />
@@ -54,6 +54,7 @@
 </template>
 
 <script setup name="BatchInventory">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { listBatch } from "@/api/noon/inventory/batch"
 
 const { proxy } = getCurrentInstance()
@@ -62,7 +63,6 @@ const batchList = ref([])
 const loading = ref(true)
 const showSearch = ref(true)
 const total = ref(0)
-const siteOptions = ref(["AE", "SA"])
 
 const data = reactive({
   queryParams: {
@@ -75,12 +75,18 @@ const data = reactive({
 const { queryParams } = toRefs(data)
 
 /** 查询批次列表（沿用生成器 getList 结构；换算 PageResult 分页） */
+const { siteFilter, siteLabel } = useSiteScope(() => {
+  if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
+  if (queryParams.value) queryParams.value.pageNum = 1
+  getList()
+})
+if (queryParams.value) queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   const params = {
     offset: (queryParams.value.pageNum - 1) * queryParams.value.pageSize,
     limit: queryParams.value.pageSize,
-    siteCode: queryParams.value.siteCode,
+    siteCode: siteFilter.value || undefined,
     skuId: queryParams.value.skuId
   }
   listBatch(params).then(response => {

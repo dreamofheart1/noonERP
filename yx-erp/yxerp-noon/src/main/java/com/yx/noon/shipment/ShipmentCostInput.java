@@ -1,6 +1,7 @@
 package com.yx.noon.shipment;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * 头程/关税/包材费用登记入参（契约 §2）。
@@ -18,6 +19,8 @@ import java.math.BigDecimal;
  * @param allocationFlag 空默认 NONE；NONE / PARTIAL / FULL，仅标记不实际分摊
  * @param remark         ≤ 512
  * @param requestId      动作级幂等键，8–64 位 [A-Za-z0-9_-]
+ * @param poIds          可空；多选关联的采购单 id（pur_order.id），去重后每个必须同站点存在；
+ *                      与 asnId 并存互不影响，落关联表 log_shipment_cost_po
  */
 public record ShipmentCostInput(
         Long asnId,
@@ -29,6 +32,14 @@ public record ShipmentCostInput(
         BigDecimal fxRate,
         String allocationFlag,
         String remark,
-        String requestId)
+        String requestId,
+        List<Long> poIds)
 {
+    /** 兼容旧调用（无采购单多选）的 10 参构造器，poIds 视为空。 */
+    public ShipmentCostInput(Long asnId, String siteCode, String period, String feeType,
+                             BigDecimal amount, String currency, BigDecimal fxRate,
+                             String allocationFlag, String remark, String requestId)
+    {
+        this(asnId, siteCode, period, feeType, amount, currency, fxRate, allocationFlag, remark, requestId, null);
+    }
 }

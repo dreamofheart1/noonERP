@@ -79,14 +79,15 @@ class MySqlShipmentCostIT
         jdbc = new JdbcTemplate(context.getBean(DataSource.class));
         tx = new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
 
-        // 真实 schema v0.5 表（迁移脚本不建）：费用主表、ASN、批次消耗（COGS，用于零写入断言）。
+        // 真实 schema v0.5 表（迁移脚本不建）：费用主表、ASN、采购单（多选校验）、批次消耗（零写入断言）。
         String schema = Files.readString(Path.of("../../docs/noon-erp-schema-v0.5.sql"));
-        for (String table : new String[]{"log_shipment_cost", "log_asn", "inv_batch_consumption"})
+        for (String table : new String[]{"log_shipment_cost", "log_asn", "pur_order", "inv_batch_consumption"})
             jdbc.execute(extractCreateTable(schema, table));
         // M4 第一轮正式迁移：共享审计表 + 库存对象（用于契约 §0 零写入断言）。
         runSqlFile("../sql/noon_m4_inventory.sql");
-        // 本批正式迁移：幂等表。
+        // 本批正式迁移：幂等表 + 费用↔采购单关联表。
         runSqlFile("../sql/noon_m4_shipment_cost.sql");
+        runSqlFile("../sql/noon_m4_shipment_cost_po_link.sql");
 
         clean();
         GRANTS.clear();
@@ -118,10 +119,12 @@ class MySqlShipmentCostIT
     void migrationIsIdempotentAndRealChecksHold()
     {
         runSqlFileUnchecked("../sql/noon_m4_shipment_cost.sql"); // 第二次：幂等
-        assertEquals(4, jdbc.queryForObject("select count(*) from information_schema.tables "
+        runSqlFileUnchecked("../sql/noon_m4_shipment_cost_po_link.sql"); // 第二次：幂等
+        assertEquals(5, jdbc.queryForObject("select count(*) from information_schema.tables "
                         + "where table_schema=database() and table_name in ('log_shipment_cost','log_asn',"
-                        + "'noon_m4_shipment_cost_request','noon_m4_inventory_audit')", Integer.class),
-                "费用主表 + ASN + 幂等表 + 共享审计表应存在");
+                        + "'noon_m4_shipment_cost_request','noon_m4_inventory_audit',"
+                        + "'log_shipment_cost_po')", Integer.class),
+                "费用主表 + ASN + 幂等表 + 共享审计表 + 采购单关联表应存在");
 
         // DB CHECK：allocation_flag ∈ NONE/PARTIAL/FULL（真 DDL chk_ship_cost_alloc）。
         jdbc.update("insert into log_shipment_cost(cost_no,site_code,fee_type,amount,currency,fx_rate,"
@@ -352,9 +355,9 @@ class MySqlShipmentCostIT
     private void clean()
     {
         for (String table : new String[]{"noon_m4_shipment_cost_request", "noon_m4_inventory_audit",
-                "log_shipment_cost", "log_asn", "inv_stock_move", "inv_stock_ledger",
-                "inv_batch_consumption", "inv_batch", "inv_inbound_item", "inv_inbound",
-                "noon_m4_inbound_request"})
+                "log_shipment_cost_po", "log_shipment_cost", "log_asn", "pur_order",
+                "inv_stock_move", "inv_stock_ledger", "inv_batch_consumption", "inv_batch",
+                "inv_inbound_item", "inv_inbound", "noon_m4_inbound_request"})
             jdbc.execute("delete from " + table);
     }
 

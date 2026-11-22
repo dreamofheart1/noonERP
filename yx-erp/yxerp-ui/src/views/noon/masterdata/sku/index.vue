@@ -1,5 +1,7 @@
 <template>
   <div class="app-container">
+  <el-alert title="全局主数据：本页不随顶栏站点切换过滤（站点为记录属性）；站点级数据权限仍由服务端 SiteAuthGuard 控制。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryRef" :inline="true" v-show="showSearch" label-width="110px">
         <el-form-item label="SKU编码" prop="skuCode">
           <el-input v-model="queryParams.skuCode" placeholder="请输入SKU编码" clearable style="width:200px" @keyup.enter="handleQuery" />
@@ -45,8 +47,9 @@
           <el-tag :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'">{{ scope.row.status === 'ACTIVE' ? '启用' : '停用' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" align="center" class-name="small-padding fixed-width" width="180">
+      <el-table-column label="操作" align="center" class-name="small-padding fixed-width" width="260">
         <template #default="scope">
+          <el-button link type="success" icon="ShoppingCart" @click="toPurchaseOrder(scope.row)" v-if="scope.row.status === 'ACTIVE'" v-hasPermi="['noon:purchasing:order:add']">转采购</el-button>
           <el-button link type="primary" icon="Edit" @click="handleUpdate(scope.row)" v-hasPermi="['noon:masterdata:sku:save']">修改</el-button>
           <el-button link type="warning" icon="Close" @click="handleStatus(scope.row, 'INACTIVE')" v-if="scope.row.status === 'ACTIVE'" v-hasPermi="['noon:masterdata:sku:status']">停用</el-button>
           <el-button link type="primary" icon="Check" @click="handleStatus(scope.row, 'ACTIVE')" v-if="scope.row.status === 'INACTIVE'" v-hasPermi="['noon:masterdata:sku:status']">启用</el-button>
@@ -102,7 +105,9 @@
 
 <script setup name="Sku">
 import { listSku, getSku, addSku, updateSku, changeSkuStatus } from "@/api/noon/masterdata/sku"
+import { useRouter } from "vue-router"
 const { proxy } = getCurrentInstance()
+const router = useRouter()
 const skuList = ref([])
 const open = ref(false)
 const loading = ref(true)
@@ -156,6 +161,9 @@ function handleQuery() { queryParams.value.pageNum = 1; getList() }
 function resetQuery() { proxy.resetForm("queryRef"); handleQuery() }
 function handleSelectionChange(sel) { ids.value = sel.map(i => i.id); single.value = sel.length !== 1 }
 function handleAdd() { reset(); open.value = true; title.value = "添加SKU" }
+function toPurchaseOrder(row) {
+  router.push({ path: '/noon-purchasing/order', query: { skuId: row.id } })
+}
 function handleUpdate(row) {
   reset()
   const _id = row.id || ids.value[0]

@@ -23,3 +23,14 @@ config/secrets/
 
 # WorkBuddy local project data
 .workbuddy/
+
+# 验证过程产物（浏览器截图/测试输出/生成器原始产物/压缩包）——契约与报告文档仍需提交
+docs/verification/**/browser/
+docs/verification/**/e2e-output.txt
+docs/verification/**/keyflow-output.txt
+docs/verification/**/generated/raw/
+docs/verification/**/*.zip
+
+# Python 缓存
+__pycache__/
+*.pyc

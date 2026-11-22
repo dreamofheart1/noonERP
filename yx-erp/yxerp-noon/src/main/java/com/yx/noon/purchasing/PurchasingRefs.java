@@ -17,6 +17,13 @@ final class PurchasingRefs
     static void requireActiveSupplier(JdbcTemplate jdbc, Long supplierId)
     {
         PurchasingRules.requiredId("supplierId", supplierId);
+        requireActiveSupplierIfPresent(jdbc, supplierId);
+    }
+
+    /** 采购单供应商可选：null 直接放行；非 null 时必须存在且 ACTIVE。报价仍走上面的严格校验。 */
+    static void requireActiveSupplierIfPresent(JdbcTemplate jdbc, Long supplierId)
+    {
+        if (supplierId == null) return;
         List<String> status = jdbc.query("SELECT status FROM md_supplier WHERE id=?",
                 (rs, i) -> rs.getString("status"), supplierId);
         if (status.isEmpty()) throw new IllegalArgumentException("供应商不存在: id=" + supplierId);

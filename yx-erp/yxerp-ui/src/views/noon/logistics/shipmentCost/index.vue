@@ -1,11 +1,11 @@
 <template>
   <div class="app-container">
+  <el-alert :title="`当前站点：${siteLabel} · 头程费用本页仅登记（allocationFlag 为标记），实际分摊与利润接入未实现`" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+  <el-alert title="基础流程：SKU 管理 → 采购单 → ASN 入仓 → 头程费用。新增费用可多选关联当前站点的采购单（跨站/不存在将被拒绝），并与 ASN 关联并存。" type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
+
     <el-form :model="queryParams" ref="queryForm" size="small" :inline="true" v-show="showSearch">
-      <el-form-item label="站点" prop="siteCode">
-        <el-select v-model="queryParams.siteCode" placeholder="全部授权站点" clearable style="width: 140px">
-          <el-option label="AE" value="AE" />
-          <el-option label="SA" value="SA" />
-        </el-select>
+      <el-form-item label="站点">
+        <el-tag type="info" effect="plain">{{ siteLabel }}（顶栏切换）</el-tag>
       </el-form-item>
       <el-form-item label="费用类型" prop="feeType">
         <el-select v-model="queryParams.feeType" placeholder="全部" clearable style="width: 150px">
@@ -36,6 +36,12 @@
       <el-table-column label="费用单号" prop="costNo" min-width="170" />
       <el-table-column label="站点" prop="siteCode" width="70" />
       <el-table-column label="ASN" prop="asnId" width="80" />
+      <el-table-column label="关联采购单" width="120">
+        <template #default="scope">
+          <el-tag v-if="scope.row.poIds && scope.row.poIds.length" size="small" type="success" effect="plain">{{ scope.row.poIds.length }} 单</el-tag>
+          <span v-else style="color:#909399">—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="期间" prop="period" width="90" />
       <el-table-column label="类型" prop="feeType" width="110" />
       <el-table-column label="金额" prop="amount" width="110" />
@@ -55,13 +61,20 @@
     <!-- 新建费用弹窗 -->
     <el-dialog title="新增头程费用" v-model="createOpen" width="560px" append-to-body>
       <el-form ref="createFormRef" :model="createForm" label-width="100px" size="small">
-        <el-form-item label="站点" prop="siteCode">
-          <el-select v-model="createForm.siteCode" placeholder="请选择" style="width: 100%">
-            <el-option label="AE" value="AE" /><el-option label="SA" value="SA" />
+        <el-form-item label="站点" required>
+          <el-select v-model="createForm.siteCode" placeholder="请选择授权站点" style="width: 100%">
+            <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="ASN ID" prop="asnId">
           <el-input v-model="createForm.asnId" placeholder="可选，留空表示不挂 ASN" type="number" />
+        </el-form-item>
+        <el-form-item label="关联采购单">
+          <el-select v-model="createForm.poIds" multiple filterable clearable collapse-tags
+                     placeholder="可多选，仅当前站点采购单" style="width: 100%" :loading="poLoading">
+            <el-option v-for="po in poOptions" :key="po.id" :label="poOrderLabel(po)" :value="po.id" />
+          </el-select>
+          <div style="font-size:12px;color:#909399;line-height:1.4">可多选；跨站或不存在的采购单将被拒绝。</div>
         </el-form-item>
         <el-form-item label="期间" prop="period">
           <el-input v-model="createForm.period" placeholder="YYYY-MM，留空取当前月" />
@@ -114,6 +127,12 @@
         <el-descriptions-item label="汇率">{{ detail.fxRate }}</el-descriptions-item>
         <el-descriptions-item label="分摊标记">{{ detail.allocationFlag }}</el-descriptions-item>
         <el-descriptions-item label="登记时间">{{ detail.createdAt }}</el-descriptions-item>
+        <el-descriptions-item label="关联采购单" :span="2">
+          <template v-if="detail.poIds && detail.poIds.length">
+            <el-tag v-for="pid in detail.poIds" :key="pid" size="small" effect="plain" style="margin-right:6px">{{ poLabelById(pid) }}</el-tag>
+          </template>
+          <span v-else>—</span>
+        </el-descriptions-item>
         <el-descriptions-item label="备注" :span="2">{{ detail.remark }}</el-descriptions-item>
       </el-descriptions>
     </el-dialog>
@@ -121,8 +140,10 @@
 </template>
 
 <script setup name="ShipmentCost">
+import { useSiteScope } from "@/composables/useSiteScope"
 import { ref, reactive, toRefs, getCurrentInstance } from 'vue'
 import { listShipmentCost, getShipmentCost, getShipmentCostResult, createShipmentCost } from '@/api/noon/logistics/shipmentCost'
+import { listOrder } from '@/api/noon/purchasing/order'
 
 const { proxy } = getCurrentInstance()
 const feeTypes = ['FREIGHT', 'DUTY', 'CUSTOMS', 'PACKAGING', 'LABEL']
@@ -134,10 +155,13 @@ const createOpen = ref(false)
 const detailOpen = ref(false)
 const submitting = ref(false)
 const detail = ref(null)
+const poOptions = ref([])
+const poLoading = ref(false)
 
 const data = reactive({
   queryParams: { pageNum: 1, pageSize: 10, siteCode: null, feeType: null, period: null, asnId: null },
-  createForm: { siteCode: 'AE', asnId: null, period: null, feeType: 'FREIGHT', amount: null, currency: 'CNY', fxRate: 1, allocationFlag: 'NONE', remark: '' }
+  // 登记弹窗默认站点在 openCreate 时取自当前站点；ALL 时留空，必须由用户选择
+  createForm: { siteCode: null, asnId: null, poIds: [], period: null, feeType: 'FREIGHT', amount: null, currency: 'CNY', fxRate: 1, allocationFlag: 'NONE', remark: '' }
 })
 const { queryParams, createForm } = toRefs(data)
 
@@ -150,12 +174,18 @@ function readPending() { try { return localStorage.getItem(pendingKey()) } catch
 function writePending(rid) { try { localStorage.setItem(pendingKey(), rid) } catch (e) {} }
 function clearPending() { try { localStorage.removeItem(pendingKey()) } catch (e) {} }
 
+const { siteFilter, siteLabel, siteOptions } = useSiteScope(() => {
+  queryParams.value.siteCode = siteFilter.value || null
+  queryParams.value.pageNum = 1
+  getList()
+})
+queryParams.value.siteCode = siteFilter.value || null
 function getList() {
   loading.value = true
   listShipmentCost({
     offset: (queryParams.value.pageNum - 1) * queryParams.value.pageSize,
     limit: queryParams.value.pageSize,
-    siteCode: queryParams.value.siteCode || undefined,
+    siteCode: siteFilter.value || undefined,
     feeType: queryParams.value.feeType || undefined,
     period: queryParams.value.period || undefined,
     asnId: queryParams.value.asnId || undefined
@@ -168,16 +198,39 @@ function getList() {
 function handleQuery() { queryParams.value.pageNum = 1; getList() }
 function resetQuery() { queryParams.value = { pageNum: 1, pageSize: 10, siteCode: null, feeType: null, period: null, asnId: null }; getList() }
 
-function resetCreateForm() {
-  Object.assign(createForm.value, { siteCode: 'AE', asnId: null, period: null, feeType: 'FREIGHT', amount: null, currency: 'CNY', fxRate: 1, allocationFlag: 'NONE', remark: '' })
+// 加载当前站点的采购单供多选（真实 listOrder；ALL 时不预选站点，仍拉取全部授权站点）
+function loadPos(siteCode) {
+  poLoading.value = true
+  listOrder({ offset: 0, limit: 200, siteCode: siteCode || undefined }).then(res => {
+    const payload = res.data || {}
+    poOptions.value = Array.isArray(payload.rows) ? payload.rows : []
+  }).catch(() => { poOptions.value = [] }).finally(() => { poLoading.value = false })
 }
-function handleCreate() { resetCreateForm(); createOpen.value = true }
+function poOrderLabel(po) {
+  const status = po.status || ''
+  const amount = po.totalAmount != null ? ` ¥${po.totalAmount}` : ''
+  return `${po.orderNo}${amount}（${status}）`
+}
+function poLabelById(id) {
+  const po = poOptions.value.find(p => p.id === id)
+  return po ? po.orderNo : ('#' + id)
+}
+
+function resetCreateForm() {
+  Object.assign(createForm.value, { siteCode: siteFilter.value || null, asnId: null, poIds: [], period: null, feeType: 'FREIGHT', amount: null, currency: 'CNY', fxRate: 1, allocationFlag: 'NONE', remark: '' })
+}
+function handleCreate() {
+  resetCreateForm()
+  createOpen.value = true
+  loadPos(siteFilter.value || null)
+}
 
 function doCreate(rid) {
   const f = createForm.value
   const body = {
     siteCode: f.siteCode,
     asnId: f.asnId ? Number(f.asnId) : null,
+    poIds: (f.poIds && f.poIds.length) ? f.poIds.map(Number) : [],
     period: f.period || undefined,
     feeType: f.feeType,
     amount: Number(f.amount),
@@ -213,7 +266,12 @@ function submitCreate() {
 }
 
 function handleDetail(row) {
-  getShipmentCost(row.id).then(res => { detail.value = res.data; detailOpen.value = true }).catch(() => {})
+  getShipmentCost(row.id).then(res => {
+    detail.value = res.data
+    detailOpen.value = true
+    if (res.data && res.data.poIds && res.data.poIds.length && !poOptions.value.length)
+      loadPos(res.data.siteCode)
+  }).catch(() => {})
 }
 
 getList()

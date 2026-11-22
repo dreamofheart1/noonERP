@@ -151,10 +151,12 @@ class MySqlPurchasingIT
         IllegalArgumentException dupSupplier = assertThrows(IllegalArgumentException.class,
                 () -> supplierService.save(new SupplierInput("SUP-IT-1", "Dup", null, null)));
         assertTrue(dupSupplier.getMessage().contains("supplier_no"), dupSupplier.getMessage());
-        IllegalArgumentException dupOrder = assertThrows(IllegalArgumentException.class,
-                () -> orderService.save(new OrderInput("PO-IT-1", supplier, "AE", "CNY", null, null,
-                        List.of(new OrderItemInput(sku, 1, new BigDecimal("1.0000"), "CNY", BigDecimal.ONE)))));
-        assertTrue(dupOrder.getMessage().contains("order_no"), dupOrder.getMessage());
+        long anotherOrder = orderService.save(new OrderInput("PO-IT-1", supplier, "AE", "CNY", null, null,
+                List.of(new OrderItemInput(sku, 1, new BigDecimal("1.0000"), "CNY", BigDecimal.ONE))));
+        assertTrue(orderService.get(order).orderNo().startsWith("PO:AE:"),
+                orderService.get(order).orderNo());
+        assertTrue(!orderService.get(order).orderNo().equals(orderService.get(anotherOrder).orderNo()),
+                "客户端重复传单号不影响服务端自动生成");
 
         // 引用完整性 + 审计落库
         IllegalArgumentException orphan = assertThrows(IllegalArgumentException.class,
