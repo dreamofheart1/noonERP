@@ -1393,3 +1393,46 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 **五、ASN 编号**：已下载报表 21 列无 ASN/GRN/单据列；官方 GRN 报表字段也无 ASN 编号；仅 Seller Lab ASN 详情页可见，导出属平台写操作，本次未执行、不可得。
 
 M9 其余结论（49 个同步商品系统无台账记录、不能认定丢货、不得覆盖系统账）保持不变。未连接生产、未部署、未推送。
+
+### 2026-11-24 · Codex · Seller Lab 网页只读接口初查
+
+用户授权用本人已登录的 Ego Browser 核查网页只读接口并评估接入。AE FBN 库存页正常加载时，观察到 `POST https://fbn.noon.partners/_vs/fn/sc-fbn-platform-api-dashboard/api/v5/seller-lab/fbn-inventory` 返回 200；在已登录页面复用原查询请求再次读取也返回 200，首屏 19 条、1 页，响应字段含 partner_sku、sku、warehouse_code、saleable、non_saleable、qty、title 等。该 POST 为观察到的库存查询场景，不能据方法或名称推断其他请求无副作用。
+
+AE ASN 页正常加载时观察到 `GET https://fbn-inbound.noon.partners/_vs/sc/sc-inbound-api-partner/v1/shipment/list` 返回 200，其中一组返回 10 条及 next_token，字段含 asn_nr、status、country_code、dst_warehouse_code、expected_qty、qty_received、qty_putaway、updated_at 等。仅确认页面加载产生的已登录浏览器查询，未验证独立服务账号、Cookie 长期有效性、SA 权限、分页完整性或该内部接口是否获得正式支持；订单查询尚未核查。未创建或修改平台数据，未接入 ERP，不记录 Cookie、令牌、明细及个人数据。后续接入应先确认平台使用条款、授权和稳定的认证方式、站点隔离与口径，再设计并验证，不应将个人浏览器会话硬编码为长期生产凭据。
+
+### 2026-11-24 · Codex · Seller Lab 销售明细只读查询验证
+
+用户指出订单页面并授权接管浏览器。其页面为 Seller Lab Sales（reports.noon.partners/en/sales）。页面加载时观察 `POST https://reports.noon.partners/_vs/mp/mp-inventory-health-api-sales-dashboard/sales-dashboard/list` 查询返回 200；在该已登录页面用相同查询参数再次只读调用返回 200，首屏 20 行、total 121（本次查询选定站点与页面日期范围）。返回字段含 item_nr、partner_sku、sku、status、fulfillment_model、country_code、order_timestamp、shipment_timestamp、delivered_timestamp、offer_price/currency_code 等；本次样本响应结构未见 order_nr，因此尚不能当作完整订单或确认父订单身份。需核对分页、站点、状态、订单号关联、覆盖范围与认证、权限及使用条款；用户会话不可硬编码。未生成报表或修改平台数据；未将接口接入 ERP，未输出凭据或订单明细。用户此前允许只读验证，后续开发由协作约定协调。
+
+### 2026-11-24 · 用户 / Codex → WorkBuddy · 销售明细展示编号
+
+用户确认：Noon Seller Lab Sales 列表是其查看订单及履约进度的入口，第一版系统列表可将 `item_nr` 作为用户看到的订单编号，不因缺少整单号阻塞。请保留它是平台订单明细标识这一事实，勿臆称同一张多商品订单的各行属于不同真实整单；用户认为其唯一，但请用实际数据验证跨 AE/SA、分页、重试/状态变化下的稳定性和唯一性，存储时保留来源与站点，做好防重复及状态更新。展示下单、发运、送达时间与状态，缺失不编造；与其他导入源或现有入账规则的关联需验证，避免重复入账。查询接口的认证、授权与长期可用性仍待核实，勿硬编码浏览器会话。本次仅记录用户决定，未修改业务代码或执行测试。
+
+### 2026-11-24 · Codex · GetStock 查询 FBN 仓只读试验
+
+用户要求测试官方 GetStock 是否能用 FBN 仓编码。Seller Lab AE FBN 库存页选取 SKU NM000012、仓库 AUH01S，页面 saleable 为 73；随后通过 noon-partners MCP 只读调用 GetStock，HTTP 200 但该条目返回 InvalidArgument（Invalid warehouse for partner），数量字段虽为 0 但不可视为有效库存。说明该样本和当前账号条件下此仓码不能通过 GetStock 查询；不能推广为所有 FBN 仓均不支持，也未验证其它仓码体系。未写平台数据，未接入 ERP。
+
+### 2026-11-24 · 用户 / Codex → WorkBuddy · API Login 测试 Seller Lab 只读查询
+
+用户要求 WorkBuddy 尝试用项目已有的 Noon 服务账号 API Login 会话，调用此前浏览器观察到的 Seller Lab FBN 库存、ASN 列表与 Sales 明细查询接口（地址和已验证字段见本文件 2026-11-24 对应 Codex 记录），判断能否脱离个人浏览器长期使用。仅做经过确认的查询，限少量真实样本，核实状态、字段、站点/权限及与 Seller Lab 数据的对应；失败如实记录，不绕过认证或授权，不创建、修改、删除、生成报表或变更店铺数据。不将密钥、Cookie、令牌及敏感订单明细输出或提交；核查非公开接口的正式支持和稳定性，未确认前不得称已适合生产。写回每项结果及局限交 Codex 复核；本次仅记录任务，未调用平台或进行测试。
+
+### 2026-11-24 · WorkBuddy · API Login 测试 Seller Lab 只读查询交付，交 Codex 复核
+
+按指令用项目服务账号 API Login 会话实测 3 个 Seller Lab 内部查询接口，少量样本、严格只读：未创建/修改/删除/生成报表，未绕过认证，未输出密钥/Cookie/令牌/订单明细值。结论：**三个接口均可脱离个人浏览器，用服务账号会话返回 200**，但均为非公开内部接口，未确认正式支持与长期使用条款，不得称已适合生产。
+
+**一、FBN 库存** `POST https://fbn.noon.partners/_vs/fn/sc-fbn-platform-api-dashboard/api/v5/seller-lab/fbn-inventory`
+- 必填 `inventory_tab_name`；`all` 与 `saleable` 均 200（`ALL` 大写报 Unknown），返回 19/17 条，字段含 partner_sku/sku/warehouse_code/saleable/non_saleable/qty/title/image 等，与 Codex 浏览器观察一致。
+- `country_code=sa` 请求返回结构与 AE 一致但统计路径未取到（路径为 `data.fbn_inventory`），**SA 站点隔离未在本接口单独验证**，需后续确认。
+
+**二、ASN 列表** `GET https://fbn-inbound.noon.partners/_vs/sc/sc-inbound-api-partner/v1/shipment/list`
+- 必填 `country_code` 查询参数；`ae` → total 22、`sa` → total 12，各取 5 条，返回国家列分别为 [AE]/[SA]，**站点隔离确认有效**，均有 `next_token` 可分页。
+- 字段含 asn_nr/status/country_code/dst_warehouse_code/expected_qty/qty_received/qty_putaway/updated_at/items 等，其中 **asn_nr 即平台 ASN 编号**，可解 M9/M10「平台 ASN 编号不可得」的问题（但为内部接口，非正式支持）。
+
+**三、Sales 明细** `POST https://reports.noon.partners/_vs/mp/mp-inventory-health-api-sales-dashboard/sales-dashboard/list`
+- 必填 `country_code`；`ae` → total 131、`sa` → total 194，各首屏 20 条，国家列分别为 [AE]/[SA]，**站点隔离确认有效**。
+- 字段含 item_nr/partner_sku/sku/status/fulfillment_model/country_code/order_timestamp/shipment_timestamp/delivered_timestamp/offer_price/currency_code/awb_nr 等；**未见 order_nr**，与 Codex 观察一致，item_nr 只能作明细标识。
+
+**四、局限与后续**
+- 认证可用 API Login 会话，但 Cookie 有效期、刷新机制、服务账号是否被 Seller Lab 前端域正式授权、使用条款均未确认；**非公开接口，稳定性与正式支持未知，不得硬编码为生产凭据**。
+- 本轮仅验证查询可达性与站点隔离，未做分页完整性、状态随时间变化、item_nr 唯一性/防重的深度验证（属用户 11-24 另一条指派，后续单独做）。
+- 未接入 ERP、未改业务数据、未输出敏感明细。未连接生产、未部署、未推送。
