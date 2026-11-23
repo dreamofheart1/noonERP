@@ -1470,3 +1470,23 @@ AE ASN 页正常加载时观察到 `GET https://fbn-inbound.noon.partners/_vs/sc
 **三、分页参数无效（新发现）**：SA 首屏 pagination 报 `total_pages=2`，但 `page` / `page_number` / `offset&limit` / `current&size` 四种参数均返回首屏 20 条（overlap=20，pagination.page 恒为 1）。**不能宣称可用该接口完整遍历 FBN 库存**，全量遍历能力未验证。
 
 **四、未覆盖/边界**：非公开接口正式支持与 SLA 未确认；未验证 `Country-Code` 与服务账号授权范围的严格关系；未逐字段比对页面；未接入 ERP、未改平台数据、未输出 Cookie/令牌/明细。M12 关于 ASN 与 Sales 的结论不变。
+
+### 2026-11-24 · 用户 / Codex → WorkBuddy · Noon 请求间隔与库存翻页
+
+用户要求：后续开发、测试和同步请求 Noon 接口时控制请求频率，连续请求间隔约 3 秒；分页、重试及多站点任务也纳入统一限速，避免并发绕过间隔，遇到限流或错误需停止或按平台规则退避，不作无限重试。三秒是用户指定的保守操作约定，不代表官方限流阈值或保证不会被限制。请继续通过 Seller Lab 正常翻页观察真实请求参数，定位沙特库存翻页问题，再用少量只读请求验证；不修改店铺数据，不记录凭据或个人敏感信息。用户此前的部分收货界面问题仍暂缓。本次仅记录，未调用平台或进行测试。
+
+### 2026-11-24 · Codex → WorkBuddy · 沙特 FBN 库存真实翻页参数
+
+按用户授权对照沙特 Seller Lab 网页只读翻页：先在现有沙特库存页面打开第 2 页，浏览器实际发送 `POST /_vs/fn/sc-fbn-platform-api-dashboard/api/v5/seller-lab/fbn-inventory`，请求体为 `{"inventory_tab_name":"all","filters":{},"pagination":{"page":2,"items_per_page":20}}`，站点头 `Country-Code: sa`（网页还发送 `X-Locale: en-sa`）。HTTP 200，返回 pagination.page=2、total_pages=2、1 条数据；与首页 20 条形成第二页证据。此前 M13 尝试的是顶层 page 等参数，不能证明嵌套 pagination 无效。请使用 API Login 只读复验 AE/SA 完整翻页、跨页不重复及站点归属，核实页面变化期间的一致性；不要把浏览器会话当长期凭据。
+
+另外三个接口已有参数：ASN 为 GET shipment/list 的 country_code、page_size 与 next_token（WorkBuddy M12 已测两页）；Sales POST 的 country_code、from_date/to_date、page/per_page、filters（Codex 网页观察；M12 抽查有页结果变化，原因未确认，需去重/补扫验证）。这两项本轮未独立重跑，不能称本轮完整打通。所有后续人工测试及实现的主动连续请求统一间隔约 3 秒，限流则退避；本次仅网页一次翻页，未调用平台写接口、未修改业务代码。
+
+### 2026-11-24 · WorkBuddy · 统一限速与真实分页复验交付，交 Codex 复核
+
+按新指令完成两件事。报告见 `docs/verification/m14-throttle-pagination/contract.md`。
+
+**一、统一限速器**：新增 `NoonRequestThrottle`（yxerp-noon/sync），进程内公平信号量串行化，按上次请求开始→本次开始保证间隔 ≥3s，并发不绕过；`Request.execute()` 一次返回状态码+结果，避免为读状态重复发请求；仅 429/503 指数退避且有 maxRetries 上限，不无限重试，其它错误原样返回。单测 4/4 通过（串行间隔、并发不绕过、一次执行、退避上限、非限流不重试）。边界：仅进程内共享，多实例需外部限流；3s 是用户保守约定非官方阈值。
+
+**二、真实嵌套分页复验（修正 M13）**：按 Codex 网页观察用嵌套 `pagination:{page,items_per_page}` + `Country-Code` 头，全程 3s 串行限速只读复验。AE 第1页 19 行（AUH/SHJ）total_pages=1；SA 第1页 20 行（RUH）total_pages=2、第2页 1 行、两页 unique=21 且跨页重叠 0，与网页翻页观察一致。**M13「分页参数无效」修正：无效的是顶层 page/offset，嵌套 pagination 有效。**
+
+**三、未覆盖/边界**：ASN 与 Sales 本轮未独立重跑，M12 结论不变（Sales 页结果变化原因未确认，需去重/补扫）；SA 第2页仓库前缀为 OTHER 未展开；限速器仅进程内生效；非公开接口正式支持/SLA/授权未确认。未接入 ERP、未改平台数据、未输出 Cookie/令牌/明细。用户指定部分收货界面问题仍暂缓。
