@@ -124,10 +124,52 @@ public class NoonApiClient
                         offer.path("live_status").asBoolean(false),
                         issues,
                         price.isMissingNode() || price.isNull() ? null : price.path("amount").asText(null),
-                        price.isMissingNode() || price.isNull() ? null : text(price, "currency"));
+                        price.isMissingNode() || price.isNull() ? null : text(price, "currency"),
+                        getPrimaryImage(sku));
             }
         }
         return null; // 该账号没有 AE noon offer：同步时计为跳过，不伪造数据
+    }
+
+    /**
+     * 回读 Noon 商品首图。sku_parent = Noon SKU 去掉 "-数字" 变体后缀；
+     * 取 visibility=VISIBLE 且 review_status=VALID 的 sort 最小图片。
+     * 老式 N 开头 SKU 无 content（400），或没有图片时返回 null，禁止伪造。
+     */
+    String getPrimaryImage(String noonSku)
+    {
+        if (noonSku == null || noonSku.isBlank()) return null;
+        String skuParent = noonSku.replaceFirst("-\\d+$", "");
+        try
+        {
+            ObjectNode body = json.createObjectNode();
+            body.put("sku_parent", skuParent);
+            JsonNode content = call("POST", "/content/v1/product/content/get", body.toString());
+            JsonNode images = content.path("images");
+            if (!images.isArray()) return null;
+            String bestUrl = null;
+            long bestSort = Long.MAX_VALUE;
+            for (JsonNode image : images)
+            {
+                String visibility = image.path("visibility").asText("");
+                String review = image.path("review_status").asText("");
+                if (!"VISIBILITY_STATUS_VISIBLE".equals(visibility)
+                        && !"VISIBLE".equalsIgnoreCase(visibility)) continue;
+                if (!"REVIEW_STATUS_VALID".equals(review) && !"VALID".equalsIgnoreCase(review)) continue;
+                long sort = image.path("sort").asLong(Long.MAX_VALUE);
+                String url = text(image, "url");
+                if (url != null && !url.isBlank() && sort < bestSort)
+                {
+                    bestSort = sort;
+                    bestUrl = url;
+                }
+            }
+            return bestUrl;
+        }
+        catch (RuntimeException e)
+        {
+            return null; // 无 content / 无图是正常业务状态，不能伪造图片
+        }
     }
 
     /** 解析 FBN 台账摘要 CSV；无引号字段按逗号切分，带引号字段兼容双引号转义。 */

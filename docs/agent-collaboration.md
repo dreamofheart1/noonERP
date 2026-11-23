@@ -1320,3 +1320,20 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 ### 2026-11-23 · 用户 / Codex → WorkBuddy · 按站点展开商品数量分布
 
 用户希望在 Partner SKU 映射列表中展开某行，直观查看该商品在对应站点各阶段的当前数量，例如采购中、头程在途、FBN 仓可用，并可查看对应单据或仓库。AE、SA 数据按映射站点隔离并遵守权限；阶段口径应基于真实业务事件、避免同一批货跨阶段重复计算，分别标注在途、可用等含义；没有可靠来源的阶段显示“待接入”，不能假称为零。请先核实同站点多条 Partner SKU 映射到同一系统 SKU 时采购和库存能否归属到具体映射：若不能，明确标注为站点+系统 SKU 汇总并避免误认为各映射独有、避免汇总重复，不能臆造分摊。请结合现有采购直发与 ASN 流程实现并验证主要路径，记录数据来源、未支持部分和验证结果。用户同意通过此记录交 WorkBuddy；本次只记录，未修改业务代码或执行测试。
+
+### 2026-11-23 · WorkBuddy · SKU 真图 + 映射数量分布交付，交 Codex 复核
+
+已执行协作文档两条指派：①SKU 管理/Partner SKU 映射列表显示真实首图；②映射列表展开查看站点数量分布。另两条列表列调整（SKU 去 ID/规格JSON/阿语名/HS，映射去 ID/SKU ID/Offer编码）经核对已包含在上次提交中，未重复修改。
+
+**一、SKU 真图**
+- 先核实来源：Offer API 无图片字段、目录/FBN 导出无图片列；`POST /content/v1/product/content/get` 返回 images[]，入参 `sku_parent` = Noon SKU 去掉 `-数字` 后缀（实测 `Z210B3A25FEF6EAAF129BZ-1 → Z210B3A25FEF6EAAF129BZ` 200 有 6 图；直接用 partner_sku 或带后缀均 400）。老式 N 开头 SKU 在 Content API 无记录，保持无图。
+- `NoonApiClient.getPrimaryImage` 取 VISIBLE+VALID 且 sort 最小 URL；新增 `md_sku.image_url`/`md_partner_sku.image_url` 与迁移 `noon_sku_image.sql`；平台无图时 COALESCE 不清空历史图。两列表新增商品图列，无图显示"暂无图片"。
+- 真库：49 商品中 43 有真实 CDN 图（CDN 直连 200/image/jpeg），6 个 N 类旧 SKU 无图；SKU 更新 43、映射更新 49、失败 0；接口两列表均返回 imageUrl。单测 3/3。
+
+**二、映射行展开数量分布**
+- 先核实归属粒度：采购/ASN/库存台账都只记 sku_id+site_code，不记 md_partner_sku.id；同站多条映射指向同一 SKU 时无法分摊，接口显式返回 scopeNote（站点+系统 SKU 汇总、非本映射独有）与 sharedMappingCount，不臆造。
+- 阶段互斥口径：采购中=已下单未收（排除 DRAFT/CLOSED）；头程在途=ASN SEALED 已发未收（DRAFT 未发运/RECEIVED 已收完）；FBN 仓可用=台账 is_fbn=1；本地仓可用=is_fbn=0。每阶段附单据明细（采购单号/ASN号/仓库名+数量）。Noon 官方实时库存未接入，单列 pendingStages 显示"待接入"，不以 0 冒充。
+- 新增 `GET /noon/masterdata/partner-sku/{id}/quantity-breakdown`（复用 list 权限 + SiteAuthGuard 服务端闸门）；前端 expand 行按需加载并缓存。
+- 单测 `PartnerSkuQuantityTest` 3/3（共享映射标注、四阶段计数与排除规则、站点隔离、待接入）；真库接口 200 结构正确；全模块 241 用例 0 失败；前端构建通过。
+
+**三、边界**：首图依赖 Content API 覆盖；数量分布为系统内部事件口径、非 Noon 平台实时库存；未连接生产、未部署、未推送。详情见 `docs/verification/m8-sku-image-quantity/contract.md`。

@@ -48,7 +48,7 @@ public class NoonSkuSyncService
                 offers.add(new NoonOfferInfo(
                         offer.partnerSku(), offer.noonSku(), row.barcode(), offer.title(), offer.brand(),
                         offer.offerCode(), offer.isActive(), offer.liveStatus(),
-                        offer.issuesJson(), offer.priceAmount(), offer.currency()));
+                        offer.issuesJson(), offer.priceAmount(), offer.currency(), offer.imageUrl()));
             }
             catch (RuntimeException e)
             {

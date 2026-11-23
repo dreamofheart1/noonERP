@@ -23,7 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class SkuService
 {
     private static final String COLUMNS = "id,sku_code,spu_id,name_en,name_ar,category_code,hs_code,"
-            + "origin_country,brand,spec_json,status";
+            + "origin_country,brand,image_url,spec_json,status";
     static final String ENTITY = "SKU";
 
     private static final RowMapper<SkuRow> MAPPER = (rs, i) -> new SkuRow(
@@ -36,6 +36,7 @@ public class SkuService
             rs.getString("hs_code"),
             rs.getString("origin_country"),
             rs.getString("brand"),
+            rs.getString("image_url"),
             rs.getString("spec_json"),
             rs.getString("status"));
 

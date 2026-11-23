@@ -757,12 +757,12 @@ class MasterDataServiceTest
                 + "constraint uk_wh_code unique(warehouse_code, site_code))");
         jdbc.execute("create table md_sku (id bigint auto_increment primary key, sku_code varchar(64) not null, "
                 + "spu_id varchar(64), name_en varchar(512), name_ar varchar(512), category_code varchar(64), "
-                + "hs_code varchar(32), origin_country varchar(32), brand varchar(128), spec_json varchar(4000), "
+                + "hs_code varchar(32), origin_country varchar(32), brand varchar(128), image_url varchar(512), spec_json varchar(4000), "
                 + "status varchar(16) not null default 'ACTIVE', created_at timestamp(3) not null default current_timestamp(3), "
                 + "updated_at timestamp(3) not null default current_timestamp(3), constraint uk_sku_code unique(sku_code))");
         jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, partner_sku varchar(128) not null, "
                 + "sku_id bigint not null, site_code varchar(16) not null, business_model varchar(24) not null default 'noon', "
-                + "offer_code varchar(128), barcode varchar(128), noon_sku varchar(128), "
+                + "offer_code varchar(128), barcode varchar(128), noon_sku varchar(128), image_url varchar(512), "
                 + "live_status tinyint default null, offer_issues varchar(4000), "
                 + "status varchar(16) not null default 'ACTIVE', synced_at timestamp(3), "
                 + "created_at timestamp(3) not null default current_timestamp(3), "

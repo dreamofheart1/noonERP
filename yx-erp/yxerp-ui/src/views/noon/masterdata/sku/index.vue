@@ -33,6 +33,15 @@
     </el-row>
     <el-table v-loading="loading" :data="skuList" @selection-change="handleSelectionChange" border>
       <el-table-column type="selection" width="55" align="center" />
+      <el-table-column label="商品图" align="center" width="100">
+        <template #default="scope">
+          <el-image v-if="scope.row.imageUrl" :src="scope.row.imageUrl" :preview-src-list="[scope.row.imageUrl]"
+            fit="cover" style="width:56px;height:56px;border-radius:4px">
+            <template #error><div class="image-empty">暂无图片</div></template>
+          </el-image>
+          <span v-else class="image-empty">暂无图片</span>
+        </template>
+      </el-table-column>
       <el-table-column label="SKU编码" align="center" prop="skuCode" show-overflow-tooltip />
       <el-table-column label="SPU编码" align="center" prop="spuId" show-overflow-tooltip />
       <el-table-column label="英文名" align="center" prop="nameEn" show-overflow-tooltip />
@@ -193,3 +202,7 @@ function handleSyncNoon() {
 }
 getList()
 </script>
+
+<style scoped>
+.image-empty { width: 56px; height: 56px; line-height: 56px; color: #909399; font-size: 12px; background: #f5f7fa; border-radius: 4px; }
+</style>

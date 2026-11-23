@@ -34,8 +34,44 @@
       <el-col :span="1.5"><el-button type="warning" plain icon="RefreshRight" @click="handleSyncNoon" v-hasPermi="['noon:masterdata:partnerSku:save']">从Noon同步(AE)</el-button></el-col>
       <right-toolbar v-model:showSearch="showSearch" @queryTable="getList" />
     </el-row>
-    <el-table v-loading="loading" :data="partnerSkuList" @selection-change="handleSelectionChange" border>
+    <el-table v-loading="loading" :data="partnerSkuList" @selection-change="handleSelectionChange" @expand-change="handleExpandChange" border>
+      <el-table-column type="expand">
+        <template #default="props">
+          <div class="expand-panel">
+            <div v-if="!quantityMap[props.row.id]" class="expand-loading">正在加载数量分布…</div>
+            <template v-else>
+              <el-alert :title="quantityMap[props.row.id].scopeNote" type="info" :closable="false" show-icon />
+              <el-row :gutter="12" style="margin-top:12px">
+                <el-col :span="6" v-for="st in quantityMap[props.row.id].stages" :key="st.stage">
+                  <el-card shadow="never" class="stage-card">
+                    <div class="stage-label">{{ st.label }}</div>
+                    <div class="stage-qty">{{ st.qty }}</div>
+                    <div class="stage-source">{{ st.source }}</div>
+                    <div v-if="st.docs && st.docs.length" class="stage-docs">
+                      <div v-for="d in st.docs" :key="d.docId">{{ d.docNo }} · {{ d.qty }}</div>
+                    </div>
+                  </el-card>
+                </el-col>
+              </el-row>
+              <div class="pending-box">
+                <div v-for="p in quantityMap[props.row.id].pendingStages" :key="p.stage">
+                  {{ p.label }}：待接入 — {{ p.reason }}
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column type="selection" width="55" align="center" />
+      <el-table-column label="商品图" align="center" width="100">
+        <template #default="scope">
+          <el-image v-if="scope.row.imageUrl" :src="scope.row.imageUrl" :preview-src-list="[scope.row.imageUrl]"
+            fit="cover" style="width:56px;height:56px;border-radius:4px">
+            <template #error><div class="image-empty">暂无图片</div></template>
+          </el-image>
+          <span v-else class="image-empty">暂无图片</span>
+        </template>
+      </el-table-column>
       <el-table-column label="Partner SKU" align="center" prop="partnerSku" show-overflow-tooltip />
       <el-table-column label="站点" align="center" prop="siteCode">
         <template #default="scope">{{ { AE:'AE', SA:'SA' }[scope.row.siteCode] || scope.row.siteCode }}</template>
@@ -106,7 +142,7 @@
 </template>
 
 <script setup name="PartnerSku">
-import { listPartnerSku, getPartnerSku, addPartnerSku, updatePartnerSku, changePartnerSkuStatus } from "@/api/noon/masterdata/partnerSku"
+import { listPartnerSku, getPartnerSku, addPartnerSku, updatePartnerSku, changePartnerSkuStatus, getPartnerSkuQuantity } from "@/api/noon/masterdata/partnerSku"
 import { syncNoonSku } from "@/api/noon/masterdata/sku"
 const { proxy } = getCurrentInstance()
 const partnerSkuList = ref([])
@@ -117,6 +153,12 @@ const ids = ref([])
 const single = ref(true)
 const total = ref(0)
 const title = ref("")
+const quantityMap = reactive({})
+function handleExpandChange(row, expandedRows) {
+  if (!expandedRows.some(r => r.id === row.id) || quantityMap[row.id]) return
+  getPartnerSkuQuantity(row.id).then(res => { quantityMap[row.id] = res.data || null })
+    .catch(() => { quantityMap[row.id] = { scopeNote: '数量分布加载失败，请重试', stages: [], pendingStages: [] } })
+}
 const data = reactive({
   form: {},
   queryParams: { pageNum: 1, limit: 10,
@@ -191,3 +233,15 @@ function handleSyncNoon() {
 }
 getList()
 </script>
+
+<style scoped>
+.image-empty { width: 56px; height: 56px; line-height: 56px; color: #909399; font-size: 12px; background: #f5f7fa; border-radius: 4px; }
+.expand-panel { padding: 8px 20px 16px 56px; }
+.expand-loading { color: #909399; font-size: 13px; }
+.stage-card { background: #f8fafc; }
+.stage-label { font-size: 13px; color: #606266; }
+.stage-qty { font-size: 26px; font-weight: 600; color: #303133; margin: 6px 0; }
+.stage-source { font-size: 11px; color: #909399; line-height: 1.5; min-height: 32px; }
+.stage-docs { margin-top: 6px; padding-top: 6px; border-top: 1px solid #ebeef5; font-size: 12px; color: #409eff; line-height: 1.7; }
+.pending-box { margin-top: 12px; padding: 10px 12px; background: #fdf6ec; border-radius: 4px; color: #b88230; font-size: 12px; line-height: 1.8; }
+</style>

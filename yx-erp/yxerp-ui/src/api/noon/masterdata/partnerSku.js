@@ -12,6 +12,11 @@ export function getPartnerSku(id) {
   return request({ url: BASE + '/' + id, method: 'get' })
 }
 
+// 展开行：该映射对应商品在站点的数量分布（站点+系统SKU汇总口径）
+export function getPartnerSkuQuantity(id) {
+  return request({ url: BASE + '/' + id + '/quantity-breakdown', method: 'get' })
+}
+
 // 新增Partner SKU 映射（仅超管）
 export function addPartnerSku(data) {
   return request({ url: BASE + '/save', method: 'post', data })

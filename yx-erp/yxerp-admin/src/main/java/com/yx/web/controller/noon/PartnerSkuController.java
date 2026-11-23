@@ -1,5 +1,7 @@
 package com.yx.web.controller.noon;
 
+import com.yx.noon.masterdata.PartnerSkuQuantityBreakdown;
+import com.yx.noon.masterdata.PartnerSkuQuantityService;
 import com.yx.noon.masterdata.PageResult;
 import com.yx.noon.masterdata.PartnerSkuQuery;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -25,7 +27,13 @@ import com.yx.noon.masterdata.PartnerSkuService;
 public class PartnerSkuController
 {
     private final PartnerSkuService service;
-    public PartnerSkuController(PartnerSkuService service) { this.service = service; }
+    private final PartnerSkuQuantityService quantityService;
+
+    public PartnerSkuController(PartnerSkuService service, PartnerSkuQuantityService quantityService)
+    {
+        this.service = service;
+        this.quantityService = quantityService;
+    }
 
     @PreAuthorize("@ss.hasPermi('noon:masterdata:partnerSku:list')")
     @GetMapping("/list")
@@ -44,6 +52,14 @@ public class PartnerSkuController
     @PreAuthorize("@ss.hasPermi('noon:masterdata:partnerSku:list')")
     @GetMapping("/{id}")
     public AjaxResult get(@PathVariable long id) { return AjaxResult.success(service.get(id)); }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:partnerSku:list')")
+    @GetMapping("/{id}/quantity-breakdown")
+    public AjaxResult quantityBreakdown(@PathVariable long id)
+    {
+        PartnerSkuQuantityBreakdown breakdown = quantityService.breakdown(id);
+        return AjaxResult.success(breakdown);
+    }
 
     @PreAuthorize("@ss.hasPermi('noon:masterdata:partnerSku:save')")
     @PostMapping("/save")

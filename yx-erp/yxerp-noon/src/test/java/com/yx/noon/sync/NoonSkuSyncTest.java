@@ -40,11 +40,11 @@ class NoonSkuSyncTest
         jdbc = new JdbcTemplate(context.getBean(javax.sql.DataSource.class));
         jdbc.execute("create table md_sku (id bigint auto_increment primary key, sku_code varchar(64) not null, "
                 + "spu_id varchar(64), name_en varchar(512), name_ar varchar(512), category_code varchar(64), "
-                + "hs_code varchar(32), origin_country varchar(32), brand varchar(128), spec_json varchar(4000), "
+                + "hs_code varchar(32), origin_country varchar(32), brand varchar(128), image_url varchar(512), spec_json varchar(4000), "
                 + "status varchar(16) not null default 'ACTIVE', constraint uk_sku_code unique(sku_code))");
         jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, partner_sku varchar(128) not null, "
                 + "sku_id bigint not null, site_code varchar(16) not null, business_model varchar(24) not null default 'noon', "
-                + "offer_code varchar(128), barcode varchar(128), noon_sku varchar(128), live_status boolean, "
+                + "offer_code varchar(128), barcode varchar(128), noon_sku varchar(128), image_url varchar(512), live_status boolean, "
                 + "offer_issues varchar(4000), status varchar(16) not null default 'ACTIVE', synced_at timestamp(3), "
                 + "constraint uk_partner_sku unique(partner_sku, site_code, business_model))");
         jdbc.execute("create table noon_m2_audit_log (id bigint auto_increment primary key, "
@@ -79,7 +79,8 @@ class NoonSkuSyncTest
     void persistIsIdempotentAndPreservesManuallyMaintainedFields()
     {
         NoonOfferInfo offer = new NoonOfferInfo("NM000003", "Z111A-1", "NM000003",
-                "Car Phone Holder", "Generic", "offer-1", true, true, "[]", "19.9", "AED");
+                "Car Phone Holder", "Generic", "offer-1", true, true, "[]", "19.9", "AED",
+                "https://img.noon.test/1.jpg");
 
         NoonSkuSyncWriter.Counters first = writer.persist("AE", List.of(offer));
         assertEquals(1, first.skuCreated());
@@ -91,7 +92,7 @@ class NoonSkuSyncTest
 
         NoonOfferInfo updated = new NoonOfferInfo("NM000003", "Z111A-1", "NM000003",
                 "Car Phone Holder Pro", "Generic", "offer-2", true, false,
-                "[{\"reason\":\"Stock Issues\"}]", "21.9", "AED");
+                "[{\"reason\":\"Stock Issues\"}]", "21.9", "AED", "https://img.noon.test/2.jpg");
         NoonSkuSyncWriter.Counters second = writer.persist("AE", List.of(updated));
         assertEquals(0, second.skuCreated());
         assertEquals(1, second.skuUpdated());
@@ -105,14 +106,26 @@ class NoonSkuSyncTest
         assertEquals("AUTO", jdbc.queryForObject("select category_code from md_sku where id=?", String.class, skuId));
         assertEquals("INACTIVE", jdbc.queryForObject("select status from md_sku where id=?", String.class, skuId));
         assertEquals("HS1", jdbc.queryForObject("select hs_code from md_sku where id=?", String.class, skuId));
+        assertEquals("https://img.noon.test/2.jpg", jdbc.queryForObject("select image_url from md_sku where id=?", String.class, skuId));
 
         assertEquals("offer-2", jdbc.queryForObject("select offer_code from md_partner_sku where id=?", String.class, 1));
         assertEquals("Z111A-1", jdbc.queryForObject("select noon_sku from md_partner_sku where id=?", String.class, 1));
+        assertEquals("https://img.noon.test/2.jpg", jdbc.queryForObject("select image_url from md_partner_sku where id=?", String.class, 1));
         assertEquals(Boolean.FALSE, jdbc.queryForObject("select live_status from md_partner_sku where id=?", Boolean.class, 1));
         assertTrue(jdbc.queryForObject("select offer_issues from md_partner_sku where id=?", String.class, 1)
                 .contains("Stock Issues"));
         assertNotNull(jdbc.queryForObject("select synced_at from md_partner_sku where id=?", Object.class, 1));
-        assertEquals(4, jdbc.queryForObject("select count(*) from noon_m2_audit_log", Integer.class));
+
+        // 平台无图（老式 N SKU / Content API 无记录）不得清空已回读的真实图
+        NoonOfferInfo noImage = new NoonOfferInfo("NM000003", "Z111A-1", "NM000003",
+                "Car Phone Holder Pro", "Generic", "offer-2", true, false,
+                "[{\"reason\":\"Stock Issues\"}]", "21.9", "AED", null);
+        NoonSkuSyncWriter.Counters third = writer.persist("AE", List.of(noImage));
+        assertEquals(0, third.skuUpdated());
+        assertEquals("https://img.noon.test/2.jpg", jdbc.queryForObject("select image_url from md_sku where id=?", String.class, skuId));
+        assertEquals("https://img.noon.test/2.jpg", jdbc.queryForObject("select image_url from md_partner_sku where id=?", String.class, 1));
+
+        assertEquals(5, jdbc.queryForObject("select count(*) from noon_m2_audit_log", Integer.class));
     }
 
     @Test
@@ -120,7 +133,7 @@ class NoonSkuSyncTest
     {
         String tooLong = "X".repeat(65);
         NoonOfferInfo bad = new NoonOfferInfo(tooLong, "Z999-1", "BC", "Bad", "Generic",
-                "offer-9", true, true, "[]", "1", "AED");
+                "offer-9", true, true, "[]", "1", "AED", null);
         assertThrows(IllegalArgumentException.class, () -> writer.persist("AE", List.of(bad)));
         assertEquals(0, jdbc.queryForObject("select count(*) from md_sku", Integer.class));
         assertEquals(0, jdbc.queryForObject("select count(*) from noon_m2_audit_log", Integer.class));

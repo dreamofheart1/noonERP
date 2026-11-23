@@ -50,18 +50,19 @@ public class NoonSkuSyncWriter
             throw new IllegalArgumentException("partner_sku 不能为空且不得超过 64 字符: " + code);
 
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,status,name_en,brand FROM md_sku WHERE sku_code=?", code);
+                "SELECT id,status,name_en,brand,image_url FROM md_sku WHERE sku_code=?", code);
         if (rows.isEmpty())
         {
             KeyHolder keys = new GeneratedKeyHolder();
             jdbc.update(con ->
             {
                 PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO md_sku(sku_code,name_en,brand,status) VALUES(?,?,?,'ACTIVE')",
+                        "INSERT INTO md_sku(sku_code,name_en,brand,image_url,status) VALUES(?,?,?,?,'ACTIVE')",
                         new String[]{"id"});
                 ps.setString(1, code);
                 ps.setString(2, value(offer.title()));
                 ps.setString(3, value(offer.brand()));
+                ps.setString(4, value(offer.imageUrl()));
                 return ps;
             }, keys);
             Number key = keys.getKey();
@@ -76,11 +77,15 @@ public class NoonSkuSyncWriter
         long id = ((Number) before.get("id")).longValue();
         String oldName = (String) before.get("name_en");
         String oldBrand = (String) before.get("brand");
+        String oldImage = (String) before.get("image_url");
         String newName = hasText(offer.title()) ? offer.title().trim() : oldName;
         String newBrand = hasText(offer.brand()) ? offer.brand().trim() : oldBrand;
-        if (!eq(oldName, newName) || !eq(oldBrand, newBrand))
+        // 平台没有图片时不覆盖已有图（老式 N SKU 无 content，不能清空历史真实图）
+        String newImage = hasText(offer.imageUrl()) ? offer.imageUrl().trim() : oldImage;
+        if (!eq(oldName, newName) || !eq(oldBrand, newBrand) || !eq(oldImage, newImage))
         {
-            jdbc.update("UPDATE md_sku SET name_en=?,brand=? WHERE id=?", value(newName), value(newBrand), id);
+            jdbc.update("UPDATE md_sku SET name_en=?,brand=?,image_url=? WHERE id=?",
+                    value(newName), value(newBrand), value(newImage), id);
             audit.record("SKU", id, "UPDATE", findSkuSnapshot(id, before), findSku(id));
             counters.skuUpdated++;
         }
@@ -101,17 +106,18 @@ public class NoonSkuSyncWriter
             {
                 PreparedStatement ps = con.prepareStatement(
                         "INSERT INTO md_partner_sku(partner_sku,sku_id,site_code,business_model,"
-                                + "offer_code,barcode,noon_sku,live_status,offer_issues,status,synced_at)"
-                                + " VALUES(?,?,?,'noon',?,?,?,?,?,'ACTIVE',?)", new String[]{"id"});
+                                + "offer_code,barcode,noon_sku,image_url,live_status,offer_issues,status,synced_at)"
+                                + " VALUES(?,?,?,'noon',?,?,?,?,?,?,'ACTIVE',?)", new String[]{"id"});
                 ps.setString(1, offer.partnerSku());
                 ps.setLong(2, skuId);
                 ps.setString(3, siteCode);
                 ps.setString(4, value(offer.offerCode()));
                 ps.setString(5, value(barcode(offer)));
                 ps.setString(6, value(offer.noonSku()));
-                ps.setObject(7, offer.liveStatus());
-                ps.setString(8, offer.issuesJson() == null ? "[]" : offer.issuesJson());
-                ps.setTimestamp(9, syncedAt);
+                ps.setString(7, value(offer.imageUrl()));
+                ps.setObject(8, offer.liveStatus());
+                ps.setString(9, offer.issuesJson() == null ? "[]" : offer.issuesJson());
+                ps.setTimestamp(10, syncedAt);
                 return ps;
             }, keys);
             Number key = keys.getKey();
@@ -124,9 +130,9 @@ public class NoonSkuSyncWriter
         long id = ((Number) rows.get(0).get("id")).longValue();
         Map<String, Object> before = findMapping(id);
         jdbc.update("UPDATE md_partner_sku SET sku_id=?,offer_code=?,barcode=?,noon_sku=?,"
-                        + "live_status=?,offer_issues=?,synced_at=? WHERE id=? AND site_code=?",
+                        + "image_url=COALESCE(?,image_url),live_status=?,offer_issues=?,synced_at=? WHERE id=? AND site_code=?",
                 skuId, value(offer.offerCode()), value(barcode(offer)), value(offer.noonSku()),
-                offer.liveStatus(), offer.issuesJson() == null ? "[]" : offer.issuesJson(),
+                value(offer.imageUrl()), offer.liveStatus(), offer.issuesJson() == null ? "[]" : offer.issuesJson(),
                 syncedAt, id, siteCode);
         audit.record("PARTNER_SKU", id, "UPDATE", before, findMapping(id));
         counters.mappingUpdated++;
@@ -142,7 +148,7 @@ public class NoonSkuSyncWriter
     private Map<String, Object> findSku(long id)
     {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,sku_code,spu_id,name_en,name_ar,category_code,hs_code,origin_country,brand,spec_json,status FROM md_sku WHERE id=?", id);
+                "SELECT id,sku_code,spu_id,name_en,name_ar,category_code,hs_code,origin_country,brand,image_url,spec_json,status FROM md_sku WHERE id=?", id);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -154,7 +160,7 @@ public class NoonSkuSyncWriter
     private Map<String, Object> findMapping(long id)
     {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,partner_sku,sku_id,site_code,business_model,offer_code,barcode,noon_sku,"
+                "SELECT id,partner_sku,sku_id,site_code,business_model,offer_code,barcode,noon_sku,image_url,"
                         + "live_status,offer_issues,status,synced_at FROM md_partner_sku WHERE id=?", id);
         if (rows.isEmpty()) return null;
         // 审计快照用普通 ObjectMapper 序列化：LocalDateTime 先转字符串，避免引入额外 Jackson 模块。
