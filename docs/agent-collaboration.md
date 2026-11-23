@@ -1337,3 +1337,39 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 - 单测 `PartnerSkuQuantityTest` 3/3（共享映射标注、四阶段计数与排除规则、站点隔离、待接入）；真库接口 200 结构正确；全模块 241 用例 0 失败；前端构建通过。
 
 **三、边界**：首图依赖 Content API 覆盖；数量分布为系统内部事件口径、非 Noon 平台实时库存；未连接生产、未部署、未推送。详情见 `docs/verification/m8-sku-image-quantity/contract.md`。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · Noon ASN 信息只读可行性调查
+
+用户授权试一试从 Noon 获取 ASN 信息，包括平台 ASN 编号、状态、站点、商品与数量等。请 WorkBuddy 先在既有授权范围内只读核查：项目已有 API/报表类别及账号权限能否读取，检查 Seller Lab 的 FBN 入仓报表及可用导出；少量样本核实真实字段、覆盖时间/状态及 AE/SA 范围。官方说明可在 Seller Lab 查看 ASN、导出 FBN Received Report 和入仓完成后的 GRN：
+- https://helpcenter.noon.partners/en/category/fulfilled-by-noon-fbn/managing-asn-and-storage
+- https://supportagent.noon.partners/portal/en/kb/articles/fbn-received-reports
+
+先确认平台编号与系统 ASN 的映射，防止混淆或重复；若现有凭据/API 无法读取，如实说明并评估人工导入报表，不臆造接口或数据。只读调查，不创建 ASN、报表生成任务或修改店铺数据；若需要生成新的平台报表或其他写操作，先说明范围并取得用户明确授权。不要在记录中保存凭据或敏感原文，记录可行路径、脱敏字段和验证结果，再交 Codex 复核。本次仅记录任务，未调用 Noon 或执行测试。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · Noon 官方 FBN 库存对账与盘点需求
+
+用户希望将 Noon 官方 FBN 库存与 ERP 中的 FBN 数量对应并对比，用于后续盘点和追查官方仓数量异常或可能丢货。先核实现有已取得的官方 FBN 台账报表能否按 AE/SA、商品及仓库提供数量；确认官方与系统可用/锁定/不可售等口径、时间点及 SKU/仓库映射是否可比。后续方案应并列展示官方数量、系统数量、差异和官方数据时间，保留历史快照及可追溯明细，支持追查原因；无法匹配、口径或时点不一致时明确标注，不将差异直接认定为丢货。不得用官方数量自动覆盖或调整系统账目，差异处理和盘点规则另行确认。当前先做只读可行性核实并记录结果，配合 ASN 调查；本次仅记录，未调用 Noon 或修改业务数据。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · Noon 订单同步可行性
+
+用户希望了解平台订单能否同步进 ERP，同意先核查。请结合既有订单导出类别和账号权限，优先只读核实订单数据来源、真实字段、AE/SA 站点、FBN 覆盖和自动获取能力；无可用自动通道时评估 Seller Lab 导出再导入。核实平台订单及明细标识、状态更新、分页和重复导入处理，避免跨站混淆或重复入账；若需要生成报表等平台写操作，先明确范围取得用户授权。保留脱敏验证结果，不记录凭据或客户敏感信息，不虚称已完成订单同步。本次仅记录，未调用平台或执行测试。
+
+补充用户最新优先级：FBN 库存对照先做简单数量对比；详细差异追查、盘点工作流和复杂历史能力后续再考虑，不以其阻塞先行核查。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · FBN 订单接口与事件核查补充
+
+用户查看 Noon Developer Portal 后表示目前仍只看到三种事件：FBPI 订单同步、FBPO 采购单同步、退货参考信息更新。请 WorkBuddy 继续核查现有账号是否有可获取 FBN 订单的 API 或报表接口、可用字段与权限，再根据结果讨论自动获取或导入方案；不要因为没有 FBN webhook 就断言不存在其他订单接口。遵循上一节只读调查范围，尚未调用接口、未配置事件或执行测试。
+
+### 2026-11-23 · WorkBuddy · Noon 只读可行性调查交付，交 Codex 复核
+
+已执行协作文档 4 项只读指派（ASN 信息、FBN 库存对账、订单同步、FBN 订单接口），全程未创建平台 ASN/报表任务、未改店铺数据、未改业务代码。报告见 `docs/verification/m9-noon-readonly-investigation/contract.md`。
+
+**一、ASN 信息**：官方 Seller Lab 可在 My ASN & Storage → Shipments 查看/筛选；ASN 状态 10 种（Created→…→GRN Completed，另 Cancelled/Expired）。GRN 需筛 GRN Completed → Export ASN Reports → ASN Scheduled Quantity，字段含 psku_code/sku/qty/cubic_feet/storage_type_code 等，**但无 ASN 编号**。账号实测：Impex 11 个导出类别无 ASN/GRN；FBPI 12 端点无 ASN；事件类型仅 3 种无 ASN。系统侧 `log_asn` 只有本地生成的 asn_no，无 platform_asn_no；系统仓码 FBN-AE-OFFICIAL 与平台 W00816026AE 体系不同。**结论：现有 API 读不到平台 ASN，只能 Seller Lab 人工导出后导入；生成报表属写操作，本次未执行，待用户授权。**
+
+**二、FBN 库存对账**：已有报表 `fbn_inventoryv2_ledgersummaryview`（AE）含 10 个月度快照、49 个 partner_sku、SALEABLE/UNSALEABLE/transit + closing_quantity。口径映射：官方 SALEABLE≈系统 qty_available、UNSALEABLE≈qty_unsellable、transit≈qty_in_transit；官方无 reserved、location 只有国家码（系统按仓分），时点为月末快照且最新标 2026-11-30（晚于当前，需向平台确认）。**简单数量对比结论：官方 2026-11-30 SALEABLE 合计 228，但系统台账只有 demo SKU，49 个同步商品均无库存记录 → 当前无法给出有意义差异；属业务时序差异，不能认定丢货，不得用官方数量覆盖系统账。**
+
+**三、订单同步**：`noon_noonoms_ordersexport` 已验证可用，样本 1162 行/1034 单，AE 691/SA 471，FBN 1160，状态 delivered/cancelled/undeliverable/shipped/exported，含 order_nr+item_nr 唯一键、warehouse_code/shipment_nr/awb_nr；无客户敏感字段。幂等建议 `(site_code, order_nr, item_nr)`，状态为快照需防旧覆盖新。**障碍：60 个订单 SKU 中 49 可映射到 md_partner_sku.noon_sku，11 个未匹配（与 M7 FBN 台账覆盖边界同源），需补商品数据源。** 未实现同步、未虚称完成。
+
+**四、FBN 订单接口/事件**：实测 `GET /event-notifications/v1/event-type/list` 返回 `FBPI::ORDER_SYNC`、`FBPO::PO_SYNC`、`RETURNS::REFERENCE_UPDATE` 三种，与用户所见一致，无 FBN 订单/ASN/库存事件。FBPI 的 ListFbpiOrders 是卖家自履约(FBP)订单，必填 integration warehouse、next_token 分页、状态仅 confirmed/cancelled + integration_status，**不足以表达 FBN 订单状态**；FBPO 是采购侧。未发现 FBN 专用订单 API 或事件，FBN 订单可靠来源仍是订单导出的 `is_fulfilled_by_noon=true` 行。
+
+**五、待授权**：生成 GRN/FBN Received Report、生成新库存明细或订单导出、以及后续 platform_asn_no/仓码映射/订单幂等表实现，均属写操作或实现工作，本次未执行。未连接生产、未部署、未推送。
