@@ -1373,3 +1373,23 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 **四、FBN 订单接口/事件**：实测 `GET /event-notifications/v1/event-type/list` 返回 `FBPI::ORDER_SYNC`、`FBPO::PO_SYNC`、`RETURNS::REFERENCE_UPDATE` 三种，与用户所见一致，无 FBN 订单/ASN/库存事件。FBPI 的 ListFbpiOrders 是卖家自履约(FBP)订单，必填 integration warehouse、next_token 分页、状态仅 confirmed/cancelled + integration_status，**不足以表达 FBN 订单状态**；FBPO 是采购侧。未发现 FBN 专用订单 API 或事件，FBN 订单可靠来源仍是订单导出的 `is_fulfilled_by_noon=true` 行。
 
 **五、待授权**：生成 GRN/FBN Received Report、生成新库存明细或订单导出、以及后续 platform_asn_no/仓码映射/订单幂等表实现，均属写操作或实现工作，本次未执行。未连接生产、未部署、未推送。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · 核实已有库存报表时点
+
+用户同意由 Codex 决定下一步。请优先只读核实已取得 AE FBN 库存月度报表的日期字段及未来月末（2026-11-30）含义、数据生成时间、库存状态口径和是否有较新且可比较的现成报表；然后查看已有入库/GRN 报表能否读取 ASN 编号及明细。只使用现有资料和只读查询，不新建报表任务；不可得如实说明。库存当前先做简单数量对比，未匹配或不同口径不当作差异或丢货。请写回证据和结果。本次仅记录，未执行平台查询或测试。
+
+### 2026-11-23 · WorkBuddy · 已有库存报表时点核实交付（M10），交 Codex 复核
+
+按新指令优先只读核实日期字段、未来月末含义、数据生成时间、状态口径，并查已有入库/GRN 报表能否读 ASN 编号。全程未新建报表任务、未调平台写接口。证据见 `docs/verification/m10-fbn-report-timing/contract.md`。
+
+**一、11-30 含义澄清（关闭 M9 疑点）**：报表 10 个 date 全是各月最后一天；同 (partner_sku, condition) 本期 opening = 上期 closing 在 164/168 行成立（如 NM000028：09-30 closing 23 → 10-31 opening 23 → closing 18 → 11-30 opening 18 → closing 12）。11-30 有 37 行/28 SKU，其中 26 行已有出库动销。**结论：date 是会计期间月末标签，11-30 是 11 月当期进行中快照（生成于 11-23），不是未来数据，无需再向平台确认。** M9 中"需确认未来日期含义"的疑点正式关闭。
+
+**二、数据生成时间**：导出任务状态（只读查询已存在 code）created_at/updated_at 为 UTC，实测订单导出 created_at=2026-11-23T07:28:27Z≈北京15:28；本地 fbn_summary_ae.csv mtime 15:31。状态响应无独立"数据截止时间"列，时点由 date（月末标签）表达。对账时应并列"官方期间 11-30 + 生成时间 11-23 15:31"与系统取数时刻。
+
+**三、状态口径**：SALEABLE≈qty_available、UNSALEABLE≈qty_unsellable、transit≈qty_in_transit；closing = opening + 12 变动列在 266/270 行成立（4 例外为 03/05 月 SSM 系列月中调整）。官方无 reserved 列、location 只到国家码，系统按仓分，只能按站点汇总。
+
+**四、较新报表**：已取得的 AE 月度报表中 11-30 即最新（11-23 生成）。`noon_catalog_catalogexport` 此前返回 0 行不可比；`fbn_inventory_fbninventorydetailreport` / `ledgerdetailedview` 粒度更细但尚未生成，按只读约束未新建任务。
+
+**五、ASN 编号**：已下载报表 21 列无 ASN/GRN/单据列；官方 GRN 报表字段也无 ASN 编号；仅 Seller Lab ASN 详情页可见，导出属平台写操作，本次未执行、不可得。
+
+M9 其余结论（49 个同步商品系统无台账记录、不能认定丢货、不得覆盖系统账）保持不变。未连接生产、未部署、未推送。
