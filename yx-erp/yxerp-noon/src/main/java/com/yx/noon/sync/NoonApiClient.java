@@ -41,15 +41,17 @@ public class NoonApiClient
     private final NoonApiProperties properties;
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http;
+    private final NoonRequestThrottle throttle;
 
     private volatile String sessionCookie;
     private volatile String projectCode;
     private volatile String keyId;
     private volatile PrivateKey privateKey;
 
-    public NoonApiClient(NoonApiProperties properties)
+    public NoonApiClient(NoonApiProperties properties, NoonRequestThrottle throttle)
     {
         this.properties = properties;
+        this.throttle = throttle == null ? NoonRequestThrottle.defaults() : throttle;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build();
     }
 
@@ -236,24 +238,16 @@ public class NoonApiClient
 
     private byte[] download(String url)
     {
-        try
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .header("User-Agent", properties.getUserAgent())
+                .GET().timeout(Duration.ofSeconds(60)).build();
+        NoonRequestThrottle.Response<byte[]> response = throttle.run(() ->
         {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                    .header("User-Agent", properties.getUserAgent())
-                    .GET().timeout(Duration.ofSeconds(60)).build();
-            HttpResponse<byte[]> response = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
-            require2xx(response.statusCode(), response.body().length > 5000 ? "<binary>" : new String(response.body(), StandardCharsets.UTF_8));
-            return response.body();
-        }
-        catch (IOException e)
-        {
-            throw new IllegalStateException("下载 Noon 导出文件失败", e);
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("下载 Noon 导出文件被中断", e);
-        }
+            HttpResponse<byte[]> r = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            return new NoonRequestThrottle.Response<>(r.statusCode(), r.body());
+        });
+        require2xx(response.status(), response.body().length > 5000 ? "<binary>" : new String(response.body(), StandardCharsets.UTF_8));
+        return response.body();
     }
 
     /** 统一调用：401 时重新登录并重试一次；非 2xx 抛出带响应摘要的异常。 */
@@ -274,25 +268,26 @@ public class NoonApiClient
                         .method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
             try
             {
-                HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-                if (response.statusCode() == 401 && attempt == 0)
+                // 每次尝试都把真实请求交给统一限速器；401 重登在 throttle 外层，
+                // 避免 throttle 持锁期间调用 login 造成二次获取死锁。
+                NoonRequestThrottle.Response<String> response = throttle.run(() ->
+                {
+                    HttpResponse<String> r = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+                    return new NoonRequestThrottle.Response<>(r.statusCode(), r.body());
+                });
+                if (response.status() == 401 && attempt == 0)
                 {
                     sessionCookie = null;
                     login();
                     continue;
                 }
-                require2xx(response.statusCode(), response.body());
+                require2xx(response.status(), response.body());
                 if (response.body().isBlank()) return json.createObjectNode();
                 return json.readTree(response.body());
             }
             catch (IOException e)
             {
                 throw new IllegalStateException("Noon API 调用失败: " + method + " " + path, e);
-            }
-            catch (InterruptedException e)
-            {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Noon API 调用被中断: " + method + " " + path, e);
             }
         }
         throw new IllegalStateException("Noon API 认证失败: " + path);
@@ -305,6 +300,20 @@ public class NoonApiClient
         if (message.length() > 400) message = message.substring(0, 400);
         throw new IllegalStateException("Noon API HTTP " + status + " :: " + message);
     }
+
+    /** 供 Seller Lab 只读客户端复用会话（受统一限速保护）；不暴露密钥/私钥。 */
+    public void ensureLoggedIn()
+    {
+        if (sessionCookie != null && !sessionCookie.isBlank()) return;
+        login();
+    }
+
+    /** 供 Seller Lab 只读客户端使用的会话头（值不进入日志/响应）。 */
+    public String sessionCookie() { return sessionCookie == null ? "" : sessionCookie; }
+
+    public String projectCode() { return projectCode == null ? "" : projectCode; }
+
+    public void require2xxPublic(int status, String body) { require2xx(status, body); }
 
     private synchronized void login()
     {
@@ -328,28 +337,27 @@ public class NoonApiClient
                     .header("User-Agent", properties.getUserAgent())
                     .POST(HttpRequest.BodyPublishers.ofString(loginBody.toString(), StandardCharsets.UTF_8))
                     .timeout(Duration.ofSeconds(properties.getOfferTimeoutSeconds())).build();
-            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-            require2xx(response.statusCode(), response.body());
+            // Cookie 头必须在 throttle 内的真实响应里读取：Response 只带状态与 body。
             List<String> cookies = new ArrayList<>();
-            for (String raw : response.headers().allValues("set-cookie"))
+            NoonRequestThrottle.Response<String> response = throttle.run(() ->
             {
-                for (String part : raw.split(",\\s*(?=[^;,]+=)"))
-                {
-                    String pair = part.split(";", 2)[0].trim();
-                    if (!pair.isBlank()) cookies.add(pair);
-                }
+                HttpResponse<String> r = http.send(request, HttpResponse.BodyHandlers.ofString());
+                for (String raw : r.headers().allValues("set-cookie")) cookies.addAll(java.util.Arrays.asList(raw.split(",\\s*(?=[^;,]+=)")));
+                return new NoonRequestThrottle.Response<>(r.statusCode(), r.body());
+            });
+            require2xx(response.status(), response.body());
+            List<String> pairs = new ArrayList<>();
+            for (String raw : cookies)
+            {
+                String pair = raw.split(";", 2)[0].trim();
+                if (!pair.isBlank()) pairs.add(pair);
             }
-            if (cookies.isEmpty()) throw new IllegalStateException("Noon 登录未返回会话 Cookie");
-            sessionCookie = String.join("; ", cookies);
+            if (pairs.isEmpty()) throw new IllegalStateException("Noon 登录未返回会话 Cookie");
+            sessionCookie = String.join("; ", pairs);
         }
         catch (IOException e)
         {
             throw new IllegalStateException("读取 Noon 凭据失败: " + properties.getCredentialsPath(), e);
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Noon 登录被中断", e);
         }
         catch (java.security.GeneralSecurityException e)
         {

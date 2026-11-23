@@ -1501,3 +1501,19 @@ AE ASN 页正常加载时观察到 `GET https://fbn-inbound.noon.partners/_vs/sc
 ### 2026-11-24 00:55 · 用户 · M15 范围调整
 
 用户明确：**ASN 先不着急接入 ERP 系统**。M15 本次只实施 FBN 库存与 Sales 销售明细两个接口的 ERP 接入；ASN 接口验证结论（M12/M14：站点隔离、next_token 分页、asn_nr 平台编号）保留备查，但本次不建 ASN 表、不写 ASN 服务/Controller/任务/前端页面。契约 `docs/verification/m15-sellerlab-integration/contract.md` 已同步标注 ASN 暂缓；验收清单中 ASN 项本次不适用。该项已交豆包集中实施。
+
+### 2026-11-24 · WorkBuddy · M15 Seller Lab 接入交付（FBN库存+Sales，ASN暂缓），交 Codex 审核
+
+按用户 00:55 范围调整实施：只接入 FBN 库存与 Sales，ASN 暂缓（未建表/服务/Controller/任务/页面）。原交豆包集中实施，但其环境沙箱创建失败（sbox_error=416001）、提权被拒，未改任何代码；改由 WorkBuddy 实施。报告见 `docs/verification/m15-done/contract.md`。
+
+**一、限速接入所有实际路径**：NoonApiClient 三处真实请求（login/call/download）全部接入同一 NoonRequestThrottle bean（3s、429/503 有界退避）。401 重登放在 throttle 外层避免持锁重入死锁；login 的 Cookie 在 throttle 内从真实响应读取。NoonSellerLabClient 复用同一实例，分页与两站串行不并发绕过。多实例不共享，已标注。
+
+**二、FBN 库存**：站点头 Country-Code+X-Locale、嵌套 pagination 翻页；新表 noon_fbn_inventory_snapshot 唯一键含按天归档 captured_at 保证幂等。compare 接口并列官方与系统数量，系统无台账显示"未同步"+说明，不以0冒充、不认定丢货。真库：AE 19/SA 21 行（SA 两页 20+1），重复同步无新增行。
+
+**三、Sales**：新表 noon_sales_item 唯一键 (site_code,item_nr)，重复 upsert 更新状态不重复入账；item_nr 作编号并保留"平台明细标识非整单号"说明。真库：同步 40 条、重复同步仍 40、列表 total 40。
+
+**四、Controller/任务/页面**：/noon/sellerlab 四接口；Quartz bean noonSellerLabTask 默认不自动高频；菜单 3900 段两页标注非公开接口/单进程限速/未同步失败不等于零。
+
+**五、验证与修复**：全模块单测通过、前端 build 通过、真库端到端与站点拒绝验证通过；未修改平台数据。过程中修复三真实 bug：throttle 后 Cookie 头丢失、captured_at 用同步时刻破坏幂等、MySQL upsert 影响行数(1/2)被当行数导致计数翻倍。
+
+**六、局限**：非公开接口正式支持/SLA/授权未确认；限速仅进程内；Sales 按页遍历不可假设稳定（需去重补扫）；库存对比为简单数量并列、口径/仓库/时点未逐项对齐，不作账务结论；ASN 未接入。未连接生产、未部署、未推送（用户负责推送）。
