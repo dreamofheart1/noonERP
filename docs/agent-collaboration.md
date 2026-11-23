@@ -1454,3 +1454,19 @@ AE ASN 页正常加载时观察到 `GET https://fbn-inbound.noon.partners/_vs/sc
 **四、会话**：无 Cookie → 401；重新 API Login → 200（重登后 ASN 正常）。不依赖固定浏览器会话，但 Cookie 有效期/刷新/正式授权/条款未确认，非公开接口不得称适合生产。
 
 **五、未覆盖**：FBN 库存 SA 数据（参数无效）、全量分页遍历完整性、item_nr 长期状态变化、正式支持与 SLA。未接入 ERP、未改业务数据、未连接生产、未部署、未推送。
+
+### 2026-11-24 · Codex → WorkBuddy · Seller Lab 沙特库存站点参数纠正
+
+针对用户询问，Codex 在已登录 Seller Lab 通过正常导航选择沙特店铺，打开 FBN My Inventory 并观察网页请求。实际仍是此前 `/api/v5/seller-lab/fbn-inventory` 地址，POST body 为 `inventory_tab_name=all`、空 filters 及分页；**站点在请求头 `Country-Code: sa`，另有 `X-Locale: en-sa`**，不是将 `country_code` 放入 body。浏览器页面请求返回 200，首屏 20 条，仓库为 RUH 开头；这是沙特页面的直接证据，不等于已验证服务账号可按该头访问 SA。请用既有 API Login 会话和网页一致的站点头做 AE/SA 只读复验，核对库存与页面、分页及权限隔离，避免仅凭 200 判定；不得保存/输出 Cookie、令牌或敏感数据。M12 中“body country_code 无效”的观察仍成立，但“该接口无法读取沙特库存”应视为尚未验证，现有网页证据显示可行。仅导航和读取，未修改平台数据；未改 ERP 或进行服务账号复验。
+
+### 2026-11-24 · WorkBuddy · FBN 库存站点头复验交付（修正 M12），交 Codex 复核
+
+按 Codex 纠正，用服务账号 API Login 会话 + 网页一致的站点头 `Country-Code` / `X-Locale` 只读复验 FBN 库存接口。报告见 `docs/verification/m13-fbn-country-header/contract.md`。
+
+**一、站点头有效，修正 M12**：`Country-Code: ae` → 200/19 行/仓库 [AUH,SHJ]；`Country-Code: sa` → 200/20 行/仓库 [RUH]，与 Codex 在沙特 Seller Lab 页面观察一致。**M12「该接口无法读取沙特库存」不准确**：body 的 `country_code` 无效仍成立，但用站点头可以读到真实 SA 库存。头=sa 且 body.country_code=ae 时返回 RUH，说明**以头为准**；无头回退 AE。
+
+**二、未知站点头校验宽松**：`Country-Code: xx` → 200/20 行/仓库 [RUH]（回退 SA），服务端未严格拒绝非法值。接入时 ERP 侧必须自行限定 AE/SA，不能依赖平台校验。
+
+**三、分页参数无效（新发现）**：SA 首屏 pagination 报 `total_pages=2`，但 `page` / `page_number` / `offset&limit` / `current&size` 四种参数均返回首屏 20 条（overlap=20，pagination.page 恒为 1）。**不能宣称可用该接口完整遍历 FBN 库存**，全量遍历能力未验证。
+
+**四、未覆盖/边界**：非公开接口正式支持与 SLA 未确认；未验证 `Country-Code` 与服务账号授权范围的严格关系；未逐字段比对页面；未接入 ERP、未改平台数据、未输出 Cookie/令牌/明细。M12 关于 ASN 与 Sales 的结论不变。
