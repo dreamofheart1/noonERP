@@ -49,20 +49,29 @@
     <pagination v-show="total > 0" :total="total" v-model:page="queryParams.pageNum" v-model:limit="queryParams.pageSize" @pagination="getList" />
 
     <!-- 新建 ASN 弹窗 -->
-    <el-dialog title="新建 ASN" v-model="createOpen" width="640px" append-to-body>
+    <el-dialog title="新建 ASN" v-model="createOpen" width="1100px" top="4vh" class="asn-create-dialog" append-to-body>
       <el-form ref="createFormRef" :model="createForm" label-width="100px" size="small">
         <el-form-item label="站点" required>
-          <el-select v-model="createForm.siteCode" placeholder="请选择授权站点" style="width: 100%">
+          <el-select v-model="createForm.siteCode" placeholder="请选择授权站点" style="width: 100%" @change="onCreateSiteChange">
             <el-option v-for="s in siteOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="FBN 仓编码" prop="warehouseCode">
-          <el-input v-model="createForm.warehouseCode" placeholder="如 WH-AE-FBN" />
+          <el-select v-model="createForm.warehouseCode" filterable clearable
+                     :loading="warehouseLoading"
+                     :placeholder="createForm.siteCode ? '选择系统内已维护的 FBN 仓' : '请先选择站点'"
+                     style="width: 100%">
+            <el-option v-for="w in warehouseOptions" :key="w.value" :label="w.label" :value="w.value" />
+          </el-select>
+          <div v-if="createForm.siteCode && !warehouseOptions.length && !warehouseLoading"
+               style="font-size:12px;color:#e6a23c;line-height:1.4">
+            当前站点暂无启用的 FBN 仓，请先在「仓库管理」维护仓库类型=FBN 且状态=启用的仓库。
+          </div>
         </el-form-item>
         <el-form-item label="来源模式">
           <el-radio-group v-model="createForm.sourceMode" @change="onSourceModeChange">
-            <el-radio-button value="LOCAL_BATCH">本地仓批次</el-radio-button>
             <el-radio-button value="DIRECT_PURCHASE">采购直发</el-radio-button>
+            <el-radio-button value="LOCAL_BATCH">本地仓批次</el-radio-button>
           </el-radio-group>
           <div v-if="createForm.sourceMode === 'DIRECT_PURCHASE'" style="font-size:12px;color:#e6a23c;line-height:1.4">
             直发以采购收货成本为成本源、不经本地仓；采购明细须已收货且未超发。
@@ -170,8 +179,8 @@
 <script setup name="Asn">
 import { useSiteScope } from "@/composables/useSiteScope"
 import { ref, reactive, toRefs, getCurrentInstance } from 'vue'
-import { listAsn, getAsn, getAsnResult, createAsn, sealAsn, receiveAsn } from '@/api/noon/inbound/asn'
-import { listOrder, getOrder } from '@/api/noon/purchasing/order'
+import { listAsn, getAsn, getAsnResult, createAsn, sealAsn, receiveAsn, listAvailablePoItems } from '@/api/noon/inbound/asn'
+import { listWarehouse } from '@/api/noon/masterdata/warehouse'
 
 const { proxy } = getCurrentInstance()
 const loading = ref(false)
@@ -188,11 +197,13 @@ const sealTarget = ref(null)
 const receiveTarget = ref(null)
 const poItemOptions = ref([])
 const poLoading = ref(false)
+const warehouseOptions = ref([])
+const warehouseLoading = ref(false)
 
 const data = reactive({
   queryParams: { pageNum: 1, pageSize: 10, siteCode: null },
   // 新建 ASN 默认站点在 openCreate 时取自当前站点；ALL 时留空，必须由用户选择
-  createForm: { siteCode: null, warehouseCode: '', sourceMode: 'LOCAL_BATCH', lines: [] },
+  createForm: { siteCode: null, warehouseCode: '', sourceMode: 'DIRECT_PURCHASE', lines: [] },
   receiveForm: { asnId: null, lines: [] }
 })
 const { queryParams, createForm, receiveForm } = toRefs(data)
@@ -237,45 +248,63 @@ function addLine() { createForm.value.lines.push(newLine()) }
 function onSourceModeChange() { createForm.value.lines = [newLine()]; if (createForm.value.sourceMode === 'DIRECT_PURCHASE') loadPoItems() }
 function onPoItemChange(row) {
   const opt = poItemOptions.value.find(o => o.id === row.purOrderItemId)
-  if (opt) { row.skuId = opt.skuId; row.qtyReceived = opt.qtyReceived; row.qtyShipped = Math.min(row.qtyShipped || opt.avail, opt.avail) || opt.avail }
+  if (opt) { row.skuId = opt.skuId; row.qtyReceived = opt.qtyReceived; row.avail = opt.avail; row.qtyShipped = Math.min(row.qtyShipped || opt.avail, opt.avail) || opt.avail }
 }
 
-// 拉取当前站点的采购单明细，筛选已收货（qtyReceived>0）且仍有可发额度的行，供直发选择
+// 拉取当前站点的可直发采购明细：额度由后端权威计算（已收 − 已建直发 ASN − 已本地入库），
+// 已发完的明细不返回；不按整单隐藏仍有余额的其他明细。
 function loadPoItems() {
+  const site = createForm.value.siteCode || siteFilter.value || undefined
+  if (!site || site === 'ALL') { poItemOptions.value = []; return }
   poLoading.value = true
-  listOrder({ offset: 0, limit: 200, siteCode: createForm.value.siteCode || siteFilter.value || undefined }).then(res => {
-    const orders = (res.data && res.data.rows) || []
-    const details = orders.filter(o => o.status !== 'DRAFT').map(o => getOrder(o.id).catch(() => null))
-    return Promise.all(details).then(detailRes => {
-      const opts = []
-      for (const dr of detailRes) {
-        const d = dr && dr.data
-        if (!d) continue
-        for (const it of (d.items || [])) {
-          const received = Number(it.qtyReceived || 0)
-          if (received <= 0) continue
-          // 可发额度前端按已收量展示；后端会按「已收 − 已建直发ASN发运量」做权威超发校验
-          const avail = received
-          opts.push({
-            id: it.id, skuId: it.skuId,
-            label: `${d.orderNo || ('PO#' + d.id)} · SKU${it.skuId} · 已收${received} · 可发≤${avail}`,
-            qtyReceived: received, avail: avail
-          })
-        }
+  listAvailablePoItems(site).then(res => {
+    const rows = (res.data && res.data.rows) || (Array.isArray(res.data) ? res.data : []) || []
+    poItemOptions.value = rows.map(it => {
+      const received = Number(it.qtyReceived || 0)
+      const shipped = Number(it.directShipped || 0)
+      const inbound = Number(it.inboundQty || 0)
+      const avail = Number(it.avail || 0)
+      return {
+        id: it.purOrderItemId, skuId: it.skuId, orderNo: it.orderNo,
+        label: `${it.orderNo || ('PO#' + it.orderId)} · SKU${it.skuId} · 已收${received} · 已直发${shipped} · 已入库${inbound} · 可发≤${avail}`,
+        qtyReceived: received, directShipped: shipped, inboundQty: inbound, avail: avail
       }
-      poItemOptions.value = opts
     })
   }).catch(() => { poItemOptions.value = [] }).finally(() => { poLoading.value = false })
 }
+// 拉取当前站点已启用、且为 FBN 类型（is_fbn=1 或 warehouse_type=FBN）的仓库，供 ASN 目标仓下拉选择
+function loadWarehouseOptions() {
+  const site = createForm.value.siteCode
+  if (!site || site === 'ALL') { warehouseOptions.value = []; return }
+  warehouseLoading.value = true
+  listWarehouse({ offset: 0, limit: 200, siteCode: site, status: 'ACTIVE' }).then(res => {
+    const rows = (res.data && res.data.rows) || []
+    warehouseOptions.value = rows
+      .filter(w => w.status === 'ACTIVE' && (w.isFbn === true || w.warehouseType === 'FBN'))
+      .map(w => ({
+        value: w.warehouseCode,
+        label: w.warehouseName ? `${w.warehouseCode} · ${w.warehouseName}` : w.warehouseCode
+      }))
+  }).catch(() => { warehouseOptions.value = [] }).finally(() => { warehouseLoading.value = false })
+}
+function onCreateSiteChange() {
+  // 仓库绑定站点，换站点后原选项失效：清空已选仓并重新加载
+  createForm.value.warehouseCode = ''
+  loadWarehouseOptions()
+  loadPoItems()
+}
 function handleCreate() {
-  Object.assign(createForm.value, { siteCode: siteFilter.value || null, warehouseCode: '', sourceMode: 'LOCAL_BATCH' })
+  Object.assign(createForm.value, { siteCode: siteFilter.value || null, warehouseCode: '', sourceMode: 'DIRECT_PURCHASE' })
   createForm.value.lines = [newLine()]
   poItemOptions.value = []
   createOpen.value = true
+  // 默认直发：打开即预加载采购明细与 FBN 仓选项，避免用户再手动触发
+  loadPoItems()
+  loadWarehouseOptions()
 }
 function submitCreate() {
   const f = createForm.value
-  if (!f.siteCode || !f.warehouseCode || !f.lines.length) { proxy.$modal.msgWarning('请填站点/FBN 仓/至少一行明细'); return }
+  if (!f.siteCode || !f.warehouseCode || !f.lines.length) { proxy.$modal.msgWarning('请选择站点/FBN 仓并至少保留一行明细'); return }
   const direct = f.sourceMode === 'DIRECT_PURCHASE'
   for (const l of f.lines) {
     if (!(Number(l.qtyShipped) > 0)) { proxy.$modal.msgWarning('发运量需 >0'); return }
@@ -348,3 +377,18 @@ function handleDetail(row) {
 
 getList()
 </script>
+
+<style>
+/* 新建 ASN 弹窗：放大后明细整表展示，去掉弹窗 body 与表格的内部滚动条 */
+.asn-create-dialog.el-dialog:not(.is-fullscreen) {
+  margin-top: 4vh !important;
+}
+.asn-create-dialog .el-dialog__body {
+  max-height: none !important;
+  overflow: visible !important;
+}
+.asn-create-dialog .el-table,
+.asn-create-dialog .el-table__body-wrapper {
+  overflow: visible !important;
+}
+</style>

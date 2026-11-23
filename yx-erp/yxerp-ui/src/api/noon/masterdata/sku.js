@@ -26,3 +26,8 @@ export function updateSku(id, data) {
 export function changeSkuStatus(id, status) {
   return request({ url: BASE + '/' + id + '/status', method: 'post', params: { status } })
 }
+
+// 从 Noon 平台同步 AE 商品到 SKU 管理与 Partner SKU 映射
+export function syncNoonSku(siteCode = 'AE') {
+  return request({ url: '/noon/sync/sku', method: 'post', params: { siteCode } })
+}

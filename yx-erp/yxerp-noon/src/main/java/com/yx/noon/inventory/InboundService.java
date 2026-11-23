@@ -38,7 +38,8 @@ import org.springframework.transaction.annotation.Transactional;
  *       可先入库已收部分，安全性依赖下方逐行守恒而非整单收齐（契约 §9.1）；
  *   <li>逐行按 purOrderItemId 锁采购单行，从 {@code noon_m3_receipt} 取该来源行累计收货量与最近一条
  *       {@code unit_cost_cny} 作为权威成本，SKU 取 {@code pur_order_item.sku_id}；校验
- *       {@code 0 &lt; qtyQualified &lt;= 累计收货量 - 累计已入库量}（跨请求重复入库不允许虚增库存）；</li>
+ *       {@code 0 &lt; qtyQualified &lt;= R − I − D}（R=累计收货量、I=累计已入库合格量、D=已建直发 ASN 发运量；
+ *       v2 契约 §8 跨路径统一口径，跨请求重复入库/直发已占用量都不允许虚增库存）；</li>
  *   <li>写入库单（CONFIRMED）/入库行 / FIFO 批次（OPEN、PURCHASE、parent NULL、split_seq 0、CNY、fx 1）/
  *       台账（按 sku+warehouse 累加 qty_available，站点冲突 400）/ 库存流水 / 审计；</li>
  *   <li>提交前写回 request 行 status='DONE' + result_json（replayed=false）。任何异常整事务回滚，
@@ -175,11 +176,14 @@ public class InboundService
             if (source.unitCost() == null)
                 throw new IllegalStateException("采购单行收货记录缺少权威成本: 行 id=" + item.id());
             int already = inboundAlready(item.id());
-            int inboundable = source.receivedQty() - already;
+            // v2 契约 §8/§9.2：同一收货池 R 也被直发路径占用，可入库 = R − I − D（D=已建直发 ASN 发运量）。
+            long directShipped = directShippedQty(item.id());
+            long inboundable = (long) source.receivedQty() - already - directShipped;
             if (line.qtyQualified() > inboundable)
                 throw new IllegalArgumentException("合格量超过该来源行可入库量: 行 id=" + item.id()
                         + "，累计收货=" + source.receivedQty() + "，已入库=" + already
-                        + "，可入库=" + inboundable + "，本次=" + line.qtyQualified());
+                        + "，已直发=" + directShipped
+                        + "，可入库=" + Math.max(inboundable, 0L) + "，本次=" + line.qtyQualified());
 
             // §2.3 成本守恒：权威成本只来自 M3 收货记录，SKU 只来自采购单行；批次号服务端生成。
             BigDecimal unitCost = source.unitCost();
@@ -292,24 +296,37 @@ public class InboundService
         return new PageResult<>(rows, total);
     }
 
-    /** 四态台账只读：按授权站点过滤。 */
-    public PageResult<LedgerRow> listLedger(String siteCode, int offset, int limit)
+    /** 四态台账只读：按授权站点过滤，可按仓库精确筛选（仓库条件与站点闸门取交集，不绕过授权）。 */
+    public PageResult<LedgerRow> listLedger(String siteCode, Long warehouseId, int offset, int limit)
     {
         InventoryRules.offset(offset);
         int size = InventoryRules.limit(limit);
         List<String> gate = siteGate(siteCode);
         if (gate.isEmpty()) return PageResult.empty();
 
-        String where = " WHERE l.site_code IN (" + InventoryRules.placeholders(gate.size()) + ")";
+        StringBuilder where = new StringBuilder(" WHERE l.site_code IN (")
+                .append(InventoryRules.placeholders(gate.size())).append(")");
+        List<Object> args = new ArrayList<>(gate);
+        if (warehouseId != null)
+        {
+            where.append(" AND l.warehouse_id=?");
+            args.add(warehouseId);
+        }
         long total = jdbc.queryForObject("SELECT COUNT(*) FROM inv_stock_ledger l" + where,
-                Long.class, gate.toArray());
-        List<Object> pageArgs = new ArrayList<>(gate);
+                Long.class, args.toArray());
+        List<Object> pageArgs = new ArrayList<>(args);
         pageArgs.add(size);
         pageArgs.add(offset);
         List<LedgerRow> rows = jdbc.query("SELECT id,sku_id,warehouse_id,site_code,qty_available,"
                 + "qty_in_transit,qty_reserved,qty_unsellable FROM inv_stock_ledger l" + where
                 + " ORDER BY l.id LIMIT ? OFFSET ?", LEDGER_MAPPER, pageArgs.toArray());
         return new PageResult<>(rows, total);
+    }
+
+    /** 兼容旧签名：等价于不按仓库筛选。 */
+    public PageResult<LedgerRow> listLedger(String siteCode, int offset, int limit)
+    {
+        return listLedger(siteCode, null, offset, limit);
     }
 
     // ---------------------------------------------------------------- 幂等
@@ -613,6 +630,24 @@ public class InboundService
                         + "WHERE it.pur_order_item_id=? AND i.status IN ('CONFIRMED','CLOSED')",
                 Integer.class, purOrderItemId);
         return sum == null ? 0 : sum;
+    }
+
+    /**
+     * 该采购来源行已直发 FBN 的发运量合计（v2 契约 §9.2）：口径同 {@code AsnService.directShippedQty}——
+     * {@code SUM(log_asn_item.qty_shipped) WHERE pur_order_item_id=?}，DRAFT/SEALED/RECEIVED 全计
+     * （{@code log_asn} 无取消状态，故按该列求和即可）。
+     *
+     * <p>用<b>锁定读</b>（单表 {@code FOR UPDATE}）绕过 RR 快照：直发 create 与本地入库 confirm 都先锁同一
+     * {@code pur_order_item} 行，等锁期间对方已提交的发运量必须可见，否则仍会按旧快照双重占用。
+     */
+    private long directShippedQty(long purOrderItemId)
+    {
+        List<Integer> shipped = jdbc.query("SELECT qty_shipped FROM log_asn_item "
+                        + "WHERE pur_order_item_id=? FOR UPDATE",
+                (rs, i) -> rs.getInt("qty_shipped"), purOrderItemId);
+        long total = 0L;
+        for (Integer qty : shipped) total += qty == null ? 0 : qty;
+        return total;
     }
 
     /**

@@ -19,6 +19,9 @@ import javax.sql.DataSource;
 import com.yx.common.core.domain.entity.SysUser;
 import com.yx.common.core.domain.model.LoginUser;
 import com.yx.framework.security.site.SiteAuthGuard;
+import com.yx.noon.inventory.InboundInput;
+import com.yx.noon.inventory.InboundLineInput;
+import com.yx.noon.inventory.InboundService;
 import com.yx.noon.inventory.InventoryAudit;
 import com.yx.system.mapper.SysUserSiteMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -67,6 +70,7 @@ class MySqlAsnIT
     private JdbcTemplate jdbc;
     private TransactionTemplate tx;
     private AsnService asnService;
+    private InboundService inboundService;
 
     @BeforeEach
     void setUp() throws Exception
@@ -99,6 +103,7 @@ class MySqlAsnIT
         grant(2L, "AE");
 
         asnService = context.getBean(AsnService.class);
+        inboundService = context.getBean(InboundService.class);
         login(1L);
     }
 
@@ -534,6 +539,75 @@ class MySqlAsnIT
                 Integer.class), "直发全链路无 PENDING 残留");
     }
 
+    // ------------------------------------------------------------ v2 §9.4 跨路径守恒真库断言
+
+    @Test
+    void crossPathConservationHoldsOnRealSchema()
+    {
+        long fbn = newWarehouse("WH-FBN-IT-H2", "AE", true);
+        long local = newWarehouse("WH-LOCAL-IT-H2", "AE");
+        long skuA = newSku("SKU-ASN-IT-H2A");
+        long skuB = newSku("SKU-ASN-IT-H2B");
+        long order = newPurchaseOrder("AE");
+        long itemA = newPurchaseItem(order, skuA, 10, 10, "5.0000");
+        long itemB = newPurchaseItem(order, skuB, 6, 6, "6.0000");
+        newReceipt(order, itemA, 10, "5.0000", LocalDateTime.of(2026, 3, 7, 9, 0));
+        newReceipt(order, itemB, 6, "6.0000", LocalDateTime.of(2026, 3, 7, 9, 0));
+
+        // ① 先直发 4：D 占用，本地入库 6 仍允许（R10 − D4 = 6），再入 1 被 400。
+        String directKey = rid();
+        AsnCreateInput directInput = new AsnCreateInput("AE", "WH-FBN-IT-H2", directKey, null,
+                List.of(new AsnCreateLine(null, null, 4, null, itemA)), "DIRECT_PURCHASE");
+        asnService.create(directInput);
+        inboundService.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(itemA, 6)), rid()));
+        IllegalArgumentException inboundOver = assertThrows(IllegalArgumentException.class,
+                () -> inboundService.confirm(new InboundInput(order, local, "AE",
+                        List.of(new InboundLineInput(itemA, 1)), rid())));
+        assertTrue(inboundOver.getMessage().contains("已直发=4"), inboundOver.getMessage());
+        assertTrue(inboundOver.getMessage().contains("可入库=0"), inboundOver.getMessage());
+
+        // ② 先入库 3：I 占用，再直发 1 被 400；直发 3 恰好补满 R6。
+        inboundService.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(itemB, 3)), rid()));
+        IllegalArgumentException directOver = assertThrows(IllegalArgumentException.class,
+                () -> asnService.create(new AsnCreateInput("AE", "WH-FBN-IT-H2", rid(), null,
+                        List.of(new AsnCreateLine(null, null, 4, null, itemB)), "DIRECT_PURCHASE")));
+        assertTrue(directOver.getMessage().contains("已入库=3"), directOver.getMessage());
+        assertTrue(directOver.getMessage().contains("可发=3"), directOver.getMessage());
+        asnService.create(new AsnCreateInput("AE", "WH-FBN-IT-H2", rid(), null,
+                List.of(new AsnCreateLine(null, null, 3, null, itemB)), "DIRECT_PURCHASE"));
+
+        // ④ available-items：itemA/itemB 都已发完（A=0）→ 全被排除；两路径合计 = 各自 R。
+        List<AsnAvailableItem> rows = asnService.availableItems("AE");
+        assertTrue(rows.isEmpty(), "发完明细不得出现在下拉: " + rows);
+        assertEquals(10, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item "
+                + "where pur_order_item_id=?", Integer.class, itemA)
+                + jdbc.queryForObject("select coalesce(sum(qty_qualified),0) from inv_inbound_item "
+                + "where pur_order_item_id=?", Integer.class, itemA), "itemA D+I=R");
+        assertEquals(6, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item "
+                + "where pur_order_item_id=?", Integer.class, itemB)
+                + jdbc.queryForObject("select coalesce(sum(qty_qualified),0) from inv_inbound_item "
+                + "where pur_order_item_id=?", Integer.class, itemB), "itemB D+I=R");
+
+        // ⑤ 重复 requestId 不重复占用：同键重放后 D 仍是 4。
+        assertTrue(asnService.create(directInput).replayed());
+        assertEquals(4, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item "
+                + "where pur_order_item_id=?", Integer.class, itemA));
+
+        // 有余额明细不被整单隐藏：新明细 itemC R5 未占用 → 只有它出现在下拉。
+        long skuC = newSku("SKU-ASN-IT-H2C");
+        long itemC = newPurchaseItem(order, skuC, 5, 5, "8.0000");
+        newReceipt(order, itemC, 5, "8.0000", LocalDateTime.of(2026, 3, 7, 9, 0));
+        List<AsnAvailableItem> available = asnService.availableItems("AE");
+        assertEquals(1, available.size(), "同单发完明细被排除，有余额明细保留");
+        assertEquals(itemC, available.get(0).purOrderItemId());
+        assertEquals(5, available.get(0).avail());
+        assertEquals(5, available.get(0).qtyReceived());
+        assertEquals(0, available.get(0).directShipped());
+        assertEquals(0, available.get(0).inboundQty());
+    }
+
     // ------------------------------------------------------------ helpers
 
     private static final Map<Long, List<String>> GRANTS = new ConcurrentHashMap<>();
@@ -622,7 +696,8 @@ class MySqlAsnIT
 
     private void clean()
     {
-        for (String table : new String[]{"noon_m4_asn_request", "log_asn_item", "log_asn",
+        for (String table : new String[]{"noon_m4_asn_request", "noon_m4_inbound_request",
+                "log_asn_item", "log_asn", "inv_inbound_item", "inv_inbound",
                 "noon_m4_inventory_audit", "inv_stock_move", "inv_stock_ledger",
                 "inv_batch_consumption", "inv_batch", "noon_m3_receipt", "pur_order_item", "pur_order"})
             jdbc.execute("delete from " + table);
@@ -785,6 +860,12 @@ class MySqlAsnIT
         AsnService asnService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard, InventoryAudit audit)
         {
             return new AsnService(jdbcTemplate, guard, audit);
+        }
+
+        @Bean
+        InboundService inboundService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard, InventoryAudit audit)
+        {
+            return new InboundService(jdbcTemplate, guard, audit);
         }
     }
 }

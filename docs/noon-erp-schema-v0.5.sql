@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS md_partner_sku (
   business_model  VARCHAR(24)  NOT NULL DEFAULT 'noon' COMMENT 'noon / supermall / Global',
   offer_code      VARCHAR(128) COMMENT 'GetProductOffers 返回的 offer_code',
   barcode         VARCHAR(128),
+  noon_sku        VARCHAR(128) COMMENT 'Noon 平台 SKU，由商品同步回读',
   live_status     TINYINT(1)   DEFAULT NULL COMMENT '由 Offer API 回读',
   offer_issues    JSON         COMMENT 'GetProductOffers 的 offer_issues 原文',
   status          VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE',
@@ -465,6 +466,7 @@ CREATE TABLE IF NOT EXISTS inv_inbound_item (
   unit_cost       DECIMAL(18,4) NOT NULL,
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_inbound (inbound_id),
+  KEY idx_inbound_item_poi (pur_order_item_id),
   CONSTRAINT chk_inbound_item_qty CHECK (qty > 0 AND qty_qualified >= 0 AND qty_qualified <= qty)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='入库单行，到货即生成 FIFO 批次';
 
@@ -552,6 +554,7 @@ CREATE TABLE IF NOT EXISTS log_asn_item (
   diff_qty        INT          DEFAULT 0 COMMENT '收货差异，需回写库存与批次',
   created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_asn (asn_id),
+  KEY idx_asn_item_poi (pur_order_item_id),
   CONSTRAINT chk_asn_item_qty CHECK (qty_shipped > 0 AND qty_received >= 0 AND qty_received <= qty_shipped)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ASN 明细与收货差异';
 

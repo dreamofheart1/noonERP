@@ -28,20 +28,17 @@
       <el-col :span="1.5"><el-button type="success" plain icon="Edit" :disabled="single" @click="handleUpdate" v-hasPermi="['noon:masterdata:sku:save']">修改</el-button></el-col>
       <el-col :span="1.5"><el-button type="warning" plain icon="Close" :disabled="single" @click="handleDisable" v-hasPermi="['noon:masterdata:sku:status']">停用</el-button></el-col>
       <el-col :span="1.5"><el-button type="primary" plain icon="Check" :disabled="single" @click="handleEnable" v-hasPermi="['noon:masterdata:sku:status']">启用</el-button></el-col>
+      <el-col :span="1.5"><el-button type="warning" plain icon="RefreshRight" @click="handleSyncNoon" v-hasPermi="['noon:masterdata:sku:save']">从Noon同步(AE)</el-button></el-col>
       <right-toolbar v-model:showSearch="showSearch" @queryTable="getList" />
     </el-row>
     <el-table v-loading="loading" :data="skuList" @selection-change="handleSelectionChange" border>
       <el-table-column type="selection" width="55" align="center" />
-      <el-table-column label="ID" align="center" prop="id" width="80" />
       <el-table-column label="SKU编码" align="center" prop="skuCode" show-overflow-tooltip />
       <el-table-column label="SPU编码" align="center" prop="spuId" show-overflow-tooltip />
       <el-table-column label="英文名" align="center" prop="nameEn" show-overflow-tooltip />
-      <el-table-column label="阿拉伯语名" align="center" prop="nameAr" show-overflow-tooltip />
       <el-table-column label="Noon类目码" align="center" prop="categoryCode" show-overflow-tooltip />
-      <el-table-column label="HS编码" align="center" prop="hsCode" show-overflow-tooltip />
       <el-table-column label="原产国" align="center" prop="originCountry" show-overflow-tooltip />
       <el-table-column label="品牌" align="center" prop="brand" show-overflow-tooltip />
-      <el-table-column label="规格JSON" align="center" prop="specJson" show-overflow-tooltip />
       <el-table-column label="状态" align="center" prop="status">
         <template #default="scope">
           <el-tag :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'">{{ scope.row.status === 'ACTIVE' ? '启用' : '停用' }}</el-tag>
@@ -104,7 +101,7 @@
 </template>
 
 <script setup name="Sku">
-import { listSku, getSku, addSku, updateSku, changeSkuStatus } from "@/api/noon/masterdata/sku"
+import { listSku, getSku, addSku, updateSku, changeSkuStatus, syncNoonSku } from "@/api/noon/masterdata/sku"
 import { useRouter } from "vue-router"
 const { proxy } = getCurrentInstance()
 const router = useRouter()
@@ -181,5 +178,18 @@ function handleStatus(row, status) {
 }
 function handleDisable() { const id = ids.value[0]; if (id) changeSkuStatus(id, 'INACTIVE').then(() => { proxy.$modal.msgSuccess("已停用"); getList() }) }
 function handleEnable() { const id = ids.value[0]; if (id) changeSkuStatus(id, 'ACTIVE').then(() => { proxy.$modal.msgSuccess("已启用"); getList() }) }
+function handleSyncNoon() {
+  proxy.$modal.confirm('将调用 Noon 官方接口拉取 AE 站点真实商品，更新 SKU 管理与 Partner SKU 映射。已手工维护的中文名/类目/HS/状态不会被覆盖。是否继续？').then(() => {
+    loading.value = true
+    syncNoonSku('AE').then(res => {
+      loading.value = false
+      const r = res.data || {}
+      const text = `清单${r.catalogSkus || 0}条，SKU新增${r.skuCreated || 0}/更新${r.skuUpdated || 0}，映射新增${r.mappingCreated || 0}/更新${r.mappingUpdated || 0}，跳过${r.skipped || 0}，失败${r.failed || 0}`
+      if (r.failed > 0) proxy.$modal.msgWarning(text)
+      else proxy.$modal.msgSuccess(text)
+      getList()
+    }).catch(() => { loading.value = false })
+  }).catch(() => {})
+}
 getList()
 </script>

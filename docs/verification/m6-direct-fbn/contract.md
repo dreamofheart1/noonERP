@@ -110,3 +110,68 @@
 - [x] MySQL 8.0.35 开发库真库验证关键路径（真实单据，非夹具）
 
 **新增待拍板缺口**（见协作文档 2026-11-23 回执 §四）：分批收货严格 FIFO 绑定（需 asn_item.receipt_id）、多币种采购直发（当前 CNY/fx=1）。
+
+---
+
+# 采购数量守恒修订契约 v2（2026-11-23，owner：豆包后端内核 / WorkBuddy 集成验证）
+
+> 来源：`docs/agent-collaboration.md` Codex 1204-1208（跨路径数量重复使用）、1216-1226（可发额度/剩余数量）、1228-1230（四态台账易读性）。
+> 本契约是 v1 的**增量修订**，D1–D5 决策不变；只改"同一采购收货量的跨路径占用口径"与"可发量对外呈现"。财务分摊仍暂缓。
+
+## §7 问题定义（已复现，静态确认）
+
+一份采购明细的累计收货量 `SUM(noon_m3_receipt.qty WHERE order_item_id=?)（下称"收货池"）` 是**唯一真实的可用数量来源**，当前被两个独立路径消费且互不扣减：
+
+| 路径 | Service | 占用计算 | 缺口 |
+|---|---|---|---|
+| 直发 FBN | `AsnService.requireDirectSource` | `可发 = 收货池 − 已建直发ASN(qty_shipped)` | **未减已本地入库** |
+| 本地入库 | `InboundService.confirm` | `可入库 = 收货池 − 已入库(qty_qualified)` | **未减已直发ASN** |
+
+后果：同一明细"先直发 N 再本地入库 N"（或反向）会对同一批数量双重占用，虚增库存。两条路径都 `SELECT ... FROM pur_order_item WHERE id=? FOR UPDATE` 锁同一行（AsnService:lockPurchaseItem / InboundService:lockItem），是天然互斥点，但当前各自扣减公式不含对方占用。
+
+## §8 修订后的统一守恒口径（权威，勿擅改）
+
+设 `R=收货池`、`D=该明细所有直发 ASN 的 qty_shipped 合计`（DRAFT/SEALED/RECEIVED 全计，无取消状态）、`I=该明细已入库 qty_qualified 合计（仅 CONFIRMED/CLOSED 入库单）`：
+
+- **直发可发量 `A_direct = R − D − I`**（create 校验 `qtyShipped ≤ A_direct`）
+- **本地可入库量 `A_inbound = R − I − D`**（confirm 校验 `qtyQualified ≤ A_inbound`）
+
+两者本质是同一份池 `R − D − I`，两个路径共用同一口径、在 `pur_order_item` 行锁内计算，天然串行化。负数按 0 处理（展示层 `max(…,0)`，校验层直接拒绝正数超发）。
+
+**不虚构原则**：R 只来自真实 `noon_m3_receipt`（采购收货登记，不建本地库存、不产生台账），D/I 只来自真实已建单据；不为一端放行而伪造收货或库存。
+
+## §9 后端改动（yxerp-noon，owner：豆包）
+
+### 9.1 直发侧扣减已入库
+- `AsnService`：新增/复用 `inboundReceivedQty(purOrderItemId)`（口径同 InboundService.inboundAlready：`SUM(inv_inbound_item.qty_qualified) JOIN inv_inbound status IN ('CONFIRMED','CLOSED')`）。
+- `requireDirectSource`：`available = qtyReceived − alreadyShipped − alreadyInbound`，错误信息补充已入库数。
+- 事务与锁：仍在 `lockPurchaseItem` 持有 `pur_order_item` 行锁期间计算，保证与本地入库互斥。
+
+### 9.2 本地入库侧扣减已直发
+- `InboundService`：新增 `directShippedQty(purOrderItemId)`（`SUM(log_asn_item.qty_shipped) WHERE pur_order_item_id=?`，口径同 AsnService.directShippedQty）。
+- `confirm()`：`inboundable = receivedQty − already − directShipped`，错误信息补充已直发数。
+- 事务与锁：仍在 `lockItem` 持有行锁期间计算。
+
+### 9.3 新增只读接口：真实可发量（供前端下拉展示）
+- `AsnController`：`GET /noon/asn/available-items?siteCode=`，返回该站点下所有 `R>0` 且 `A_direct>0` 的采购明细：`[{purOrderItemId, orderId, orderNo, skuId, qtyReceived, directShipped, inboundQty, avail}]`，按 purOrderItemId 升序；走 `SiteAuthGuard` 站点授权。
+- 计算口径与 `requireDirectSource` 完全一致（同一 helper，`R − D − I`），**排除全部发完（A_direct≤0）的明细**，不按整单隐藏仍有余额的其他明细。
+- 只读、无锁、`FOR UPDATE` 不出现在该接口（展示用途；下单仍由 create 权威校验兜底）。
+
+### 9.4 测试（owner：豆包）
+- H2 单测：新增跨路径守恒用例——① 先直发后入库、② 先入库后直发、③ 同一明细直发+入库合计超过 R 时第二种路径被 400 拒绝；④ available-items 接口口径（含发完明细被排除）；⑤ 重复 requestId 不重复占用。
+- 真库 IT：`MySqlAsnIT` 增同样断言（opt-in）。
+
+## §10 前端（owner：WorkBuddy）
+
+- `asn/index.vue` 的 `loadPoItems` 改为调 `GET /noon/asn/available-items`，直接用后端返回的 `avail/qtyReceived/directShipped/inboundQty` 渲染下拉 label（如"已收10·已直发4·已入库2·可发≤4"），不再本地 listOrder→getOrder 自算。
+- `onPoItemChange` 将 `avail` 写入行（Codex 已修），提交校验用真实 `avail`；已发完明细不出现在下拉。
+- 保留后端防超发 400 为最终权威；页面对发完/刷新/重复选择给出清晰提示。
+- 四态台账页：显示商品名称、SKU 编码、仓库名称，加仓库筛选；站点权限与数量口径不变；明确标注"系统内部库存，非 Noon 官方实时库存"。
+
+## §11 验收清单（2026-11-23 全部通过，详见 e2e-report-v2.md）
+
+- [x] 跨路径守恒：两种先后顺序均无法双重占用；并发下无虚增（单测 22/22 + 真库双向 400 验证）。
+- [x] available-items 返回真实可发量，发完明细被排除，其他有余额明细不被整单隐藏。
+- [x] ASN 新建：可选明细额度正确、超发被前端提示+后端 400；分批/发完/刷新/重复选择通过。
+- [x] 四态台账显示名称+仓库筛选，站点隔离与数量口径不变。
+- [x] 全量单测（465 用例 0 失败）+ 前端构建 + 真库 E2E + 浏览器验证留痕；未推送。

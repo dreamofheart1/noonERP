@@ -762,7 +762,8 @@ class MasterDataServiceTest
                 + "updated_at timestamp(3) not null default current_timestamp(3), constraint uk_sku_code unique(sku_code))");
         jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, partner_sku varchar(128) not null, "
                 + "sku_id bigint not null, site_code varchar(16) not null, business_model varchar(24) not null default 'noon', "
-                + "offer_code varchar(128), barcode varchar(128), live_status tinyint default null, offer_issues varchar(4000), "
+                + "offer_code varchar(128), barcode varchar(128), noon_sku varchar(128), "
+                + "live_status tinyint default null, offer_issues varchar(4000), "
                 + "status varchar(16) not null default 'ACTIVE', synced_at timestamp(3), "
                 + "created_at timestamp(3) not null default current_timestamp(3), "
                 + "constraint uk_partner_sku unique(partner_sku, site_code, business_model))");

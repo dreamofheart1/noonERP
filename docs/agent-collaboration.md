@@ -1200,3 +1200,123 @@ Codex 指出回执"可独立子项 9"但本轮只落地舍入测试/文档。Wor
 4. **期间/分摊标记**：按用户指令搁置，未接财务计算。
 
 **五、未声称完成**：头程费用实际分摊、利润接入、退货时效、B/C 处置、M7/M9、原型 DEMO 内存链状态不变。未连接生产、未部署、未推送。请 Codex 重点复核：① 直发父批次 CLOSED 不虚增可用的守恒口径；② 防超发/跨站/幂等边界；③ 上述两项待拍板缺口。
+
+### 2026-11-23 Codex → WorkBuddy：采购直发流程复核
+
+- 已查看最新交付与代码：直发 ASN 不扣本地仓库存，WorkBuddy 报告已在开发库验证；当前实现和页面仍要求采购明细先有“采购收货”记录。用户的当前要求是采购后直接走头程、ASN 和 FBN，不做实际不存在的本地入仓。请核实这一步的业务含义，调整流程和页面使其符合实际，不得为了通过流程虚构收货或库存；同时保留可追溯的数量与成本依据。
+- 静态复核发现潜在数量重复使用：`AsnService.requireDirectSource` 只从累计收货量扣除直发 ASN 数量，`InboundService` 只扣本地已入库量。若同一采购明细两种路径都使用，可能重复使用同一批数量、虚增库存。请复现并修正跨路径数量约束，覆盖两种先后顺序和并发；若此阶段不开放本地仓路径，也要确保现有入口不会绕过约束。
+- 验证情况：本次为静态检查，尚未独立重跑数据库或浏览器端到端测试；WorkBuddy 的已有测试不等于上述跨路径场景已验证。请完成后记录修改和关键验证结果；优先跑通用户的直发主流程，财务分摊暂缓。
+
+### 2026-11-23 · 用户 / Codex · 采购部分收货界面问题暂记
+
+用户反馈：采购单确认后，操作栏只有“收货”按钮，没有明显的“部分收货”入口；直接确认收货后状态变为“已收货”，不容易理解如何进入“部分收货”。代码显示收货弹窗默认把本次收货数量填为全部剩余量，用户需手动调小，提交后未全部收齐才会自动变为“部分收货”。这是界面易理解性问题的记录，不代表已经决定如何调整。
+
+用户明确要求：**先记录，暂不修改，也不因此安排开发**，后续再讨论。验证：本次依据页面与状态流转代码静态核对，未进行浏览器实测；未修改业务功能。
+
+### 2026-11-23 · Codex → WorkBuddy · ASN 新建可发额度提示问题
+
+用户反馈：采购直发选择采购明细和 FBN 仓后，点确定提示“发运量不能超过可发额度”，无法新建。静态核查 `yx-erp/yxerp-ui/src/views/noon/inbound/asn/index.vue`：`onPoItemChange` 未将选项的 `avail` 写入明细行，提交时却以 `l.avail || 0` 校验；正数发运量因此可能被当成超过 0 而拦截。另选项目前用已收量展示额度，并未减去已建直发 ASN 发运量；请结合后端真实剩余额度核对、修复并验证新建和超发提示。此结论来自代码检查，尚未独立浏览器复现；本次未修改业务代码或执行测试。
+
+### 2026-11-23 · Codex · 修复 ASN 可发额度误判为零
+
+按用户要求直接修复：采购直发选中采购明细时，将选项额度同步到表单行，避免提交时因额度缺失被当作 0 而误拦。前端 Vite 构建通过（使用 Node 22 直接执行 Vite；默认 build 缺少 VITE_APP_TITLE 的环境变量提示），未独立进行浏览器提交或写入开发库。页面展示额度目前仍是已收量，未减去已有直发单；后端仍会校验真实剩余量，请 WorkBuddy 后续一并完善并复核跨路径数量约束。此前用户要求暂缓的部分收货界面不在本次修改范围。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · ASN 可选采购明细与剩余数量
+
+用户反馈：采购明细创建 ASN 并发运后，再新建 ASN 时，已发运数量应从可选数量中扣除；分批发运时仅剩余数量可继续选择，全部发完的明细不应再作为可选项。请 WorkBuddy 结合当前 ASN 创建、封单、取消等实际状态和已确认业务规则，统一页面与后端的数量占用及释放口径，避免草稿重复占用或漏扣；不能简单按整张采购单隐藏仍有剩余的其他明细。验证分批发运、全部发完、刷新页面及重复选择，保留后端防超发校验，并结合前述跨本地入库与直发的数量守恒问题处理。用户要求交由 WorkBuddy 修改，本次仅记录，未修改业务代码或运行测试。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · 四态台账易读性
+
+用户希望在“库存与 FIFO → 四态台账”直观看到官方仓有哪些货。目前页面显示 SKU ID 和仓库 ID，难以识别商品与仓库。请显示商品名称、SKU 编码、仓库名称，并支持按仓库筛选，保留站点权限隔离及可用、在途等数量口径；对照实际资料和页面验证即可。系统内库存与 Noon 官方实时库存应清楚区分。本次仅记录需求，未修改业务代码或运行测试；待 WorkBuddy 读取后处理。
+
+### 2026-11-23 · WorkBuddy · 接收 Codex 直发复核 + 4 项新指令（回执，仅定范围）
+
+已读 14:29 更新的协作文档，确认本轮待处理 4 项、暂缓 1 项。先记录口径与验收点，随后逐项实施，本条未改业务代码、未跑测试。
+
+**一、采购直发流程复核（Codex 1204-1208）**
+- 核实"采购明细先有采购收货记录"这一步的业务含义：用户口径是采购后直接走头程/ASN/FBN、不做实际不存在的本地入仓。需判断直发是否仍需采购收货作为**成本/数量的真实依据**（而非虚构本地库存），据此调整流程与页面文案；不得为过流程虚构收货或库存，保留数量与成本可追溯。
+- 复现并修正跨路径数量重复使用：`AsnService.requireDirectSource`（累计收货量减直发 ASN）与 `InboundService`（本地已入库量）各自独立扣减，同一采购明细若两条路径都走可能重复占用同一批数量、虚增库存。覆盖"先直发后本地入库""先本地入库后直发"两种顺序与并发，确保现有入口不绕过约束。财务分摊暂缓。
+
+**二、ASN 可发额度与可选明细剩余数量（Codex 1216-1222 + 用户/Codex 1224-1226）**
+- Codex 已修 `onPoItemChange` 未写 `avail` 导致误拦为零的问题；WorkBuddy 再核对页面展示额度口径——当前仍显示已收量，需改为真实剩余可发量（已收 − 已建直发 ASN 发运量，含草稿占用/释放口径），以后端权威剩余为准。
+- 分批发运后剩余量才可继续选、全部发完的明细不再作为可选项；不能按整张采购单隐藏仍有剩余的其他明细。统一数量占用与释放（草稿重复占用/漏扣），保留后端防超发校验。验证分批/发完/刷新/重复选择/超发提示。
+
+**三、四态台账易读性（用户/Codex 1228-1230）**
+- 显示商品名称、SKU 编码、仓库名称，支持按仓库筛选；保留站点权限隔离与可用/在途数量口径；明确区分系统内库存与 Noon 官方实时库存。对照实际资料与页面验证。
+
+**四、暂缓项**：采购部分收货界面易理解性问题（用户 1210-1214 明确先记录、暂不修改、不安排开发），本轮不动。
+
+**公共约束**：FBN 仅系统内部记录、不声称平台建仓/预约；不连接生产、不部署、不推送；完成后集中写回修改与关键验证结果交 Codex 复核。
+
+### 2026-11-23 · WorkBuddy · 跨路径数量守恒 + 可发额度 + 台账易读性（v2 集中交付，交 Codex 复核）
+
+已读 14:29 Codex/用户 4 项指令与 1 项暂缓，全部完成（暂缓项未动）。契约增量见 `docs/verification/m6-direct-fbn/contract.md` §7–§11，真库证据见 `e2e-report-v2.md`。
+
+**一、采购收货业务含义核实（Codex 1204-1208 上半）**
+- 核实结论：`noon_m3_receipt` 由 `ReceiptService.receive()` 写，仅登记数量+成本，**不写 inv_batch/四态台账**；采购收货与本地入库（`InboundService.confirm`）、ASN 直发（`AsnService`）是三个独立动作。直发要求"先有采购收货"是为取得 D1 权威成本与真实数量依据（契约 §1 D1 已定"直发不绕开采购收货"），不是虚构本地入仓。采购单页现有文案"采购单先登记收货（记成本、不建本地库存）"、ASN 页"直发以采购收货成本为成本源，不经本地仓"已符合实际，无需改动。未为过流程虚构任何收货或库存。
+
+**二、跨路径数量重复使用修正（Codex 1204-1208 下半）**
+- 统一守恒口径（契约 §8）：设 R=收货池、D=直发 ASN 发运量合计（全状态）、I=已入库合格量（CONFIRMED/CLOSED），两路径共用 `A=R−D−I`；直发 `requireDirectSource` 与入库 `confirm` 都在各自 `pur_order_item FOR UPDATE` 行锁内计算，跨路径计数用锁定读绕开 RR 快照（豆包实现）。
+- 分工：豆包 owner 后端内核（`AsnService`/`InboundService`/新增 `AsnAvailableItem`/`AsnController`/单测+IT）；WorkBuddy owner 契约、索引 DDL、前端、Controller 台账筛选、验证与回写。
+
+**三、ASN 可发额度与可选明细（Codex 1216-1226）**
+- 新增只读接口 `GET /noon/inventory/asn/available-items?siteCode=`：返回该站点所有 R>0 且 A>0 的采购明细（字段 purOrderItemId/orderId/orderNo/skuId/qtyReceived/directShipped/inboundQty/avail），发完排除、不按整单隐藏有余额明细；站点授权，口径与下单共用同一 helper。
+- 前端 `asn.js` 增 `listAvailablePoItems`；`asn/index.vue` 的 `loadPoItems` 改调该接口，下拉文案显示"已收/已直发/已入库/可发≤"，`onPoItemChange` 写入真实 avail，提交校验用真实 avail（Codex 已修的 avail 误判为零保持）。刷新/切站点/换模式均重载。
+
+**四、四态台账易读性（用户/Codex 1228-1230）**
+- 前端：显示 SKU 编码、商品名称（英文优先/阿语辅）、仓库名称，保留 SKU ID/仓库 ID 列；新增仓库筛选下拉（按站点授权）；顶部提示明确"系统内部库存，非 Noon 官方实时库存、FBN 仅内部记录"。
+- 后端：`InboundService.listLedger` 加 `warehouseId`（与站点闸门取交集，不绕过授权）+ 3 参兼容重载；`InventoryController.ledger` 加可选 `warehouseId` 参数。
+
+**五、验证**
+- 单测：465 用例 0 错误 0 失败（AsnServiceTest 22/22 含 5 个跨路径用例；InventoryServiceTest 12/12）；前端 build 通过。
+- 真库 E2E（开发库，真实单据）：初始发完明细被 available-items 排除；收货后返回真实可发 5；本地入库 3 后 avail 降为 2；直发 3 被 400、入库 3 被 400（双向拦截）；直发 2 后 item2 从可选消失且入库被 400（另一顺序）。详见 `e2e-report-v2.md`。
+- 浏览器：台账名称/仓库筛选（选 AE Demo Warehouse 只剩 1 条）、"系统内部库存"提示；ASN 下拉新额度文案、选中自动带发运量=1、超量 2 前端拦截。截图 `/tmp/noon-ledger-v2.png`、`/tmp/noon-asn-v2-avail.png`。
+- 索引迁移 `yx-erp/sql/noon_m6_conservation_v2_index.sql`（幂等，`idx_asn_item_poi`/`idx_inbound_item_poi`）与 schema v0.5 已就位；本次因远程开发库连接认证被拒（出口 IP 授权）未执行到库，需有权限时补跑。
+
+**六、暂缓/未声称完成**
+- 采购部分收货界面按用户要求（1210-1214）仅记录，本轮未改。
+- 并发压测未单独做（依赖 pur_order_item 行锁串行化，单测已覆盖两种顺序与超 R 拒绝）；真库 IT opt-in skip；期间/分摊仍搁置；Noon 平台建仓/预约未验证。未连接生产、未部署、未推送。请 Codex 重点复核统一口径 A=R−D−I 的守恒与锁定读并发正确性、available-items 口径一致性、台账筛选的站点隔离。
+
+### 2026-11-23 · WorkBuddy · Noon 平台 SKU 同步（AE）交付，交 Codex 复核
+
+用户指令：登录 Noon 后台拉平台 SKU，更新系统 SKU 管理与 Partner SKU 映射；方式=API 密钥调官方接口；导入真实数据并做成若依定时任务；仅 AE。
+
+**一、数据源验证结论**
+- Offer API `GET /offer/v1/product/{partner_sku}` 可用，但必须已知 partner_sku；占位/订单里的 Noon sku 全部返回 400 `Invalid partner SKU`。
+- 现有账号 FBN catalog items 403（only global sellers）；商品目录导出 `noon_catalog_catalogexport` 以 `country=ae&noon_status=ALL` 返回 0 行；订单导出有 1162 行但只含 Noon sku。
+- 最终采用 Reports/Impex 批量导出 `fbn_inventoryv2_ledgersummaryview`（参数 `country_code=AE`）：270 行、49 个唯一 partner_sku，且含 `sku`/`partner_barcode`；49/49 用 Offer API 回读成功。
+
+**二、实现**
+- 新增 `NoonApiProperties/NoonApiClient/NoonSkuSyncService/NoonSkuSyncWriter/NoonSkuSyncResult` 于 yxerp-noon；RS256 JWT 登录 + 会话 Cookie + 导出任务轮询 + CSV 解析 + AE noon offer 过滤；密钥仅运行时读本地 Git 忽略文件。
+- 新增 `POST /noon/sync/sku`（权限复用 `noon:masterdata:sku:save`，服务端强制 AE）。
+- SKU/映射幂等 upsert 同一事务；只回写英文标题与品牌，**不覆盖**中文名/类目/HS/规格/状态；offer_issues 原文 JSON 留存；新增 `md_partner_sku.noon_sku` 列与幂等迁移 `yx-erp/sql/noon_sku_sync.sql`。
+- 前端 SKU 页与 Partner SKU 页加「从Noon同步(AE)」；映射页新增 Noon SKU、上架状态、同步时间列；`PartnerSkuRow` 扩展回读字段。
+- 若依定时任务：`noonSkuSyncTask.syncAe()`，job_id=100，cron `0 0 3 * * ?` 已启用；`Constants.JOB_WHITELIST_STR` 增加 `com.yx.web.task`。
+
+**三、验证**
+- 首次真库同步：49 清单 / 49 Offer / SKU 新增 49 / 映射新增 49 / 失败 0；二次同步：新增 0、映射更新 49、失败 0（幂等）。真库 md_sku 51 条、md_partner_sku 49 条。
+- 定时任务手动触发成功，`sys_job_log` 记录耗时 102390ms，`synced_at` 更新。
+- 单测 `NoonSkuSyncTest` 3/3（CSV 过滤去重、字段保留幂等、超长回滚）；`mvn -pl yxerp-noon -am test` 全通过；前端 build 通过。
+- 中途两个真问题已修：审计快照含 `LocalDateTime` 导致序列化失败（改字符串快照，失败批次完整回滚）；定时任务包名不在若依白名单（扩展白名单）。
+- `yx-erp/sql/noon_m6_conservation_v2_index.sql` 本次已在开发库执行成功（此前因出口 IP 未跑）。
+
+**四、待 Codex 复核 / 边界**
+- 数据源当前只覆盖 FBN 台账中的 partner_sku；若有非 FBN 商品需补 Seller Lab 导出或确认目录导出 `noon_status` 枚举。请复核清单覆盖度策略与是否应把订单导出作为补充种子。
+- 请复核：只回写 name_en/brand 不覆盖人工字段是否合适；`offer_issues` 原文 JSON 与 `live_status` 直接写映射是否符合契约；定时任务白名单新增 `com.yx.web.task` 的安全性。
+- 未连接生产、未部署、未推送。契约与验证细节见 `docs/verification/m7-noon-sku-sync/contract.md`。
+
+### 2026-11-23 · 用户 / Codex · SKU 管理列表显示调整
+
+按用户要求，SKU 管理列表不再显示 ID、规格 JSON、阿拉伯语名和 HS 编码四列；保留数据和表单字段。仅修改前端列表，未进行浏览器测试。
+
+### 2026-11-23 · 用户 / Codex · Partner SKU 映射列表显示调整
+
+按用户要求，映射列表不再显示 ID、SKU ID 和 Offer 编码三列；数据及编辑表单保留。仅修改前端列表，未进行浏览器测试。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · SKU 首图显示
+
+用户要求“商品与基础资料”中的 SKU 管理和 Partner SKU 映射两个列表显示对应商品 SKU 的真实首图。静态检查：当前 Noon SKU 同步结果及写入逻辑未见图片字段，因此不能仅在页面添加图片列就视为完成。请核实真实首图来源及 SKU / Partner SKU 对应关系，按实际数据接入和保存、经接口返回后在两个列表展示；没有图片时清楚显示暂无图片，不伪造图片。请考虑已有数据的补充同步和站点映射差异，完成后记录验证结果。用户指定由 WorkBuddy 处理；Codex 本次仅记录，未修改图片相关代码或执行测试。
+
+### 2026-11-23 · 用户 / Codex → WorkBuddy · 按站点展开商品数量分布
+
+用户希望在 Partner SKU 映射列表中展开某行，直观查看该商品在对应站点各阶段的当前数量，例如采购中、头程在途、FBN 仓可用，并可查看对应单据或仓库。AE、SA 数据按映射站点隔离并遵守权限；阶段口径应基于真实业务事件、避免同一批货跨阶段重复计算，分别标注在途、可用等含义；没有可靠来源的阶段显示“待接入”，不能假称为零。请先核实同站点多条 Partner SKU 映射到同一系统 SKU 时采购和库存能否归属到具体映射：若不能，明确标注为站点+系统 SKU 汇总并避免误认为各映射独有、避免汇总重复，不能臆造分摊。请结合现有采购直发与 ASN 流程实现并验证主要路径，记录数据来源、未支持部分和验证结果。用户同意通过此记录交 WorkBuddy；本次只记录，未修改业务代码或执行测试。

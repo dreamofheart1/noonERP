@@ -936,6 +936,21 @@ class InventoryServiceTest
                 + "pur_order_id bigint not null, content_fingerprint char(64) not null, "
                 + "status varchar(16) not null default 'PENDING', result_json varchar(10000), "
                 + "operator_id bigint, created_at timestamp(3) not null default current_timestamp(3))");
+        // v2 §8 跨路径守恒：confirm 需扣减已直发量 D，故建 ASN 头/行（宽松 DDL，CHECK 由真库 IT 验证）。
+        jdbc.execute("create table log_asn (id bigint auto_increment primary key, asn_no varchar(64) not null, "
+                + "site_code varchar(16) not null, warehouse_code varchar(64) not null, "
+                + "status varchar(24) not null default 'DRAFT', sealed_at timestamp(3), slot_date date, "
+                + "carrier varchar(128), tracking_no varchar(128), "
+                + "source varchar(24) not null default 'MANUAL', "
+                + "source_mode varchar(24) not null default 'LOCAL_BATCH', raw_payload varchar(4000), "
+                + "created_at timestamp(3) not null default current_timestamp(3), "
+                + "updated_at timestamp(3) not null default current_timestamp(3), "
+                + "constraint uk_asn_no unique(asn_no))");
+        jdbc.execute("create table log_asn_item (id bigint auto_increment primary key, asn_id bigint not null, "
+                + "sku_id bigint not null, pur_order_item_id bigint, partner_sku varchar(128), "
+                + "batch_no varchar(64) not null, "
+                + "qty_shipped int not null, qty_received int default 0, diff_qty int default 0, "
+                + "created_at timestamp(3) not null default current_timestamp(3))");
         jdbc.execute("create table noon_m4_inventory_audit (id bigint auto_increment primary key, "
                 + "biz_type varchar(32) not null, biz_id varchar(64), action varchar(32) not null, "
                 + "detail varchar(1024), operator_id bigint, "

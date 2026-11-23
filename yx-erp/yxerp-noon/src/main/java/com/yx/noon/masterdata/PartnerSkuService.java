@@ -1,6 +1,7 @@
 package com.yx.noon.masterdata;
 
 import java.sql.PreparedStatement;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -24,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class PartnerSkuService
 {
     private static final String COLUMNS =
-            "id,partner_sku,sku_id,site_code,business_model,offer_code,barcode,status";
+            "id,partner_sku,sku_id,site_code,business_model,offer_code,barcode,noon_sku,live_status,synced_at,status";
     static final String ENTITY = "PARTNER_SKU";
 
     private static final RowMapper<PartnerSkuRow> MAPPER = (rs, i) -> new PartnerSkuRow(
@@ -35,6 +36,9 @@ public class PartnerSkuService
             rs.getString("business_model"),
             rs.getString("offer_code"),
             rs.getString("barcode"),
+            rs.getString("noon_sku"),
+            rs.getObject("live_status", Boolean.class),
+            rs.getObject("synced_at", LocalDateTime.class),
             rs.getString("status"));
 
     private final JdbcTemplate jdbc;

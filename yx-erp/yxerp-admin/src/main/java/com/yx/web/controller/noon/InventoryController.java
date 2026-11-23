@@ -70,14 +70,15 @@ public class InventoryController
         return AjaxResult.success(page);
     }
 
-    /** 四态台账只读。 */
+    /** 四态台账只读，可按仓库精确筛选（与站点授权取交集）。 */
     @PreAuthorize("@ss.hasPermi('noon:inventory:ledger:list')")
     @GetMapping("/ledger/list")
     public AjaxResult ledger(@RequestParam(required = false) String siteCode,
+            @RequestParam(required = false) Long warehouseId,
             @RequestParam(defaultValue = "0") int offset,
             @RequestParam(defaultValue = "50") int limit)
     {
-        PageResult<LedgerRow> page = service.listLedger(siteCode, offset, Math.min(Math.max(limit, 1), 200));
+        PageResult<LedgerRow> page = service.listLedger(siteCode, warehouseId, offset, Math.min(Math.max(limit, 1), 200));
         return AjaxResult.success(page);
     }
 

@@ -109,6 +109,10 @@ public class AsnService
     private static final String BATCH_CLOSED = "CLOSED";
     private static final String BATCH_IN_TRANSIT = "IN_TRANSIT";
 
+    /** 计入已入库合格量的入库单状态（v2 契约 §8；口径同 InboundService.inboundAlready）。 */
+    private static final String STATUS_INBOUND_CONFIRMED = "CONFIRMED";
+    private static final String STATUS_INBOUND_CLOSED = "CLOSED";
+
     private static final String AUDIT_BIZ_TYPE = "ASN";
 
     /** result_json 只缓存 AsnResult（无时间字段），普通 ObjectMapper 即可原样重放（同调拨）。 */
@@ -598,6 +602,38 @@ public class AsnService
         List<AsnRow> rows = jdbc.query(HEAD_SELECT + where + " ORDER BY a.id DESC LIMIT ? OFFSET ?",
                 HEAD_MAPPER, args.toArray());
         return new PageResult<>(rows, total);
+    }
+
+    /**
+     * 直发可选采购明细（v2 契约 §9.3）：该站点下 {@code R>0} 且 {@code A_direct = R − D − I > 0} 的采购明细，
+     * 按 {@code purOrderItemId} 升序。已发完的明细整体排除，但同一采购单其他仍有余额的明细照常返回。
+     *
+     * <p><b>只读无锁</b>（展示用途，不得出现 {@code FOR UPDATE}）：口径与 {@link #requireDirectSource}
+     * 共用同一 {@link #availability} helper；下单时仍由 create 在 {@code pur_order_item} 行锁内权威校验兜底。
+     */
+    @Transactional(readOnly = true)
+    public List<AsnAvailableItem> availableItems(String siteCode)
+    {
+        String site = guard.requireSite(AsnRules.siteCode("siteCode", siteCode));
+        List<PurchaseItemRef> items = jdbc.query("SELECT i.id,i.pur_order_id,o.order_no,i.sku_id "
+                        + "FROM pur_order_item i JOIN pur_order o ON o.id=i.pur_order_id "
+                        + "WHERE o.site_code=? AND EXISTS(SELECT 1 FROM noon_m3_receipt r "
+                        + "WHERE r.order_item_id=i.id AND r.qty>0) ORDER BY i.id",
+                (rs, i) -> new PurchaseItemRef(rs.getLong("id"), rs.getLong("pur_order_id"),
+                        rs.getString("order_no"), rs.getLong("sku_id")), site);
+
+        List<AsnAvailableItem> rows = new ArrayList<>(items.size());
+        for (PurchaseItemRef item : items)
+        {
+            long qtyReceived = receiptQtyReceived(item.id());
+            if (qtyReceived <= 0) continue;
+            DirectAvailability available = availability(qtyReceived,
+                    directShippedQtyNoLock(item.id()), inboundReceivedQtyNoLock(item.id()));
+            if (available.avail() <= 0) continue;
+            rows.add(new AsnAvailableItem(item.id(), item.purOrderId(), item.orderNo(), item.skuId(),
+                    available.received(), available.shipped(), available.inbound(), available.avail()));
+        }
+        return rows;
     }
 
     /** ASN 详情（带授权：以 ASN 头真实站点 requireSite），返回头 + 行 + 在途子批次血缘。 */
@@ -1120,12 +1156,13 @@ public class AsnService
     }
 
     /**
-     * 直发来源校验（M6 §3.2 步骤 1–3）：采购明细存在且<b>同站</b>、SKU ACTIVE、该明细已收货
-     * （{@code qtyReceived > 0}）、且 {@code qtyShipped ≤ qtyReceived − 已建直发 ASN 合计}。
+     * 直发来源校验（M6 §3.2 步骤 1–3 + v2 契约 §8）：采购明细存在且<b>同站</b>、SKU ACTIVE、该明细已收货
+     * （{@code qtyReceived > 0}）、且 {@code qtyShipped ≤ A_direct = R − D − I}（D=已建直发 ASN 合计，
+     * I=已本地入库合格量合计，两条路径共用同一份收货池）。
      *
-     * <p>{@code pur_order_item} 行 FOR UPDATE：并发建单同一明细串行化「已发量」判定，避免双开超发；
-     * 采购单单独读取（避免 H2 对 join + FOR UPDATE 的限制），站点不一致 400。
-     * 生成父批次号 {@code DP:<poItemId>:<uuid8>}（契约 §2.2，create 时锁定，seal 时据它建父批次）。
+     * <p>{@code pur_order_item} 行 FOR UPDATE：并发建单同一明细串行化「已发量」判定，避免双开超发，
+     * 也是与 {@code InboundService.confirm} 互斥的同一行锁；采购单单独读取（避免 H2 对 join + FOR UPDATE 的限制），
+     * 站点不一致 400。生成父批次号 {@code DP:<poItemId>:<uuid8>}（契约 §2.2，create 时锁定，seal 时据它建父批次）。
      */
     private DirectSource requireDirectSource(AsnCreateLine line, String siteCode)
     {
@@ -1146,12 +1183,15 @@ public class AsnService
             throw new IllegalArgumentException("采购明细尚未收货，无法直发: purOrderItemId=" + purOrderItemId);
         // D1：权威成本必须可取（seal 建父批次复用同一取数口径，缺失即无法追溯）。
         requireReceiptCost(purOrderItemId);
+        // §8 统一守恒口径：同一份收货池 R 由直发 D 与本地入库 I 共用，A_direct = R − D − I。
         long alreadyShipped = directShippedQty(purOrderItemId);
-        long available = qtyReceived - alreadyShipped;
-        if (line.qtyShipped() > available)
+        long alreadyInbound = inboundReceivedQty(purOrderItemId);
+        DirectAvailability available = availability(qtyReceived, alreadyShipped, alreadyInbound);
+        if (line.qtyShipped() > available.avail())
             throw new IllegalArgumentException("直发量超过可发量: purOrderItemId=" + purOrderItemId
                     + "，已收货=" + qtyReceived + "，已建直发 ASN=" + alreadyShipped
-                    + "，可发=" + Math.max(available, 0) + "，本次=" + line.qtyShipped());
+                    + "，已入库=" + alreadyInbound
+                    + "，可发=" + available.avail() + "，本次=" + line.qtyShipped());
 
         return new DirectSource(purOrderItemId, purchase.skuId(),
                 DIRECT_BATCH_PREFIX + purOrderItemId + ":" + uuid8());
@@ -1225,6 +1265,60 @@ public class AsnService
         long total = 0L;
         for (Integer qty : shipped) total += qty == null ? 0 : qty;
         return total;
+    }
+
+    /** 只读版已直发合计（供无锁的 available-items 展示接口；口径与 {@link #directShippedQty} 相同）。 */
+    private long directShippedQtyNoLock(long purOrderItemId)
+    {
+        Long sum = jdbc.queryForObject("SELECT COALESCE(SUM(qty_shipped),0) FROM log_asn_item "
+                + "WHERE pur_order_item_id=?", Long.class, purOrderItemId);
+        return sum == null ? 0L : sum;
+    }
+
+    /**
+     * 该采购明细已本地入库的合格量（v2 契约 §9.1）：口径同 {@code InboundService.inboundAlready}——
+     * {@code SUM(inv_inbound_item.qty_qualified) JOIN inv_inbound status IN ('CONFIRMED','CLOSED')}。
+     *
+     * <p>用<b>锁定读</b>（单表 {@code FOR UPDATE} + 逐单状态锁定读，规避 H2 join+FOR UPDATE 限制）绕过
+     * RR 快照：直发 create 与本地入库 confirm 都先锁同一 {@code pur_order_item} 行，等锁期间对方已提交的
+     * 入库量必须可见，否则仍会按旧快照双重占用同一批收货量。
+     */
+    private long inboundReceivedQty(long purOrderItemId)
+    {
+        List<InboundItemQty> rows = jdbc.query("SELECT inbound_id,qty_qualified FROM inv_inbound_item "
+                        + "WHERE pur_order_item_id=? FOR UPDATE",
+                (rs, i) -> new InboundItemQty(rs.getLong("inbound_id"), rs.getInt("qty_qualified")),
+                purOrderItemId);
+        long total = 0L;
+        for (InboundItemQty row : rows)
+        {
+            List<String> statuses = jdbc.query("SELECT status FROM inv_inbound WHERE id=? FOR UPDATE",
+                    (rs, i) -> rs.getString("status"), row.inboundId());
+            if (statuses.isEmpty())
+                throw new IllegalStateException("入库明细指向的入库单不存在，数据异常: inboundId="
+                        + row.inboundId() + "，purOrderItemId=" + purOrderItemId);
+            String status = statuses.get(0);
+            if (STATUS_INBOUND_CONFIRMED.equals(status) || STATUS_INBOUND_CLOSED.equals(status))
+                total += row.qtyQualified();
+        }
+        return total;
+    }
+
+    /** 只读版已入库合计（供无锁的 available-items 展示接口；口径与 {@link #inboundReceivedQty} 相同）。 */
+    private long inboundReceivedQtyNoLock(long purOrderItemId)
+    {
+        Long sum = jdbc.queryForObject("SELECT COALESCE(SUM(it.qty_qualified),0) FROM inv_inbound_item it "
+                        + "JOIN inv_inbound i ON i.id=it.inbound_id "
+                        + "WHERE it.pur_order_item_id=? AND i.status IN ('CONFIRMED','CLOSED')",
+                Long.class, purOrderItemId);
+        return sum == null ? 0L : sum;
+    }
+
+    /** 跨路径统一守恒口径（v2 契约 §8）：A = R − D − I，负数按 0（校验只拒绝正数超发）。 */
+    private static DirectAvailability availability(long qtyReceived, long directShipped, long inboundQty)
+    {
+        return new DirectAvailability(qtyReceived, directShipped, inboundQty,
+                Math.max(qtyReceived - directShipped - inboundQty, 0L));
     }
 
     private static String uuid8()
@@ -1468,6 +1562,21 @@ public class AsnService
 
     /** 采购明细 + 采购单站点（同站校验用）。 */
     private record PurchaseItem(long id, long skuId, long purOrderId, String siteCode)
+    {
+    }
+
+    /** 直发可选明细的查询行（采购明细 + 采购单号，供 available-items 组装）。 */
+    private record PurchaseItemRef(long id, long purOrderId, String orderNo, long skuId)
+    {
+    }
+
+    /** 收货池占用口径（v2 契约 §8）：R={@code received}、D={@code shipped}、I={@code inbound}、A={@code avail}。 */
+    private record DirectAvailability(long received, long shipped, long inbound, long avail)
+    {
+    }
+
+    /** 入库明细行（已入库合格量求和用）。 */
+    private record InboundItemQty(long inboundId, int qtyQualified)
     {
     }
 

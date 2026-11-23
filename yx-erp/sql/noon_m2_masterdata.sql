@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS md_partner_sku (
   business_model  VARCHAR(24)  NOT NULL DEFAULT 'noon' COMMENT 'noon / supermall / Global',
   offer_code      VARCHAR(128) COMMENT 'GetProductOffers 返回的 offer_code',
   barcode         VARCHAR(128),
+  noon_sku        VARCHAR(128) COMMENT 'Noon 平台 SKU，由商品同步回读',
   live_status     TINYINT(1)   DEFAULT NULL COMMENT '由 Offer API 回读，本模块不写入',
   offer_issues    JSON         COMMENT 'GetProductOffers 的 offer_issues 原文，本模块不写入',
   status          VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE',

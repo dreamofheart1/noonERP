@@ -15,6 +15,11 @@ export function getAsnResult(requestId) {
   return request({ url: '/noon/inventory/asn/result', method: 'get', params: { requestId } })
 }
 
+// 直发可选采购明细（后端权威可发量：已收 − 已建直发 ASN − 已本地入库）
+export function listAvailablePoItems(siteCode) {
+  return request({ url: '/noon/inventory/asn/available-items', method: 'get', params: { siteCode } })
+}
+
 // 新建 ASN
 export function createAsn(data) {
   return request({ url: '/noon/inventory/asn/create', method: 'post', data })

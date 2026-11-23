@@ -68,6 +68,14 @@ public class AsnController
     @GetMapping("/get")
     public AjaxResult get(@RequestParam Long asnId) { return AjaxResult.success(service.get(asnId)); }
 
+    /** 直发可选采购明细（真实可发量 R−D−I，只读无锁，供建单下拉；站点授权 + 排除已发完明细）。 */
+    @PreAuthorize("@ss.hasPermi('noon:inventory:asn:create')")
+    @GetMapping("/available-items")
+    public AjaxResult availableItems(@RequestParam String siteCode)
+    {
+        return AjaxResult.success(service.availableItems(siteCode));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public AjaxResult invalidInput(IllegalArgumentException e) { return AjaxResult.error(400, e.getMessage()); }
 

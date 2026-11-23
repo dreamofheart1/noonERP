@@ -31,19 +31,26 @@
       <el-col :span="1.5"><el-button type="success" plain icon="Edit" :disabled="single" @click="handleUpdate" v-hasPermi="['noon:masterdata:partnerSku:save']">修改</el-button></el-col>
       <el-col :span="1.5"><el-button type="warning" plain icon="Close" :disabled="single" @click="handleDisable" v-hasPermi="['noon:masterdata:partnerSku:status']">停用</el-button></el-col>
       <el-col :span="1.5"><el-button type="primary" plain icon="Check" :disabled="single" @click="handleEnable" v-hasPermi="['noon:masterdata:partnerSku:status']">启用</el-button></el-col>
+      <el-col :span="1.5"><el-button type="warning" plain icon="RefreshRight" @click="handleSyncNoon" v-hasPermi="['noon:masterdata:partnerSku:save']">从Noon同步(AE)</el-button></el-col>
       <right-toolbar v-model:showSearch="showSearch" @queryTable="getList" />
     </el-row>
     <el-table v-loading="loading" :data="partnerSkuList" @selection-change="handleSelectionChange" border>
       <el-table-column type="selection" width="55" align="center" />
-      <el-table-column label="ID" align="center" prop="id" width="80" />
       <el-table-column label="Partner SKU" align="center" prop="partnerSku" show-overflow-tooltip />
-      <el-table-column label="SKU ID" align="center" prop="skuId" show-overflow-tooltip />
       <el-table-column label="站点" align="center" prop="siteCode">
         <template #default="scope">{{ { AE:'AE', SA:'SA' }[scope.row.siteCode] || scope.row.siteCode }}</template>
       </el-table-column>
       <el-table-column label="业务模式" align="center" prop="businessModel" show-overflow-tooltip />
-      <el-table-column label="Offer编码" align="center" prop="offerCode" show-overflow-tooltip />
       <el-table-column label="条形码" align="center" prop="barcode" show-overflow-tooltip />
+      <el-table-column label="Noon SKU" align="center" prop="noonSku" show-overflow-tooltip />
+      <el-table-column label="上架状态" align="center">
+        <template #default="scope">
+          <el-tag v-if="scope.row.liveStatus === true" type="success">可购买</el-tag>
+          <el-tag v-else-if="scope.row.liveStatus === false" type="danger">不可购买</el-tag>
+          <el-tag v-else type="info">未回读</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="同步时间" align="center" prop="syncedAt" width="170" />
       <el-table-column label="状态" align="center" prop="status">
         <template #default="scope">
           <el-tag :type="scope.row.status === 'ACTIVE' ? 'success' : 'info'">{{ scope.row.status === 'ACTIVE' ? '启用' : '停用' }}</el-tag>
@@ -100,6 +107,7 @@
 
 <script setup name="PartnerSku">
 import { listPartnerSku, getPartnerSku, addPartnerSku, updatePartnerSku, changePartnerSkuStatus } from "@/api/noon/masterdata/partnerSku"
+import { syncNoonSku } from "@/api/noon/masterdata/sku"
 const { proxy } = getCurrentInstance()
 const partnerSkuList = ref([])
 const open = ref(false)
@@ -170,5 +178,16 @@ function handleStatus(row, status) {
 }
 function handleDisable() { const id = ids.value[0]; if (id) changePartnerSkuStatus(id, 'INACTIVE').then(() => { proxy.$modal.msgSuccess("已停用"); getList() }) }
 function handleEnable() { const id = ids.value[0]; if (id) changePartnerSkuStatus(id, 'ACTIVE').then(() => { proxy.$modal.msgSuccess("已启用"); getList() }) }
+function handleSyncNoon() {
+  proxy.$modal.confirm('将调用 Noon 官方接口拉取 AE 站点真实商品，更新 SKU 与 Partner SKU 映射。是否继续？').then(() => {
+    loading.value = true
+    syncNoonSku('AE').then(res => {
+      loading.value = false
+      const r = res.data || {}
+      proxy.$modal.msgSuccess(`映射新增${r.mappingCreated || 0}/更新${r.mappingUpdated || 0}，跳过${r.skipped || 0}，失败${r.failed || 0}`)
+      getList()
+    }).catch(() => { loading.value = false })
+  }).catch(() => {})
+}
 getList()
 </script>

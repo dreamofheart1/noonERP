@@ -20,6 +20,10 @@ import javax.sql.DataSource;
 import com.yx.common.core.domain.entity.SysUser;
 import com.yx.common.core.domain.model.LoginUser;
 import com.yx.framework.security.site.SiteAuthGuard;
+import com.yx.noon.inventory.InboundInput;
+import com.yx.noon.inventory.InboundLineInput;
+import com.yx.noon.inventory.InboundResult;
+import com.yx.noon.inventory.InboundService;
 import com.yx.noon.inventory.InventoryAudit;
 import com.yx.noon.masterdata.PageResult;
 import com.yx.system.mapper.SysUserSiteMapper;
@@ -65,6 +69,7 @@ class AsnServiceTest
     private JdbcTemplate jdbc;
     private TransactionTemplate tx;
     private AsnService service;
+    private InboundService inbound;
 
     @BeforeEach
     void setUp() throws Exception
@@ -84,6 +89,7 @@ class AsnServiceTest
 
         createTables();
         service = context.getBean(AsnService.class);
+        inbound = context.getBean(InboundService.class);
     }
 
     @AfterEach
@@ -1191,6 +1197,222 @@ class AsnServiceTest
         assertEquals(8, ledgerAvailable(sku, fbn), "台账可用 = OPEN 批次合计（父批次不虚增）");
     }
 
+    // ------------------------------------- v2 §9.4 跨路径守恒（直发 D 与本地入库 I 共用收货池 R）
+
+    /** ① 先直发后入库：D 扣减后才允许入库，入库后再直发/再入库都被拒。 */
+    @Test
+    void directFirstThenInboundCannotDoubleConsumeReceiptPool()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-X1", "AE", "FBN", 1, "ACTIVE");
+        long local = newWarehouse("WH-LOCAL-X1", "AE", "LOCAL", 0, "ACTIVE");
+        long sku = newSku("SKU-ASN-X1", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 10, 10, "5.0000");
+        newReceipt(order, poItem, 10, "5.0000", LocalDateTime.of(2026, 7, 10, 9, 0));
+
+        // 先直发 4：DRAFT 即计入 D（无取消状态，DRAFT/SEALED/RECEIVED 全计）。
+        assertFalse(service.create(new AsnCreateInput("AE", "WH-FBN-X1", rid(), null,
+                List.of(new AsnCreateLine(null, null, 4, null, poItem)), "DIRECT_PURCHASE")).replayed());
+
+        // 可入库 = R10 − I0 − D4 = 6：入库 6 通过。
+        inbound.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(poItem, 6)), rid()));
+        assertEquals(6, jdbc.queryForObject("select coalesce(sum(qty_qualified),0) "
+                + "from inv_inbound_item", Integer.class));
+
+        // 再用另一 requestId 入 1：I+D 已达 R → 400，错误信息补充已直发数。
+        IllegalArgumentException overInbound = assertThrows(IllegalArgumentException.class,
+                () -> inbound.confirm(new InboundInput(order, local, "AE",
+                        List.of(new InboundLineInput(poItem, 1)), rid())));
+        assertTrue(overInbound.getMessage().contains("已直发=4"), overInbound.getMessage());
+        assertTrue(overInbound.getMessage().contains("可入库=0"), overInbound.getMessage());
+
+        // 再直发 1：A_direct 同为 0 → 400，错误信息补充已入库数。
+        IllegalArgumentException overDirect = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-X1", rid(), null,
+                        List.of(new AsnCreateLine(null, null, 1, null, poItem)), "DIRECT_PURCHASE")));
+        assertTrue(overDirect.getMessage().contains("已入库=6"), overDirect.getMessage());
+        assertTrue(overDirect.getMessage().contains("可发=0"), overDirect.getMessage());
+
+        // 真实占用：D=4（log_asn_item）、I=6（inv_inbound_item）、本地可用=6（未虚增）。
+        assertEquals(4, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item",
+                Integer.class));
+        assertEquals(6, jdbc.queryForObject("select coalesce(sum(qty_qualified),0) from inv_inbound_item",
+                Integer.class));
+        assertEquals(6, ledgerAvailable(sku, local), "入库可用只等于 I，不被直发重复占用放大");
+    }
+
+    /** ② 先入库后直发：I 扣减后才允许直发，直发后再入库被拒。 */
+    @Test
+    void inboundFirstThenDirectCannotDoubleConsumeReceiptPool()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-X2", "AE", "FBN", 1, "ACTIVE");
+        long local = newWarehouse("WH-LOCAL-X2", "AE", "LOCAL", 0, "ACTIVE");
+        long sku = newSku("SKU-ASN-X2", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 10, 10, "6.0000");
+        newReceipt(order, poItem, 10, "6.0000", LocalDateTime.of(2026, 7, 11, 9, 0));
+
+        // 先入库 6（A_inbound = R10 − I0 − D0 = 10）。
+        inbound.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(poItem, 6)), rid()));
+
+        // 再直发 5：A_direct = R10 − D0 − I6 = 4 → 400，错误信息补充已入库数。
+        IllegalArgumentException overDirect = assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-X2", rid(), null,
+                        List.of(new AsnCreateLine(null, null, 5, null, poItem)), "DIRECT_PURCHASE")));
+        assertTrue(overDirect.getMessage().contains("已入库=6"), overDirect.getMessage());
+        assertTrue(overDirect.getMessage().contains("可发=4"), overDirect.getMessage());
+
+        // 直发 4 恰好用尽剩余额度。
+        assertNotNull(service.create(new AsnCreateInput("AE", "WH-FBN-X2", rid(), null,
+                List.of(new AsnCreateLine(null, null, 4, null, poItem)), "DIRECT_PURCHASE")));
+
+        // 再入库 1：R − I6 − D4 = 0 → 400。
+        IllegalArgumentException overInbound = assertThrows(IllegalArgumentException.class,
+                () -> inbound.confirm(new InboundInput(order, local, "AE",
+                        List.of(new InboundLineInput(poItem, 1)), rid())));
+        assertTrue(overInbound.getMessage().contains("已直发=4"), overInbound.getMessage());
+        assertTrue(overInbound.getMessage().contains("可入库=0"), overInbound.getMessage());
+
+        assertEquals(4, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item",
+                Integer.class));
+        assertEquals(6, jdbc.queryForObject("select coalesce(sum(qty_qualified),0) from inv_inbound_item",
+                Integer.class));
+        assertEquals(6, ledgerAvailable(sku, local));
+    }
+
+    /** ③ 同一明细两条路径合计超 R：先占 6、另一路径再要 5（合计 11）→ 第二种路径被 400 拒绝。 */
+    @Test
+    void twoPathsCombinedCannotExceedReceiptPool()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-X3", "AE", "FBN", 1, "ACTIVE");
+        long local = newWarehouse("WH-LOCAL-X3", "AE", "LOCAL", 0, "ACTIVE");
+        long sku = newSku("SKU-ASN-X3", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 10, 10, "7.0000");
+        newReceipt(order, poItem, 10, "7.0000", LocalDateTime.of(2026, 7, 12, 9, 0));
+
+        service.create(new AsnCreateInput("AE", "WH-FBN-X3", rid(), null,
+                List.of(new AsnCreateLine(null, null, 6, null, poItem)), "DIRECT_PURCHASE"));
+
+        IllegalArgumentException inboundOver = assertThrows(IllegalArgumentException.class,
+                () -> inbound.confirm(new InboundInput(order, local, "AE",
+                        List.of(new InboundLineInput(poItem, 5)), rid())));
+        assertTrue(inboundOver.getMessage().contains("已直发=6"), inboundOver.getMessage());
+        assertTrue(inboundOver.getMessage().contains("可入库=4"), inboundOver.getMessage());
+
+        // 入库 4（正好补满 R）后，两条路径都不能再新增占用。
+        inbound.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(poItem, 4)), rid()));
+        assertThrows(IllegalArgumentException.class,
+                () -> inbound.confirm(new InboundInput(order, local, "AE",
+                        List.of(new InboundLineInput(poItem, 1)), rid())));
+        assertThrows(IllegalArgumentException.class,
+                () -> service.create(new AsnCreateInput("AE", "WH-FBN-X3", rid(), null,
+                        List.of(new AsnCreateLine(null, null, 1, null, poItem)), "DIRECT_PURCHASE")));
+
+        assertEquals(10, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item",
+                Integer.class) + jdbc.queryForObject("select coalesce(sum(qty_qualified),0) "
+                + "from inv_inbound_item", Integer.class), "D + I 不得超过 R");
+    }
+
+    /** ④ available-items 口径：发完明细被排除，同单仍有余额的明细保留，站点过滤 + 升序。 */
+    @Test
+    void availableItemsReportsRealAvailabilityAndExcludesExhaustedDetails()
+    {
+        login(1L);
+        newWarehouse("WH-FBN-X4", "AE", "FBN", 1, "ACTIVE");
+        long local = newWarehouse("WH-LOCAL-X4", "AE", "LOCAL", 0, "ACTIVE");
+        long skuA = newSku("SKU-ASN-X4A", "ACTIVE");
+        long skuB = newSku("SKU-ASN-X4B", "ACTIVE");
+        long skuC = newSku("SKU-ASN-X4C", "ACTIVE");
+
+        long order = newPurchaseOrder("AE");
+        String orderNo = jdbc.queryForObject("select order_no from pur_order where id=?", String.class, order);
+        long itemA = newPurchaseItem(order, skuA, 10, 10, "5.0000"); // 直发4 + 入库6 → 发完
+        long itemB = newPurchaseItem(order, skuB, 8, 8, "6.0000");   // 直发2 → 余 6
+        long itemC = newPurchaseItem(order, skuC, 5, 5, "7.0000");   // 未占用 → 余 5
+        newReceipt(order, itemA, 10, "5.0000", LocalDateTime.of(2026, 7, 13, 9, 0));
+        newReceipt(order, itemB, 8, "6.0000", LocalDateTime.of(2026, 7, 13, 9, 0));
+        newReceipt(order, itemC, 5, "7.0000", LocalDateTime.of(2026, 7, 13, 9, 0));
+
+        // 他站明细（SA）不得出现在 AE 结果里。
+        long orderSa = newPurchaseOrder("SA");
+        long itemSa = newPurchaseItem(orderSa, skuA, 5, 5, "1.0000");
+        newReceipt(orderSa, itemSa, 5, "1.0000", LocalDateTime.of(2026, 7, 13, 9, 0));
+
+        service.create(new AsnCreateInput("AE", "WH-FBN-X4", rid(), null,
+                List.of(new AsnCreateLine(null, null, 4, null, itemA)), "DIRECT_PURCHASE"));
+        inbound.confirm(new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(itemA, 6)), rid()));
+        service.create(new AsnCreateInput("AE", "WH-FBN-X4", rid(), null,
+                List.of(new AsnCreateLine(null, null, 2, null, itemB)), "DIRECT_PURCHASE"));
+
+        List<AsnAvailableItem> rows = service.availableItems("AE");
+        assertEquals(2, rows.size(), "发完的 itemA 排除，itemB/itemC 保留（不按整单隐藏）");
+        assertEquals(itemB, rows.get(0).purOrderItemId(), "按 purOrderItemId 升序");
+        assertEquals(itemC, rows.get(1).purOrderItemId());
+
+        AsnAvailableItem rowB = rows.get(0);
+        assertEquals(order, rowB.orderId());
+        assertEquals(orderNo, rowB.orderNo());
+        assertEquals(skuB, rowB.skuId());
+        assertEquals(8, rowB.qtyReceived());
+        assertEquals(2, rowB.directShipped());
+        assertEquals(0, rowB.inboundQty());
+        assertEquals(6, rowB.avail());
+
+        AsnAvailableItem rowC = rows.get(1);
+        assertEquals(5, rowC.qtyReceived());
+        assertEquals(0, rowC.directShipped());
+        assertEquals(0, rowC.inboundQty());
+        assertEquals(5, rowC.avail());
+
+        // 站点过滤：SA 只看得到 SA 明细；无 SA 授权的 AE 用户 403。
+        List<AsnAvailableItem> saRows = service.availableItems("SA");
+        assertEquals(1, saRows.size());
+        assertEquals(itemSa, saRows.get(0).purOrderItemId());
+        login(2L);
+        assertThrows(AccessDeniedException.class, () -> service.availableItems("SA"));
+    }
+
+    /** ⑤ 重复 requestId 不重复占用：D、I 都只计一次。 */
+    @Test
+    void replayedRequestsDoNotDoubleOccupyReceiptPool()
+    {
+        login(1L);
+        long fbn = newWarehouse("WH-FBN-X5", "AE", "FBN", 1, "ACTIVE");
+        long local = newWarehouse("WH-LOCAL-X5", "AE", "LOCAL", 0, "ACTIVE");
+        long sku = newSku("SKU-ASN-X5", "ACTIVE");
+        long order = newPurchaseOrder("AE");
+        long poItem = newPurchaseItem(order, sku, 10, 10, "9.0000");
+        newReceipt(order, poItem, 10, "9.0000", LocalDateTime.of(2026, 7, 14, 9, 0));
+
+        String createKey = rid();
+        AsnCreateInput createInput = new AsnCreateInput("AE", "WH-FBN-X5", createKey, null,
+                List.of(new AsnCreateLine(null, null, 4, null, poItem)), "DIRECT_PURCHASE");
+        service.create(createInput);
+        assertTrue(service.create(createInput).replayed(), "同键同内容重放");
+        assertEquals(4, jdbc.queryForObject("select coalesce(sum(qty_shipped),0) from log_asn_item",
+                Integer.class), "重放不得重复占用 D");
+        assertEquals(6, service.availableItems("AE").get(0).avail());
+
+        String inboundKey = rid();
+        InboundInput inboundInput = new InboundInput(order, local, "AE",
+                List.of(new InboundLineInput(poItem, 6)), inboundKey);
+        inbound.confirm(inboundInput);
+        assertTrue(inbound.confirm(inboundInput).replayed(), "同键同内容重放");
+        assertEquals(6, jdbc.queryForObject("select coalesce(sum(qty_qualified),0) from inv_inbound_item",
+                Integer.class), "重放不得重复占用 I");
+        assertEquals(1, count("inv_inbound"));
+        assertEquals(6, ledgerAvailable(sku, local), "台账可用只加一次");
+        assertEquals(0, service.availableItems("AE").size(), "R 已全部占用，下拉为空");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private long newSku(String code, String status)
@@ -1367,6 +1589,19 @@ class AsnServiceTest
         jdbc.execute("create table noon_m3_receipt (id bigint auto_increment primary key, "
                 + "order_id bigint not null, order_item_id bigint not null, qty int not null, "
                 + "unit_cost_cny decimal(18,4) not null, received_at timestamp(3) not null, operator_id bigint)");
+        // v2 §8 跨路径守恒：本地入库占用 I 来自 inv_inbound/inv_inbound_item（宽松 DDL，CHECK 由真库 IT 验证）。
+        jdbc.execute("create table inv_inbound (id bigint auto_increment primary key, inbound_no varchar(64) not null, "
+                + "pur_order_id bigint, warehouse_id bigint not null, status varchar(24) not null default 'DRAFT', "
+                + "operator_id bigint, created_at timestamp(3) not null default current_timestamp(3), "
+                + "constraint uk_inbound_no unique(inbound_no))");
+        jdbc.execute("create table inv_inbound_item (id bigint auto_increment primary key, inbound_id bigint not null, "
+                + "pur_order_item_id bigint, sku_id bigint not null, batch_no varchar(64) not null, qty int not null, "
+                + "qty_qualified int not null, unit_cost decimal(18,4) not null, "
+                + "created_at timestamp(3) not null default current_timestamp(3))");
+        jdbc.execute("create table noon_m4_inbound_request (request_id varchar(64) not null primary key, "
+                + "pur_order_id bigint not null, content_fingerprint char(64) not null, "
+                + "status varchar(16) not null default 'PENDING', result_json varchar(10000), "
+                + "operator_id bigint, created_at timestamp(3) not null default current_timestamp(3))");
         jdbc.execute("create table noon_m4_asn_request (request_id varchar(64) not null, "
                 + "action varchar(16) not null, asn_id bigint not null, site_code varchar(16) not null, "
                 + "operator_id bigint, content_fingerprint char(64) not null, "
@@ -1425,6 +1660,12 @@ class AsnServiceTest
         AsnService asnService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard, InventoryAudit audit)
         {
             return new AsnService(jdbcTemplate, guard, audit);
+        }
+
+        @Bean
+        InboundService inboundService(JdbcTemplate jdbcTemplate, SiteAuthGuard guard, InventoryAudit audit)
+        {
+            return new InboundService(jdbcTemplate, guard, audit);
         }
 
         @Bean

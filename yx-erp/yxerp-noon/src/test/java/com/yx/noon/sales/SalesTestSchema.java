@@ -49,7 +49,9 @@ final class SalesTestSchema
                 + "status varchar(16) not null default 'ACTIVE')");
         jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, "
                 + "partner_sku varchar(128) not null, sku_id bigint not null, site_code varchar(16) not null, "
-                + "business_model varchar(24) not null default 'noon', status varchar(16) not null default 'ACTIVE')");
+                + "business_model varchar(24) not null default 'noon', offer_code varchar(128), barcode varchar(128), "
+                + "noon_sku varchar(128), live_status boolean, offer_issues varchar(4000), synced_at timestamp(3), "
+                + "status varchar(16) not null default 'ACTIVE')");
 
         // 系统侧事件留痕
         jdbc.execute("create table int_webhook_event (id bigint auto_increment primary key, "
