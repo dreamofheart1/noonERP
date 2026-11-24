@@ -1,6 +1,7 @@
 package com.yx.web.controller.noon;
 
 import com.yx.framework.security.site.SiteAuthGuard;
+import com.yx.noon.sync.NoonSellerLabClient;
 import com.yx.noon.sync.NoonSellerLabSyncResult;
 import com.yx.noon.sync.NoonSellerLabSyncService;
 import org.springframework.security.access.AccessDeniedException;
@@ -35,7 +36,7 @@ public class NoonSellerLabController
     @PostMapping("/fbn-inventory/sync")
     public AjaxResult syncFbn(@RequestParam(defaultValue = "AE") String siteCode)
     {
-        guard.requireSite("AE");
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
         return AjaxResult.success(service.syncFbnInventory(siteCode));
     }
 
@@ -45,8 +46,26 @@ public class NoonSellerLabController
                                 @RequestParam String fromDate, @RequestParam String toDate,
                                 @RequestParam(defaultValue = "5") int maxPages)
     {
-        guard.requireSite("AE");
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
         return AjaxResult.success(service.syncSales(siteCode, fromDate, toDate, maxPages));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
+    @PostMapping("/asn/sync")
+    public AjaxResult syncAsn(@RequestParam(defaultValue = "AE") String siteCode,
+                              @RequestParam(defaultValue = "20") int maxPages)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        return AjaxResult.success(service.syncAsn(siteCode, Math.min(Math.max(maxPages, 1), 100)));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:inventory:asn:list')")
+    @GetMapping("/asn/list")
+    public AjaxResult listAsn(@RequestParam(defaultValue = "AE") String siteCode,
+                              @RequestParam(defaultValue = "0") int offset,
+                              @RequestParam(defaultValue = "50") int limit)
+    {
+        return AjaxResult.success(service.listAsn(siteCode, offset, Math.min(Math.max(limit, 1), 200)));
     }
 
     /** 库存简单数量对比：官方快照 vs ERP 四态台账；口径/映射不一致明确标注，不认定丢货。 */
@@ -63,9 +82,11 @@ public class NoonSellerLabController
     @GetMapping("/sales/list")
     public AjaxResult listSales(@RequestParam(defaultValue = "AE") String siteCode,
                                 @RequestParam(defaultValue = "0") int offset,
-                                @RequestParam(defaultValue = "50") int limit)
+                                @RequestParam(defaultValue = "50") int limit,
+                                @RequestParam(required = false) String fromDate,
+                                @RequestParam(required = false) String toDate)
     {
-        return AjaxResult.success(service.listSales(siteCode, offset, Math.min(Math.max(limit, 1), 200)));
+        return AjaxResult.success(service.listSales(siteCode, offset, Math.min(Math.max(limit, 1), 200), fromDate, toDate));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

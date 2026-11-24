@@ -21,3 +21,12 @@ export function syncSalesItems(query) {
 export function listSalesItems(query) {
   return request({ url: BASE + '/sales/list', method: 'get', params: query })
 }
+
+// ASN 平台快照同步与列表（平台编号与 ERP 内部编号分开）
+export function syncPlatformAsn(query) {
+  return request({ url: BASE + '/asn/sync', method: 'post', params: query })
+}
+
+export function listPlatformAsn(query) {
+  return request({ url: BASE + '/asn/list', method: 'get', params: query })
+}

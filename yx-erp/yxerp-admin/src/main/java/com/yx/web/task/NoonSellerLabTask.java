@@ -26,6 +26,16 @@ public class NoonSellerLabTask
     public void syncFbnAe() { syncFbn("AE"); }
     public void syncFbnSa() { syncFbn("SA"); }
 
+    public void syncAsnAe() { syncAsn("AE"); }
+    public void syncAsnSa() { syncAsn("SA"); }
+
+    public void syncAsn(String siteCode)
+    {
+        NoonSellerLabSyncResult r = service.syncAsn(siteCode, 20);
+        log.info("Seller Lab ASN 同步 site={} 平台行={} 写入={} 截断={}",
+                r.siteCode(), r.platformRows(), r.writtenRows(), r.truncated());
+    }
+
     public void syncFbn(String siteCode)
     {
         NoonSellerLabSyncResult r = service.syncFbnInventory(siteCode);

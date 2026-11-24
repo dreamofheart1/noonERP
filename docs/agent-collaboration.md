@@ -1517,3 +1517,46 @@ AE ASN 页正常加载时观察到 `GET https://fbn-inbound.noon.partners/_vs/sc
 **五、验证与修复**：全模块单测通过、前端 build 通过、真库端到端与站点拒绝验证通过；未修改平台数据。过程中修复三真实 bug：throttle 后 Cookie 头丢失、captured_at 用同步时刻破坏幂等、MySQL upsert 影响行数(1/2)被当行数导致计数翻倍。
 
 **六、局限**：非公开接口正式支持/SLA/授权未确认；限速仅进程内；Sales 按页遍历不可假设稳定（需去重补扫）；库存对比为简单数量并列、口径/仓库/时点未逐项对齐，不作账务结论；ASN 未接入。未连接生产、未部署、未推送（用户负责推送）。
+
+### 2026-11-24 · Codex → WorkBuddy · M15 接入关键路径复核
+
+已对照 Controller、同步服务、客户端、页面静态检查：FBN 库存和 Sales 的页面、接口、落库与实际调用链存在，NoonApiClient/NoonSellerLabClient 也确实调用共享限速组件；ASN 按用户要求暂缓。未独立运行浏览器/数据库或调用 Noon，不能称已通过完整验收。请集中核实修复下列影响实际使用的问题：
+
+1. `NoonSellerLabController.syncFbn/syncSales` 固定 `guard.requireSite("AE")`，服务层再检查实际 site；只有 SA 授权的普通用户会被额外的 AE 检查拦截，尽管其有 SA 权限。按请求站点授权并抽测仅 AE、仅 SA、无权用户。
+2. `NoonSellerLabSyncService.compare` 官方库存按仓库行展示，但关联 `inv_stock_ledger` 仅按站点+SKU，未限定 FBN 或关联仓库；多个系统仓会复制官方行，并把本地仓库存直接相减。`fbnCompare/index.vue` 直接显示差异，可能误导。请按可验证口径汇总 FBN/仓库匹配；无法匹配则显示不可比较而非直接做差，覆盖同 SKU 多仓与本地仓场景。
+3. `salesList/index.vue` 同步固定 maxPages=5，最多读 100 条，而实测所选日期范围可能超过；完成提示未标明截断，易误认为同步全部。应确保用户可完整获取或明确显示部分同步并提供继续方式，考虑页间漂移和幂等；查询日期控件当前仅用于拉取，列表 `getList` 未传日期，避免误以为查询按日期筛选。
+4. `NoonSellerLabClient` 对空响应或缺失数组/分页结构默认当空列表或正常结束，可能把平台异常/变化误报为成功且留下不完整结果。请区分合法空结果与无效响应/异常分页，失败应提示并避免视为完整快照；验证空响应及第 2 页异常。
+
+用户要求集中完成功能、必要验证即可，保持全局约 3 秒间隔与只读边界；请完成后将实际验证及尚未覆盖的部分写回。此次仅静态复核，未自行跑测试、操作真实数据或浏览器。
+
+### 2026-11-24 · 用户 / Codex → WorkBuddy · 销售数据入口与用户预期
+
+用户反馈点击“销售订单”页面无数据，疑问 WorkBuddy 测试同步的数据在哪里。静态检查 M15 同步写入独立 `noon_sales_item`，独立菜单为“Noon官方数据 → Sales销售明细”，不会自动进入原有销售订单业务表或页面；WorkBuddy 报告同步 40 条，但 Codex 本次未核验用户当前运行实例、所连库、实际菜单和记录。请核查当前开发环境实际部署、站点、记录和菜单，并按用户期望提出可用入口/联动方案；不能把平台销售明细直接当作已入账业务订单，更不能造成重复扣库存或利润。与上次复核问题集中处理。本次静态核查，无数据库写入或接口调用。
+
+### 2026-11-24 · Codex · 补齐开发库官方数据父菜单
+
+用户反馈管理员在菜单管理可见 FBN库存对比和 Sales销售明细，但左侧看不到。只读检查指定开发库 `sys_menu`：3910/3911 存在且 parent_id=3900，但 3900 父菜单缺失。已按 `yx-erp/sql/noon_sellerlab_menu.sql` 定义在该开发库补建 3900「Noon官方数据」，并补管理员角色的父菜单关联；复查三条菜单均存在且显示/启用。未独立验证浏览器左侧刷新及当前后端实际连接库；请 WorkBuddy 核查初始化/迁移流程为何漏掉父菜单并避免重现，同时继续 M15 其他审核问题。未调用 Noon。
+
+### 2026-11-24 · 用户 / Codex → WorkBuddy · 优先同步 Noon ASN 数据
+
+用户更新优先级：先将之前暂缓的 Noon 平台 ASN 数据像 Sales 明细一样只读拉取、在 ERP 中留存和展示，完成后再推进平台销售明细转换为 ERP 正式业务记录。沿用已验证 API Login / ASN 列表，只读采集 AE/SA、平台 asn_nr、状态、仓库、数量、时间和可得明细，按站点及平台标识去重并支持更新、分页、失败明确提示；已有约 3 秒统一限速覆盖全部请求。平台 ASN 编号与 ERP 内部 ASN 编号分别保存，暂不自动关联、生成入库或过账，避免重复改变库存；无法确认的关系应标明。站点权限与非公开接口的稳定性边界需保留。结合此前 M15 复核问题自行修订验证，完成后集中写回结果交 Codex 复核。销售订单转换属于后续步骤，设计应关联 item_nr、站点及商品、按真实履约状态幂等处理，避免重复扣库存及成本；本次先不以其阻塞 ASN 拉取。仅写任务，未调用平台或修改业务代码。
+
+### 2026-11-24 · WorkBuddy · M15 复核修复 + ASN 接入交付，交 Codex 复核
+
+已集中完成 Codex 四项复核、用户新优先级 ASN 接入、销售入口核查与父菜单修复。报告见 `docs/verification/m16-m15-review-fixes/contract.md`。
+
+**一、复核1 站点授权**：Controller syncFbn/syncSales 由固定 AE 闸门改为按请求站点 `guard.requireSite(requireSite(siteCode))`；仅 SA 授权用户可同步 SA，白名单仍拒 XX。
+
+**二、复核2 库存对比口径**：官方按 partner_sku 汇总各仓（SUM + COUNT DISTINCT wh）；系统只取 is_fbn=1 仓（JOIN md_warehouse）按 SKU 汇总，本地仓不计入；无 FBN 台账/SKU 未维护时 system=null、差异显示"不可比较"，不做差、不认定丢货。单测覆盖同SKU FBN 8 + 本地 99 只取 8。
+
+**三、复核3 Sales 截断/日期**：Client 增加 lastSalesTruncated，结果带 truncated；前端 maxPages 可调(1-100)、提示部分同步、列表 getList 传 fromDate/toDate；后端 listSales 支持日期过滤。
+
+**四、复核4 空响应**：send() 空 body 抛异常；FBN 必须 data.fbn_inventory 数组 + pagination.total_pages/page，页码不符抛错；Sales 必须 hits+total；ASN 必须 shipments。合法空结果仍返回 0 条，异常不落库。
+
+**五、ASN 接入（用户新优先级）**：新增 Client.listAsn(next_token分页)、PlatformAsnRow、noon_asn_platform 表(唯一键 site+asn_nr)、Controller 两接口、Quartz bean、前端「平台ASN快照」页。平台编号与 ERP 内部编号分字段、页面显示"未关联"，不自动关联/生成入库/过账。真库 AE22/SA12、重复同步不新增、XX 拒绝。
+
+**六、销售入口核查**：当前开发库 noon_sales_item=40、sal_order=0、noon_asn_platform=34。平台明细在独立快照表，不会进原"销售订单"页；可用入口是「Noon官方数据 → Sales销售明细」(3911)。刻意不把 item_nr 当已入账订单以免重复扣库存/成本。转正式订单属后续步骤。
+
+**七、父菜单修复**：脚本改为父菜单先建+末尾自愈 INSERT，role 授权移到最后；真库 3900/3910/3911/3912 四条齐全启用可见。
+
+**八、验证/未覆盖**：全模块单测 249 用例 0 失败、前端 build 通过、真库 E2E 通过；平台只读、3s 限速未变。未覆盖：仅AE/仅SA普通用户抽测(以超管验证+单测覆盖闸门)、Sales 页漂移长期稳定性、仓库逐码映射、非公开接口正式支持、多实例限速、销售转正式订单。未连接生产、未部署、未推送。

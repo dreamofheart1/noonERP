@@ -52,7 +52,9 @@ class NoonSellerLabSyncServiceTest
         jdbc.execute("create table md_partner_sku (id bigint auto_increment primary key, partner_sku varchar(128),"
                 + "sku_id bigint, site_code varchar(16), business_model varchar(24))");
         jdbc.execute("create table md_sku (id bigint auto_increment primary key, sku_code varchar(64))");
-        jdbc.execute("create table inv_stock_ledger (id bigint auto_increment primary key, sku_id bigint, site_code varchar(16),"
+        jdbc.execute("create table md_warehouse (id bigint auto_increment primary key, warehouse_code varchar(64),"
+                + "site_code varchar(16), warehouse_name varchar(256), is_fbn int default 0)");
+        jdbc.execute("create table inv_stock_ledger (id bigint auto_increment primary key, sku_id bigint, warehouse_id bigint, site_code varchar(16),"
                 + "qty_available int default 0, qty_unsellable int default 0, qty_in_transit int default 0)");
         jdbc.execute("create table noon_fbn_inventory_snapshot (id bigint auto_increment primary key, site_code varchar(8),"
                 + "partner_sku varchar(128), sku varchar(128), warehouse_code varchar(128), saleable int, non_saleable int,"
@@ -102,12 +104,17 @@ class NoonSellerLabSyncServiceTest
         assertEquals(1, jdbc.queryForObject("select count(*) from noon_fbn_inventory_snapshot", Integer.class));
         assertEquals(10, jdbc.queryForObject("select saleable from noon_fbn_inventory_snapshot", Integer.class));
 
+        jdbc.update("insert into md_warehouse(id,warehouse_code,site_code,warehouse_name,is_fbn) values "
+                + "(1,'FBN-AE','AE','AE FBN',1), (2,'LOCAL-AE','AE','AE Local',0)");
+
         NoonSellerLabCompare cmp = service.compare("AE", 0, 50);
         assertEquals(1, cmp.rows().size());
         assertNull(cmp.rows().get(0).systemAvailable(), "系统无台账记录必须显示未同步，不得当 0");
-        assertEquals("系统无台账记录（未发生入库/直发收货），差异不代表丢货", cmp.rows().get(0).note());
+        assertEquals("系统无 FBN 仓台账记录（未发生入库/直发收货），不可比较，差异不代表丢货", cmp.rows().get(0).note());
 
-        jdbc.update("insert into inv_stock_ledger(sku_id,site_code,qty_available,qty_unsellable,qty_in_transit) values (1,'AE',8,1,0)");
+        jdbc.update("insert into inv_stock_ledger(sku_id,warehouse_id,site_code,qty_available,qty_unsellable,qty_in_transit) values (1,1,'AE',8,1,0)");
+        // 本地仓 99 不得计入 FBN 对比（复核2）
+        jdbc.update("insert into inv_stock_ledger(sku_id,warehouse_id,site_code,qty_available,qty_unsellable,qty_in_transit) values (1,2,'AE',99,0,0)");
         NoonSellerLabCompare cmp2 = service.compare("AE", 0, 50);
         assertEquals(8, cmp2.rows().get(0).systemAvailable());
         assertEquals(2, cmp2.rows().get(0).officialSaleable() - cmp2.rows().get(0).systemAvailable());

@@ -32,9 +32,9 @@
         <template #default="s">{{ s.row.systemUnsellable == null ? '未同步' : s.row.systemUnsellable }}</template>
       </el-table-column>
       <el-table-column label="差异(可售)" align="center">
-        <template #default="s">{{ s.row.systemAvailable == null ? '—' : s.row.officialSaleable - s.row.systemAvailable }}</template>
+        <template #default="s">{{ s.row.systemAvailable == null ? '不可比较' : s.row.officialSaleable - s.row.systemAvailable }}</template>
       </el-table-column>
-      <el-table-column label="官方仓库" prop="warehouseCode" show-overflow-tooltip />
+      <el-table-column label="官方仓" prop="warehouseCode" show-overflow-tooltip />
       <el-table-column label="官方数据时间" prop="capturedAt" width="170" />
       <el-table-column label="说明" prop="note" show-overflow-tooltip />
     </el-table>

@@ -14,8 +14,9 @@
       </el-form-item>
       <el-form-item label="开始日期"><el-date-picker v-model="dateRange[0]" type="date" value-format="YYYY-MM-DD" placeholder="开始" /></el-form-item>
       <el-form-item label="结束日期"><el-date-picker v-model="dateRange[1]" type="date" value-format="YYYY-MM-DD" placeholder="结束" /></el-form-item>
+      <el-form-item label="拉取页数"><el-input-number v-model="maxPages" :min="1" :max="100" style="width:110px" /></el-form-item>
       <el-form-item>
-        <el-button type="primary" icon="Search" @click="getList">查询</el-button>
+        <el-button type="primary" icon="Search" @click="handleQuery">查询</el-button>
         <el-button type="warning" icon="RefreshRight" :loading="syncing" @click="handleSync"
                    v-hasPermi="['noon:masterdata:sku:save']">从Noon拉取</el-button>
       </el-form-item>
@@ -45,27 +46,37 @@ const total = ref(0)
 const loading = ref(true)
 const syncing = ref(false)
 const dateRange = ref([])
+const maxPages = ref(5)
 const queryParams = ref({ pageNum: 1, limit: 50, siteCode: 'AE' })
 
 function getList() {
   loading.value = true
   const { pageNum, ...rest } = queryParams.value
-  listSalesItems({ ...rest, offset: (pageNum - 1) * queryParams.value.limit }).then(res => {
+  // 列表按日期筛选，与"拉取"使用同一区间，避免误以为无条件全量
+  const params = { ...rest, offset: (pageNum - 1) * queryParams.value.limit }
+  if (dateRange.value && dateRange.value.length === 2) {
+    params.fromDate = dateRange.value[0]
+    params.toDate = dateRange.value[1]
+  }
+  listSalesItems(params).then(res => {
     const p = res.data || {}
     rows.value = p.rows || []
     total.value = Number(p.total || 0)
     loading.value = false
   }).catch(() => { loading.value = false })
 }
+function handleQuery() { queryParams.value.pageNum = 1; getList() }
 function handleSync() {
   if (!dateRange.value || dateRange.value.length !== 2) { proxy.$modal.msgWarning('请选择日期区间'); return }
   proxy.$modal.confirm('将按约3秒间隔只读拉取官方Sales明细，按(站点,item_nr)幂等更新，不覆盖ERP账目。是否继续？').then(() => {
     syncing.value = true
-    syncSalesItems({ siteCode: queryParams.value.siteCode, fromDate: dateRange.value[0], toDate: dateRange.value[1], maxPages: 5 })
+    syncSalesItems({ siteCode: queryParams.value.siteCode, fromDate: dateRange.value[0], toDate: dateRange.value[1], maxPages: maxPages.value })
       .then(res => {
         syncing.value = false
-        proxy.$modal.msgSuccess(`平台${res.data?.platformRows || 0}条，写入${res.data?.writtenRows || 0}条`)
-        getList()
+        const r = res.data || {}
+        const tail = r.truncated ? '（已达页数上限，可能只同步了部分，可增大拉取页数后继续）' : ''
+        proxy.$modal.msgSuccess(`平台${r.platformRows || 0}条，写入${r.writtenRows || 0}条${tail}`)
+        handleQuery()
       }).catch(() => { syncing.value = false })
   }).catch(() => {})
 }
