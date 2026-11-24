@@ -1,6 +1,8 @@
 package com.yx.web.controller.noon;
 
 import com.yx.framework.security.site.SiteAuthGuard;
+import com.yx.noon.sync.NoonOpeningService;
+import com.yx.noon.sync.NoonSalesLinkService;
 import com.yx.noon.sync.NoonSellerLabClient;
 import com.yx.noon.sync.NoonSellerLabSyncResult;
 import com.yx.noon.sync.NoonSellerLabSyncService;
@@ -24,12 +26,17 @@ import com.yx.common.core.domain.AjaxResult;
 public class NoonSellerLabController
 {
     private final NoonSellerLabSyncService service;
+    private final NoonSalesLinkService salesLinkService;
+    private final NoonOpeningService openingService;
     private final SiteAuthGuard guard;
 
-    public NoonSellerLabController(NoonSellerLabSyncService service, SiteAuthGuard guard)
+    public NoonSellerLabController(NoonSellerLabSyncService service, SiteAuthGuard guard,
+                                   NoonSalesLinkService salesLinkService, NoonOpeningService openingService)
     {
         this.service = service;
         this.guard = guard;
+        this.salesLinkService = salesLinkService;
+        this.openingService = openingService;
     }
 
     @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
@@ -87,6 +94,64 @@ public class NoonSellerLabController
                                 @RequestParam(required = false) String toDate)
     {
         return AjaxResult.success(service.listSales(siteCode, offset, Math.min(Math.max(limit, 1), 200), fromDate, toDate));
+    }
+
+    // ===== 期初建议/确认：generate 只读；confirm 才建账，需显式确认人和真实成本 =====
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
+    @PostMapping("/opening/proposal")
+    public AjaxResult openingProposal(@RequestParam(defaultValue = "AE") String siteCode,
+                                      @RequestParam String proposalNo,
+                                      @RequestParam(required = false) String asOfDate)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        return AjaxResult.success(openingService.generate(siteCode, proposalNo, asOfDate));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
+    @PostMapping("/opening/confirm")
+    public AjaxResult openingConfirm(@RequestParam(defaultValue = "AE") String siteCode,
+                                     @RequestParam String proposalNo,
+                                     @RequestParam java.math.BigDecimal unitCost)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        String operator = org.springframework.security.core.context.SecurityContextHolder.getContext()
+                .getAuthentication() == null ? "" : org.springframework.security.core.context.SecurityContextHolder
+                .getContext().getAuthentication().getName();
+        return AjaxResult.success(openingService.confirm(siteCode, proposalNo, operator, unitCost));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
+    @PostMapping("/sales-link/refresh")
+    public AjaxResult refreshSalesLink(@RequestParam(defaultValue = "AE") String siteCode)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        return AjaxResult.success(salesLinkService.refresh(siteCode));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:save')")
+    @PostMapping("/return-evidence")
+    public AjaxResult registerReturn(@RequestParam(defaultValue = "AE") String siteCode,
+                                     @RequestParam(required = false) String itemNr,
+                                     @RequestParam String sourceReturnNo,
+                                     @RequestParam(defaultValue = "false") boolean verifiedRestockSaleable,
+                                     @RequestParam(required = false) String evidenceNote)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        return AjaxResult.success(salesLinkService.registerReturn(siteCode, itemNr, sourceReturnNo,
+                verifiedRestockSaleable, evidenceNote));
+    }
+
+    @PreAuthorize("@ss.hasPermi('noon:masterdata:sku:list')")
+    @GetMapping("/return-evidence/list")
+    public AjaxResult listReturnEvidence(@RequestParam(defaultValue = "AE") String siteCode)
+    {
+        guard.requireSite(NoonSellerLabClient.requireSite(siteCode));
+        return AjaxResult.success(jdbcReturnEvidence(siteCode));
+    }
+
+    private Object jdbcReturnEvidence(String siteCode)
+    {
+        return service.listReturnEvidence(siteCode);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

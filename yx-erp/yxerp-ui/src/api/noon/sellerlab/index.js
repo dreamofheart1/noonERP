@@ -30,3 +30,17 @@ export function syncPlatformAsn(query) {
 export function listPlatformAsn(query) {
   return request({ url: BASE + '/asn/list', method: 'get', params: query })
 }
+
+// 期初建议（只读）与确认建账（需显式成本）
+export function genOpeningProposal(query) {
+  return request({ url: BASE + '/opening/proposal', method: 'post', params: query })
+}
+export function confirmOpening(query) {
+  return request({ url: BASE + '/opening/confirm', method: 'post', params: query })
+}
+export function refreshSalesLink(siteCode) {
+  return request({ url: BASE + '/sales-link/refresh', method: 'post', params: { siteCode } })
+}
+export function listReturnEvidence(siteCode) {
+  return request({ url: BASE + '/return-evidence/list', method: 'get', params: { siteCode } })
+}

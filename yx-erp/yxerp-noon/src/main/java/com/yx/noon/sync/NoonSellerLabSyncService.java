@@ -6,6 +6,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import com.yx.framework.security.site.SiteAuthGuard;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -148,6 +149,15 @@ public class NoonSellerLabSyncService
                         rs.getString("currency_code"), rs.getString("awb_nr")),
                 pageArgs.toArray());
         return new com.yx.noon.masterdata.PageResult<>(rows, total);
+    }
+
+    /** 退货证据待核列表：PENDING/INSUFFICIENT 保持待核，不自动加库存。 */
+    public List<Map<String, Object>> listReturnEvidence(String siteCode)
+    {
+        String site = NoonSellerLabClient.requireSite(siteCode);
+        guard.requireSite(site);
+        return jdbc.queryForList("SELECT item_nr,source_return_no,status,evidence_note,synced_at "
+                + "FROM noon_return_evidence WHERE site_code=? ORDER BY synced_at DESC", site);
     }
 
     private static String ts(java.sql.Timestamp t) { return t == null ? null : t.toString(); }
